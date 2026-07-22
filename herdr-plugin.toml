@@ -1,0 +1,113 @@
+id = "herdr.omnisearch"
+name = "Herdr OmniSearch"
+version = "0.3.1"
+min_herdr_version = "0.7.5"
+description = "Fast local search across live Herdr panes and archived agent sessions"
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["bin/herdr-omnisearch", "watch-start"]
+
+[[actions]]
+id = "open-live"
+title = "Open live OmniSearch"
+command = ["bin/herdr-omnisearch", "open-plugin-pane", "live"]
+
+[[actions]]
+id = "open-archive"
+title = "Open archived session search"
+command = ["bin/herdr-omnisearch", "open-plugin-pane", "archive"]
+
+[[actions]]
+id = "refresh-live"
+title = "Refresh live OmniSearch index"
+command = ["bin/herdr-omnisearch", "index"]
+
+[[actions]]
+id = "refresh-archive"
+title = "Refresh archived session index"
+command = ["bin/herdr-omnisearch", "archive-index"]
+
+[[actions]]
+id = "watch-start"
+title = "Start live index watcher"
+command = ["bin/herdr-omnisearch", "watch-start"]
+
+[[actions]]
+id = "watch-stop"
+title = "Stop live index watcher"
+command = ["bin/herdr-omnisearch", "watch-stop"]
+
+[[actions]]
+id = "watch-status"
+title = "Show live index watcher status"
+command = ["bin/herdr-omnisearch", "watch-status"]
+
+[[actions]]
+id = "doctor"
+title = "Check OmniSearch health"
+command = ["bin/herdr-omnisearch", "doctor"]
+
+[[panes]]
+id = "live"
+title = "OmniSearch"
+placement = "overlay"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch\" pick --no-refresh --background-refresh --stale-seconds 10 --lines 500"]
+
+[[panes]]
+id = "archive"
+title = "Archive Search"
+placement = "overlay"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch\" archive-pick --no-refresh --background-refresh --stale-seconds 3600"]
+
+[[events]]
+on = "workspace.created"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "workspace.updated"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "workspace.renamed"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "workspace.closed"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "tab.created"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "tab.closed"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "tab.renamed"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "pane.created"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "pane.closed"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "pane.moved"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "pane.exited"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["bin/herdr-omnisearch", "event-refresh"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bin/herdr-omnisearch", "event-refresh"]

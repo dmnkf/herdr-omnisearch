@@ -1,0 +1,9 @@
+include README.md
+include INSTALL.md
+include LICENSE
+include CHANGELOG.md
+include config.example.ini
+include install.sh
+include herdr-plugin.toml
+recursive-include bin *
+recursive-include scripts *.sh
