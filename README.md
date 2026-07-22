@@ -1,6 +1,10 @@
 # herdr-omnisearch
 
-Fast local search and navigation for Herdr workspaces, panes, agent chats, and archived agent session logs.
+Fast local search and navigation for Herdr workspaces, panes, agent chats, and
+archived agent session logs. The name and the instant, typo-tolerant,
+just-works search feel are inspired by
+[Omnisearch for Obsidian](https://github.com/scambier/obsidian-omnisearch) —
+this is that idea applied to a terminal session instead of a vault.
 
 OmniSearch is a Herdr 0.7.5 plugin. It uses the stable `herdr agent` CLI for
 live agent identity, terminal reads, focus, and validated starts. The Herdr
@@ -8,11 +12,15 @@ socket remains responsible for workspace topology, ordinary shell panes,
 plugin panes, and event subscriptions. SQLite FTS5 remains local and owns both
 live search data and archived-session search.
 
-It keeps a private SQLite FTS5 index under:
+It keeps a private SQLite FTS5 index in Herdr's plugin state directory:
 
 ```text
-~/.local/share/herdr-omnisearch/index.sqlite3
+~/.local/state/herdr/plugins/herdr.omnisearch/index.sqlite3
 ```
+
+Standalone CLI installs without the plugin use
+`~/.local/share/herdr-omnisearch/index.sqlite3` instead; a legacy index at that
+path is migrated into the plugin state directory on first plugin use.
 
 The CLI is installed as:
 
