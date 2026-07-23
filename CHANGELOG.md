@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.6 - 2026-07-23
+
+- Parse watcher lock metadata correctly when reporting or stopping its process.
+- Use the kernel-owned watcher lock as the health-check liveness source.
+
 ## 0.3.5 - 2026-07-23
 
 - Use prefix-first live and archive keybindings as the portable installer defaults.

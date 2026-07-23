@@ -339,6 +339,7 @@ class CliTests(unittest.TestCase):
                 fd = cli.try_exclusive_lock(cli.watcher_pid_path())
                 try:
                     self.assertTrue(cli.watcher_is_running())
+                    self.assertEqual(cli.read_watcher_pid(), os.getpid())
                 finally:
                     os.close(fd)
                 self.assertFalse(cli.watcher_is_running())

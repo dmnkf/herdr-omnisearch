@@ -3175,8 +3175,9 @@ def watcher_log_path() -> Path:
 
 def read_watcher_pid() -> int:
     try:
-        return int(watcher_pid_path().read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        fields = watcher_pid_path().read_text(encoding="utf-8").split()
+        return int(fields[0])
+    except (IndexError, OSError, ValueError):
         return 0
 
 
@@ -3449,7 +3450,7 @@ def cmd_doctor(_args) -> int:
     if archive_last:
         print(f"last_archive_indexed_at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(archive_last[0])))}")
     pid = read_watcher_pid()
-    print(f"watcher: {'running ' + str(pid) if process_is_running(pid) else 'stopped'}")
+    print(f"watcher: {'running ' + str(pid) if watcher_is_running() else 'stopped'}")
     return 0
 
 
