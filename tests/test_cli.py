@@ -292,7 +292,9 @@ class CliTests(unittest.TestCase):
             self.assertFalse(db.is_symlink())
             self.assertTrue(db.is_file())
             self.assertTrue(legacy.is_symlink())
-            self.assertEqual(os.path.realpath(legacy), str(db))
+            # Resolve both sides: on macOS the temp dir sits behind the
+            # /var -> /private/var symlink.
+            self.assertEqual(os.path.realpath(legacy), os.path.realpath(db))
 
     def test_exclusive_lock_is_single_owner_and_follows_child_lifetime(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -561,7 +563,9 @@ class CliTests(unittest.TestCase):
                 migrated = cli.db_path()
             self.assertEqual(migrated, state / "index.sqlite3")
             self.assertTrue(legacy.is_symlink())
-            self.assertEqual(legacy.resolve(), migrated)
+            # Resolve both sides: on macOS the temp dir sits behind the
+            # /var -> /private/var symlink.
+            self.assertEqual(legacy.resolve(), migrated.resolve())
             conn = sqlite3.connect(migrated)
             try:
                 self.assertEqual(conn.execute("SELECT content FROM docs").fetchone()[0], "preserved")
