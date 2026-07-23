@@ -224,11 +224,39 @@ def data_dir() -> Path:
     else:
         installed = installed_plugin_state_dir()
         path = installed if installed.is_dir() else legacy_data_dir()
-    path.mkdir(parents=True, exist_ok=True)
+    return ensure_private_directory(path, "plugin state")
+
+
+def ensure_private_directory(
+    path: Path,
+    purpose: str,
+    *,
+    repair_existing_permissions: bool = True,
+) -> Path:
+    path = path.expanduser()
+    existed = path.exists()
     try:
-        path.chmod(0o700)
-    except OSError:
-        pass
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise sqlite3.OperationalError(
+            f"cannot create {purpose} directory {path}: {exc}"
+        ) from exc
+    if not path.is_dir():
+        raise sqlite3.OperationalError(
+            f"{purpose} path is not a directory: {path}"
+        )
+    if repair_existing_permissions or not existed:
+        try:
+            path.chmod(0o700)
+        except OSError as exc:
+            if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+                raise sqlite3.OperationalError(
+                    f"cannot make {purpose} directory private and writable {path}: {exc}"
+                ) from exc
+    if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+        raise sqlite3.OperationalError(
+            f"{purpose} directory is not readable, writable, and searchable: {path}"
+        )
     return path
 
 
@@ -253,6 +281,62 @@ def db_path() -> Path:
     legacy = legacy_data_dir() / "index.sqlite3"
     if path != legacy and legacy.exists() and not legacy.is_symlink():
         migrate_legacy_db(legacy, path)
+    return path
+
+
+def prepare_database_path(path: Path) -> Path:
+    path = path.expanduser()
+    ensure_private_directory(
+        path.parent,
+        "database parent",
+        repair_existing_permissions=False,
+    )
+
+    if path.is_symlink() and not path.exists():
+        raise sqlite3.OperationalError(f"database path is a broken symlink: {path}")
+    if path.exists() and not path.is_file():
+        raise sqlite3.OperationalError(f"database path is not a regular file: {path}")
+
+    if not path.exists():
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        except FileExistsError:
+            # Another event hook may have won the first-start creation race.
+            pass
+        except OSError as exc:
+            raise sqlite3.OperationalError(
+                f"cannot create database file {path}: {exc}"
+            ) from exc
+        else:
+            os.close(fd)
+
+    for candidate in (
+        path,
+        Path(str(path) + "-wal"),
+        Path(str(path) + "-shm"),
+    ):
+        if candidate.is_symlink() and not candidate.exists():
+            raise sqlite3.OperationalError(
+                f"database sidecar path is a broken symlink: {candidate}"
+            )
+        if not candidate.exists():
+            continue
+        if not candidate.is_file():
+            raise sqlite3.OperationalError(
+                f"database path is not a regular file: {candidate}"
+            )
+        try:
+            candidate.chmod(0o600)
+        except OSError as exc:
+            if not os.access(candidate, os.R_OK | os.W_OK):
+                raise sqlite3.OperationalError(
+                    f"cannot make database file private and writable {candidate}: {exc}"
+                ) from exc
+
+    if not os.access(path, os.R_OK | os.W_OK):
+        raise sqlite3.OperationalError(
+            f"database file is not readable and writable: {path}"
+        )
     return path
 
 
@@ -342,17 +426,21 @@ def herdr_bin() -> str:
 
 
 def connect():
-    path = db_path()
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    init_schema(conn)
+    path = prepare_database_path(db_path())
+    conn = None
     try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-    return conn
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        init_schema(conn)
+        return conn
+    except sqlite3.Error as exc:
+        if conn is not None:
+            conn.close()
+        raise sqlite3.OperationalError(
+            f"cannot initialize database {path}: {exc}"
+        ) from exc
 
 
 def init_schema(conn):

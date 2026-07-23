@@ -238,6 +238,64 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(cli.config_dir(), Path(config))
                 self.assertEqual(cli.data_dir(), Path(state))
 
+    def test_connect_creates_missing_private_database_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "missing" / "state"
+            db = state / "index.sqlite3"
+            with patch.dict(
+                os.environ,
+                {
+                    "HERDR_PLUGIN_STATE_DIR": str(state),
+                    "HERDR_OMNISEARCH_DB": "",
+                },
+                clear=False,
+            ):
+                conn = cli.connect()
+                conn.close()
+
+            self.assertTrue(db.is_file())
+            self.assertEqual(db.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(db.stat().st_mode & 0o777, 0o600)
+
+    def test_connect_repairs_database_permissions_before_sqlite_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            db = state / "index.sqlite3"
+            state.mkdir()
+            db.touch(mode=0o000)
+            state.chmod(0o500)
+            sqlite_connect = sqlite3.connect
+
+            def connect_after_repair(path, *args, **kwargs):
+                self.assertEqual(Path(path).parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(Path(path).stat().st_mode & 0o777, 0o600)
+                return sqlite_connect(path, *args, **kwargs)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "HERDR_PLUGIN_STATE_DIR": str(state),
+                    "HERDR_OMNISEARCH_DB": "",
+                },
+                clear=False,
+            ), patch.object(cli.sqlite3, "connect", side_effect=connect_after_repair):
+                conn = cli.connect()
+                conn.close()
+
+            self.assertEqual(db.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(db.stat().st_mode & 0o777, 0o600)
+
+    def test_connect_rejects_non_file_database_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "index.sqlite3"
+            db.mkdir()
+            with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(db)}, clear=False):
+                with self.assertRaisesRegex(
+                    sqlite3.OperationalError,
+                    "database path is not a regular file",
+                ):
+                    cli.connect()
+
     def test_direct_cli_reuses_installed_plugin_config_and_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

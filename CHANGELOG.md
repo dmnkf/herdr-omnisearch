@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 - 2026-07-23
+
+- Create missing plugin-state parent directories before opening SQLite.
+- Repair private directory, database, and SQLite sidecar permissions before use.
+- Report broken links and invalid database paths with actionable diagnostics.
+- Preserve existing database content during state repair.
+
 ## 0.3.1 - 2026-07-23
 
 - Initial public release.

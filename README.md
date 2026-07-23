@@ -45,7 +45,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To pin this release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.3.1
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.3.2
 ```
 
 For a local checkout:
