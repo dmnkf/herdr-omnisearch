@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.4 - 2026-07-23
+
+- Serialize the first-start database migration with a file lock and repair
+  self-referential index symlinks left behind by interrupted migrations.
+- Replace stale-lock heuristics for background indexing and the watcher with
+  kernel-owned locks that release automatically when their process exits.
+- Run CI on macOS in addition to Linux.
+
 ## 0.3.3 - 2026-07-23
 
 - Force managed live and archive panes to use the native interactive picker.
