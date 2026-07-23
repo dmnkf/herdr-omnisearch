@@ -2400,7 +2400,7 @@ def pick(args) -> int:
             print(f"indexed {count} chunks", file=sys.stderr)
     elif args.background_refresh:
         maybe_background_index(args.lines, args.include_empty, args.include_wrappers, args.stale_seconds)
-    if not args.fzf and sys.stdin.isatty() and sys.stdout.isatty():
+    if args.native or (not args.fzf and sys.stdin.isatty() and sys.stdout.isatty()):
         return curses.wrapper(lambda stdscr: curses_picker(stdscr, args))
     return fzf_picker(args)
 
@@ -2413,7 +2413,7 @@ def archive_pick(args) -> int:
             print(f"indexed {sessions} archived sessions / {chunks} chunks", file=sys.stderr)
     elif args.background_refresh:
         maybe_background_archive_index(args.agents, args.max_files, args.since_days, args.stale_seconds)
-    if not args.fzf and sys.stdin.isatty() and sys.stdout.isatty():
+    if args.native or (not args.fzf and sys.stdin.isatty() and sys.stdout.isatty()):
         return curses.wrapper(lambda stdscr: curses_picker(stdscr, args))
     return fzf_picker(args)
 
@@ -3453,7 +3453,9 @@ def main(argv=None) -> int:
     p.add_argument("--stale-seconds", type=int, default=10)
     p.add_argument("--include-empty", action="store_true")
     p.add_argument("--include-wrappers", action="store_true")
-    p.add_argument("--fzf", action="store_true", help="use fzf instead of the native picker")
+    picker = p.add_mutually_exclusive_group()
+    picker.add_argument("--native", action="store_true", help="force the native terminal picker")
+    picker.add_argument("--fzf", action="store_true", help="use fzf instead of the native picker")
     p.add_argument("--verbose", action="store_true")
     p.set_defaults(func=pick)
 
@@ -3468,7 +3470,9 @@ def main(argv=None) -> int:
     p.add_argument("--no-refresh", dest="refresh", action="store_false")
     p.add_argument("--background-refresh", action="store_true")
     p.add_argument("--stale-seconds", type=int, default=3600)
-    p.add_argument("--fzf", action="store_true", help="use fzf instead of the native picker")
+    picker = p.add_mutually_exclusive_group()
+    picker.add_argument("--native", action="store_true", help="force the native terminal picker")
+    picker.add_argument("--fzf", action="store_true", help="use fzf instead of the native picker")
     p.add_argument("--verbose", action="store_true")
     p.set_defaults(func=archive_pick)
 

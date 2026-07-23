@@ -101,6 +101,24 @@ class CliTests(unittest.TestCase):
         self.assertIn('id = "open-live"', manifest)
         self.assertIn('on = "pane.created"', manifest)
         self.assertIn('$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch', manifest)
+        self.assertEqual(manifest.count("--native"), 2)
+
+    def test_managed_picker_can_force_native_mode_without_tty_detection(self):
+        args = Namespace(
+            refresh=False,
+            background_refresh=False,
+            native=True,
+            fzf=False,
+        )
+        with patch.object(cli.sys.stdin, "isatty", return_value=False), patch.object(
+            cli.sys.stdout, "isatty", return_value=False
+        ), patch.object(cli.curses, "wrapper", return_value=0) as wrapper, patch.object(
+            cli, "fzf_picker"
+        ) as fzf_picker:
+            self.assertEqual(cli.pick(args), 0)
+
+        wrapper.assert_called_once()
+        fzf_picker.assert_not_called()
 
     def test_index_uses_native_agent_identity_and_read(self):
         with tempfile.TemporaryDirectory() as tmp:

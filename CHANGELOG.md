@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3 - 2026-07-23
+
+- Force managed live and archive panes to use the native interactive picker.
+- Avoid immediate overlay exit when terminal capability detection selects noninteractive mode.
+
 ## 0.3.2 - 2026-07-23
 
 - Create missing plugin-state parent directories before opening SQLite.
