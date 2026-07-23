@@ -1069,6 +1069,56 @@ def release_index_lock():
         pass
 
 
+def try_exclusive_lock(path: Path):
+    """Take a non-blocking exclusive flock on path.
+
+    Returns an open file descriptor on success or None when another process
+    holds the lock. The lock lives until every descriptor for it is closed,
+    so it follows the owning process (or a child that inherits the fd) and
+    can never go stale.
+    """
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()} {int(time.time())}\n".encode("utf-8"))
+    return fd
+
+
+def lock_is_held(path: Path) -> bool:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
+def spawn_locked_background(cmd, lock_fd) -> None:
+    # The child inherits lock_fd, so the flock is held for its whole
+    # lifetime and releases automatically when it exits or crashes.
+    try:
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=os.environ.copy(),
+            start_new_session=True,
+            pass_fds=(lock_fd,),
+        )
+    finally:
+        os.close(lock_fd)
+
+
 def maybe_background_index(lines: int, include_empty: bool, include_wrappers: bool, stale_seconds: int):
     conn = connect()
     try:
@@ -1081,14 +1131,8 @@ def maybe_background_index(lines: int, include_empty: bool, include_wrappers: bo
     if doc_count and int(time.time()) - last_indexed < stale_seconds:
         return
 
-    lock = data_dir() / "index.lock"
-    try:
-        if lock.exists() and time.time() - lock.stat().st_mtime > 60:
-            lock.unlink()
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            handle.write(f"{os.getpid()} {int(time.time())}\n")
-    except OSError:
+    lock_fd = try_exclusive_lock(data_dir() / "index.lock")
+    if lock_fd is None:
         return
 
     cmd = [*cli_command(), "index", "--lines", str(lines)]
@@ -1096,16 +1140,7 @@ def maybe_background_index(lines: int, include_empty: bool, include_wrappers: bo
         cmd.append("--include-empty")
     if include_wrappers:
         cmd.append("--include-wrappers")
-    env = os.environ.copy()
-    env["HERDR_OMNISEARCH_LOCK"] = str(lock)
-    subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-        start_new_session=True,
-    )
+    spawn_locked_background(cmd, lock_fd)
 
 
 def clip_text(value: str, limit: int = 5000) -> str:
@@ -1501,14 +1536,8 @@ def maybe_background_archive_index(agents: str, max_files, since_days, stale_sec
     if doc_count and int(time.time()) - last_indexed < stale_seconds:
         return
 
-    lock = data_dir() / "archive-index.lock"
-    try:
-        if lock.exists() and time.time() - lock.stat().st_mtime > 300:
-            lock.unlink()
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            handle.write(f"{os.getpid()} {int(time.time())}\n")
-    except OSError:
+    lock_fd = try_exclusive_lock(data_dir() / "archive-index.lock")
+    if lock_fd is None:
         return
 
     cmd = [*cli_command(), "archive-index", "--agents", agents]
@@ -1516,16 +1545,7 @@ def maybe_background_archive_index(agents: str, max_files, since_days, stale_sec
         cmd.extend(["--max-files", str(max_files)])
     if since_days is not None:
         cmd.extend(["--since-days", str(since_days)])
-    env = os.environ.copy()
-    env["HERDR_OMNISEARCH_LOCK"] = str(lock)
-    subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-        start_new_session=True,
-    )
+    spawn_locked_background(cmd, lock_fd)
 
 
 def parse_filters(query: str):
@@ -3203,13 +3223,17 @@ def watcher_subscriptions(snapshot):
     return subscriptions
 
 
+def watcher_is_running() -> bool:
+    return lock_is_held(watcher_pid_path())
+
+
 def watch_live_index(lines: int, debounce: float) -> int:
-    pid_path = watcher_pid_path()
-    existing = read_watcher_pid()
-    if existing and existing != os.getpid() and process_is_running(existing):
-        print(f"watcher already running: {existing}")
+    # The flock outlives any crash, so liveness never depends on stale pid
+    # contents; the pid is only written for status messages and watch-stop.
+    lock_fd = try_exclusive_lock(watcher_pid_path())
+    if lock_fd is None:
+        print(f"watcher already running: {read_watcher_pid()}")
         return 0
-    pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
     retry_delay = 1.0
     try:
         while True:
@@ -3247,8 +3271,7 @@ def watch_live_index(lines: int, debounce: float) -> int:
                 time.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 30.0)
     finally:
-        if read_watcher_pid() == os.getpid():
-            pid_path.unlink(missing_ok=True)
+        os.close(lock_fd)
 
 
 def cmd_watch(args) -> int:
@@ -3256,11 +3279,9 @@ def cmd_watch(args) -> int:
 
 
 def cmd_watch_start(args) -> int:
-    pid = read_watcher_pid()
-    if process_is_running(pid):
-        print(f"watcher running: {pid}")
+    if watcher_is_running():
+        print(f"watcher running: {read_watcher_pid()}")
         return 0
-    watcher_pid_path().unlink(missing_ok=True)
     command = [*cli_command(), "watch", "--lines", str(args.lines), "--debounce", str(args.debounce)]
     env = os.environ.copy()
     with watcher_log_path().open("ab") as log:
@@ -3273,8 +3294,8 @@ def cmd_watch_start(args) -> int:
             start_new_session=True,
         )
     for _ in range(20):
-        if read_watcher_pid() == proc.pid and process_is_running(proc.pid):
-            print(f"watcher started: {proc.pid}")
+        if watcher_is_running():
+            print(f"watcher started: {read_watcher_pid()}")
             return 0
         if proc.poll() is not None:
             break
@@ -3284,15 +3305,14 @@ def cmd_watch_start(args) -> int:
 
 
 def cmd_watch_stop(_args) -> int:
-    pid = read_watcher_pid()
-    if not process_is_running(pid):
-        watcher_pid_path().unlink(missing_ok=True)
+    if not watcher_is_running():
         print("watcher stopped")
         return 0
-    os.kill(pid, 15)
+    pid = read_watcher_pid()
+    if pid:
+        os.kill(pid, 15)
     for _ in range(40):
-        if not process_is_running(pid):
-            watcher_pid_path().unlink(missing_ok=True)
+        if not watcher_is_running():
             print("watcher stopped")
             return 0
         time.sleep(0.05)
@@ -3301,16 +3321,15 @@ def cmd_watch_stop(_args) -> int:
 
 
 def cmd_watch_status(_args) -> int:
-    pid = read_watcher_pid()
-    if process_is_running(pid):
-        print(f"watcher running: {pid}")
+    if watcher_is_running():
+        print(f"watcher running: {read_watcher_pid()}")
         return 0
     print("watcher stopped")
     return 1
 
 
 def cmd_event_refresh(_args) -> int:
-    if process_is_running(read_watcher_pid()):
+    if watcher_is_running():
         return 0
     maybe_background_index(DEFAULT_LINES, False, False, stale_seconds=2)
     return 0

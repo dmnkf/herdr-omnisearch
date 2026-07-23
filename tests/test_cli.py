@@ -294,6 +294,49 @@ class CliTests(unittest.TestCase):
             self.assertTrue(legacy.is_symlink())
             self.assertEqual(os.path.realpath(legacy), str(db))
 
+    def test_exclusive_lock_is_single_owner_and_follows_child_lifetime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "index.lock"
+            fd = cli.try_exclusive_lock(lock)
+            self.assertIsNotNone(fd)
+            self.assertTrue(cli.lock_is_held(lock))
+            self.assertIsNone(cli.try_exclusive_lock(lock))
+
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                pass_fds=(fd,),
+            )
+            try:
+                os.close(fd)
+                # The child inherited the descriptor, so the lock survives the
+                # parent closing its copy.
+                self.assertTrue(cli.lock_is_held(lock))
+                self.assertIsNone(cli.try_exclusive_lock(lock))
+            finally:
+                child.terminate()
+                child.wait()
+            self.assertFalse(cli.lock_is_held(lock))
+            fd = cli.try_exclusive_lock(lock)
+            self.assertIsNotNone(fd)
+            os.close(fd)
+
+    def test_watcher_liveness_uses_lock_not_pid_contents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            state.mkdir()
+            with patch.dict(
+                os.environ, {"HERDR_PLUGIN_STATE_DIR": str(state)}, clear=False
+            ):
+                # A stale pid file without a lock holder must read as stopped.
+                cli.watcher_pid_path().write_text("999999999\n", encoding="utf-8")
+                self.assertFalse(cli.watcher_is_running())
+                fd = cli.try_exclusive_lock(cli.watcher_pid_path())
+                try:
+                    self.assertTrue(cli.watcher_is_running())
+                finally:
+                    os.close(fd)
+                self.assertFalse(cli.watcher_is_running())
+
     def test_archive_launcher_can_be_configured_for_shell_wrappers(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.ini"

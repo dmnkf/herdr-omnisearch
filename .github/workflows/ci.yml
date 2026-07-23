@@ -9,10 +9,19 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.9", "3.13"]
+        exclude:
+          # actions/setup-python has no CPython 3.9 build for Apple Silicon.
+          - os: macos-latest
+            python-version: "3.9"
+        include:
+          - os: macos-13
+            python-version: "3.9"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
