@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -201,6 +202,97 @@ class CliTests(unittest.TestCase):
         with patch.object(cli, "app_config", return_value=config):
             with self.assertRaisesRegex(RuntimeError, "launcher = shell"):
                 cli.archive_agent_start(row, "w1:p1", ["hapi", "codex", "resume"])
+
+    def _seed_database(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(path)}, clear=False):
+            conn = cli.connect()
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO archive_sessions (
+                        session_key, agent, session_id, space_label, title, cwd, path,
+                        started_at, updated_at, indexed_at
+                    )
+                    VALUES ('codex:s1', 'codex', 's1', '', 'seed', '', '/tmp/s1', '', '', 0)
+                    """
+                )
+            conn.close()
+
+    def test_db_path_repairs_self_referential_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            state.mkdir()
+            db = state / "index.sqlite3"
+            db.symlink_to(db)
+            Path(str(db) + "-wal").symlink_to(Path(str(db) + "-wal"))
+            with patch.dict(
+                os.environ,
+                {"HERDR_PLUGIN_STATE_DIR": str(state), "XDG_DATA_HOME": str(Path(tmp) / "share")},
+                clear=False,
+            ):
+                os.environ.pop("HERDR_OMNISEARCH_DB", None)
+                conn = cli.connect()
+                conn.close()
+            self.assertTrue(db.is_file())
+            self.assertFalse(db.is_symlink())
+
+    def test_db_path_restores_newest_failed_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            state.mkdir()
+            backup = state / "index.sqlite3.failed-1700000000"
+            self._seed_database(backup)
+            db = state / "index.sqlite3"
+            db.symlink_to(db)
+            with patch.dict(
+                os.environ,
+                {"HERDR_PLUGIN_STATE_DIR": str(state), "XDG_DATA_HOME": str(Path(tmp) / "share")},
+                clear=False,
+            ):
+                os.environ.pop("HERDR_OMNISEARCH_DB", None)
+                path = cli.db_path()
+            self.assertTrue(path.is_file())
+            self.assertTrue(cli.database_has_index_data(path))
+            self.assertFalse(backup.exists())
+
+    def test_concurrent_first_start_migration_is_safe(self):
+        # The corruption needs an empty legacy database: with no index data the
+        # losing process used to move the fresh database aside and rename the
+        # compatibility symlink over it, leaving a self-referential link.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            share = Path(tmp) / "share"
+            legacy = share / "herdr-omnisearch" / "index.sqlite3"
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(legacy)}, clear=False):
+                cli.connect().close()
+            child_env = {
+                key: value
+                for key, value in os.environ.items()
+                if key != "HERDR_OMNISEARCH_DB"
+            }
+            child_env["HERDR_PLUGIN_STATE_DIR"] = str(state)
+            child_env["XDG_DATA_HOME"] = str(share)
+            code = (
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "from herdr_omnisearch import cli; cli.connect().close()"
+            )
+            workers = [
+                subprocess.Popen(
+                    [sys.executable, "-c", code, str(SRC)],
+                    env=child_env,
+                    stderr=subprocess.PIPE,
+                )
+                for _ in range(12)
+            ]
+            failures = [worker.communicate()[1] for worker in workers if worker.wait() != 0]
+            self.assertEqual(failures, [])
+            db = state / "index.sqlite3"
+            self.assertFalse(db.is_symlink())
+            self.assertTrue(db.is_file())
+            self.assertTrue(legacy.is_symlink())
+            self.assertEqual(os.path.realpath(legacy), str(db))
 
     def test_archive_launcher_can_be_configured_for_shell_wrappers(self):
         with tempfile.TemporaryDirectory() as tmp:

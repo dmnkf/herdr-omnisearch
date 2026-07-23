@@ -4,6 +4,7 @@ import base64
 import configparser
 import curses
 import errno
+import fcntl
 import glob
 import hashlib
 import json
@@ -279,9 +280,42 @@ def db_path() -> Path:
         return Path(override)
     path = data_dir() / "index.sqlite3"
     legacy = legacy_data_dir() / "index.sqlite3"
-    if path != legacy and legacy.exists() and not legacy.is_symlink():
-        migrate_legacy_db(legacy, path)
+    if needs_database_repair(path, legacy):
+        # Startup, event hooks, and panes can all hit the first-start
+        # migration at once; only the lock holder may move files around.
+        lock_fd = os.open(path.parent / "migrate.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            repair_database_path(path)
+            if path != legacy and legacy.exists() and not legacy.is_symlink():
+                migrate_legacy_db(legacy, path)
+        finally:
+            os.close(lock_fd)
     return path
+
+
+def needs_database_repair(path: Path, legacy: Path) -> bool:
+    if path.is_symlink() and not path.exists():
+        return True
+    return path != legacy and legacy.exists() and not legacy.is_symlink()
+
+
+def repair_database_path(path: Path) -> None:
+    # A dangling or self-referential symlink here is debris from an
+    # interrupted legacy migration; is_symlink + not exists covers both.
+    if path.is_symlink() and not path.exists():
+        path.unlink()
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(path) + suffix)
+            if sidecar.is_symlink() and not sidecar.exists():
+                sidecar.unlink()
+    if path.exists():
+        return
+    backups = sorted(path.parent.glob(path.name + ".failed-*"), reverse=True)
+    for backup in backups:
+        if backup.is_file() and database_has_index_data(backup):
+            os.replace(backup, path)
+            return
 
 
 def prepare_database_path(path: Path) -> Path:
@@ -361,6 +395,10 @@ def database_has_index_data(path: Path) -> bool:
 
 
 def migrate_legacy_db(legacy: Path, path: Path) -> None:
+    if legacy.is_symlink() or not legacy.is_file():
+        # Another process already migrated (or the source vanished); moving a
+        # symlink over the real database would corrupt it.
+        return
     if path.exists() and database_has_index_data(path):
         return
     if path.exists():
@@ -389,7 +427,10 @@ def migrate_legacy_db(legacy: Path, path: Path) -> None:
         legacy.unlink()
 
     legacy.parent.mkdir(parents=True, exist_ok=True)
-    legacy.symlink_to(path)
+    try:
+        legacy.symlink_to(path)
+    except FileExistsError:
+        pass
     for suffix in ("-wal", "-shm"):
         old = Path(str(legacy) + suffix)
         new = Path(str(path) + suffix)
