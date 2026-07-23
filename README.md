@@ -45,8 +45,29 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To pin this release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.3.4
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.3.5
 ```
+
+Herdr plugin manifests do not modify user keybindings. The portable recommended
+bindings are:
+
+```toml
+[[keys.command]]
+key = "prefix+o"
+type = "plugin_action"
+command = "herdr.omnisearch.open-live"
+description = "OmniSearch"
+
+[[keys.command]]
+key = "prefix+shift+o"
+type = "plugin_action"
+command = "herdr.omnisearch.open-archive"
+description = "ArchiveSearch"
+```
+
+Add that block to `~/.config/herdr/config.toml`, then run
+`herdr server reload-config`. On macOS, `cmd+o` and `cmd+shift+o` can be used
+instead when the terminal forwards those chords to Herdr.
 
 For a local checkout:
 
@@ -58,7 +79,8 @@ The default install is offline-friendly. It links this checkout as
 `herdr.omnisearch`, creates a `~/.local/bin/herdr-omnisearch` wrapper, atomically
 moves the existing local index into Herdr's plugin state directory on first use,
 starts the event watcher, and installs plugin-action bindings for the live and
-archive pickers.
+archive pickers. The local installer defaults to `prefix+o` and
+`prefix+shift+o`.
 
 See [INSTALL.md](INSTALL.md) for the full second-VM flow and available flags.
 

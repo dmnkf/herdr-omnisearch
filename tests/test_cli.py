@@ -286,7 +286,11 @@ class CliTests(unittest.TestCase):
                 )
                 for _ in range(12)
             ]
-            failures = [worker.communicate()[1] for worker in workers if worker.wait() != 0]
+            failures = []
+            for worker in workers:
+                _stdout, stderr = worker.communicate()
+                if worker.returncode != 0:
+                    failures.append(stderr)
             self.assertEqual(failures, [])
             db = state / "index.sqlite3"
             self.assertFalse(db.is_symlink())
@@ -392,6 +396,48 @@ class CliTests(unittest.TestCase):
             ):
                 self.assertEqual(cli.config_dir(), Path(config))
                 self.assertEqual(cli.data_dir(), Path(state))
+
+    def test_installer_uses_prefix_defaults_and_accepts_command_key_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "herdr.toml"
+            command = [
+                str(ROOT / "install.sh"),
+                "--bin-dir",
+                str(root / "bin"),
+                "--config",
+                str(root / "omnisearch.ini"),
+                "--herdr-config",
+                str(config),
+                "--herdr-bin",
+                "true",
+                "--no-plugin",
+            ]
+            env = os.environ.copy()
+            env["HOME"] = str(root / "home")
+            subprocess.run(command, env=env, check=True, capture_output=True, text=True)
+
+            text = config.read_text(encoding="utf-8")
+            self.assertIn('key = "prefix+o"', text)
+            self.assertIn('key = "prefix+shift+o"', text)
+
+            subprocess.run(
+                command + [
+                    "--live-key",
+                    "cmd+o",
+                    "--archive-key",
+                    "cmd+shift+o",
+                ],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            text = config.read_text(encoding="utf-8")
+            self.assertEqual(text.count("# BEGIN herdr-omnisearch"), 1)
+            self.assertIn('key = "cmd+o"', text)
+            self.assertIn('key = "cmd+shift+o"', text)
+            self.assertNotIn('key = "prefix+o"', text)
 
     def test_connect_creates_missing_private_database_tree(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5 - 2026-07-23
+
+- Use prefix-first live and archive keybindings as the portable installer defaults.
+- Add explicit installer overrides for direct macOS command-key bindings.
+- Document the manual keybinding step required after a managed GitHub install.
+
 ## 0.3.4 - 2026-07-23
 
 - Serialize the first-start database migration with a file lock and repair

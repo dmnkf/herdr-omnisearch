@@ -18,6 +18,8 @@ Options:
   --herdr-config PATH      Herdr config to patch with command keybindings.
                            Default: ~/.config/herdr/config.toml
   --herdr-bin COMMAND      Herdr binary for OmniSearch config. Default: herdr
+  --live-key KEY           Live picker binding. Default: prefix+o
+  --archive-key KEY        Archive picker binding. Default: prefix+shift+o
   --no-keybindings         Do not patch Herdr keybindings.
   --no-plugin              Do not link this checkout as a Herdr plugin.
   --no-watcher             Do not start the event-driven live index watcher.
@@ -54,6 +56,8 @@ CONFIG_BASE=${XDG_CONFIG_HOME:-"$HOME/.config"}
 CONFIG_FILE=${HERDR_OMNISEARCH_CONFIG:-"$CONFIG_BASE/herdr-omnisearch/config.ini"}
 HERDR_CONFIG=${HERDR_CONFIG_PATH:-"$CONFIG_BASE/herdr/config.toml"}
 HERDR_BIN=${HERDR_BIN:-herdr}
+LIVE_KEY=${HERDR_OMNISEARCH_LIVE_KEY:-prefix+o}
+ARCHIVE_KEY=${HERDR_OMNISEARCH_ARCHIVE_KEY:-prefix+shift+o}
 INSTALL_KEYBINDINGS=1
 INSTALL_PLUGIN=1
 START_WATCHER=1
@@ -89,6 +93,16 @@ while [ $# -gt 0 ]; do
         --herdr-bin)
             need_value "$@"
             HERDR_BIN=$2
+            shift 2
+            ;;
+        --live-key)
+            need_value "$@"
+            LIVE_KEY=$2
+            shift 2
+            ;;
+        --archive-key)
+            need_value "$@"
+            ARCHIVE_KEY=$2
             shift 2
             ;;
         --no-keybindings)
@@ -193,29 +207,35 @@ install_keybindings() {
         return 0
     fi
     if [ "$DRY_RUN" -eq 1 ]; then
-        say "would patch Herdr keybindings: $HERDR_CONFIG"
+        say "would patch Herdr keybindings: $HERDR_CONFIG ($LIVE_KEY, $ARCHIVE_KEY)"
         return
     fi
-    "$PYTHON" - "$HERDR_CONFIG" <<'PY'
+    "$PYTHON" - "$HERDR_CONFIG" "$LIVE_KEY" "$ARCHIVE_KEY" <<'PY'
 from pathlib import Path
 import re
 import sys
 
 config = Path(sys.argv[1]).expanduser()
+live_key = sys.argv[2]
+archive_key = sys.argv[3]
 config.parent.mkdir(parents=True, exist_ok=True)
 text = config.read_text(encoding="utf-8") if config.exists() else ""
+
+def toml_string(value):
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
 
 block = "\n".join(
     [
         "# BEGIN herdr-omnisearch",
         '[[keys.command]]',
-        'key = "cmd+o"',
+        f'key = {toml_string(live_key)}',
         'type = "plugin_action"',
         'command = "herdr.omnisearch.open-live"',
         'description = "OmniSearch"',
         "",
         '[[keys.command]]',
-        'key = "cmd+shift+o"',
+        f'key = {toml_string(archive_key)}',
         'type = "plugin_action"',
         'command = "herdr.omnisearch.open-archive"',
         'description = "ArchiveSearch"',
@@ -296,5 +316,5 @@ say "Done."
 say "Make sure $BIN_DIR is on PATH, then run:"
 say "  herdr-omnisearch doctor"
 if [ "$INSTALL_KEYBINDINGS" -eq 1 ]; then
-    say "cmd+o and cmd+shift+o now open managed OmniSearch plugin panes."
+    say "$LIVE_KEY and $ARCHIVE_KEY now open managed OmniSearch plugin panes."
 fi

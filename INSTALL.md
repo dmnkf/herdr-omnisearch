@@ -6,8 +6,27 @@ The supported public installation path is:
 herdr plugin install dmnkf/herdr-omnisearch
 ```
 
-Use `--ref v0.3.4` to pin this release. The plugin has no runtime
+Use `--ref v0.3.5` to pin this release. The plugin has no runtime
 dependency outside Python 3.9+ and the `herdr` command.
+
+GitHub plugin installation does not modify `~/.config/herdr/config.toml`. Add
+the portable default bindings explicitly:
+
+```toml
+[[keys.command]]
+key = "prefix+o"
+type = "plugin_action"
+command = "herdr.omnisearch.open-live"
+description = "OmniSearch"
+
+[[keys.command]]
+key = "prefix+shift+o"
+type = "plugin_action"
+command = "herdr.omnisearch.open-archive"
+description = "ArchiveSearch"
+```
+
+Reload them with `herdr server reload-config`.
 
 ## Local or offline installation
 
@@ -74,8 +93,14 @@ herdr-omnisearch watch-status
 The default keybindings are:
 
 ```text
-cmd+o        live OmniSearch picker
-cmd+shift+o  archive search picker
+prefix+o        live OmniSearch picker
+prefix+shift+o  archive search picker
+```
+
+To use direct macOS chords instead:
+
+```bash
+./install.sh --live-key cmd+o --archive-key cmd+shift+o
 ```
 
 ## Offline install
