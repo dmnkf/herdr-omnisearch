@@ -20,7 +20,8 @@ jobs:
           - os: macos-latest
             python-version: "3.9"
         include:
-          - os: macos-13
+          # CPython 3.9 needs an Intel runner; there is no arm64 build.
+          - os: macos-15-intel
             python-version: "3.9"
     steps:
       - uses: actions/checkout@v4
