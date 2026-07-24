@@ -300,6 +300,61 @@ class CliTests(unittest.TestCase):
             # /var -> /private/var symlink.
             self.assertEqual(os.path.realpath(legacy), os.path.realpath(db))
 
+    def test_two_sessions_share_the_index_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "index.sqlite3"
+            sock_a = str(Path(tmp) / "a" / "herdr.sock")
+            sock_b = str(Path(tmp) / "b" / "herdr.sock")
+            with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(db)}, clear=False):
+                with patch.object(cli, "HerdrClient", FakeHerdrClient), patch.object(
+                    cli, "HerdrCLI", FakeHerdrCLI
+                ):
+                    with patch.dict(os.environ, {"HERDR_SOCKET_PATH": sock_a}, clear=False):
+                        count_a = cli.index_session(50, False, False)
+                    with patch.dict(os.environ, {"HERDR_SOCKET_PATH": sock_b}, clear=False):
+                        cli.index_session(50, False, False)
+                        # Re-indexing one session replaces its own rows only.
+                        cli.index_session(50, False, False)
+
+                conn = sqlite3.connect(db)
+                try:
+                    sessions = {
+                        row[0]: row[1]
+                        for row in conn.execute(
+                            "SELECT herdr_session, COUNT(*) FROM docs GROUP BY herdr_session"
+                        )
+                    }
+                    total = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+                    distinct_ids = conn.execute(
+                        "SELECT COUNT(DISTINCT stable_id) FROM docs"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+
+                self.assertEqual(len(sessions), 2)
+                self.assertEqual(set(sessions.values()), {count_a})
+                self.assertEqual(total, distinct_ids)
+
+                with patch.dict(os.environ, {"HERDR_SOCKET_PATH": sock_a}, clear=False):
+                    mine = cli.search_index("indexed", 20)
+                    everything = cli.search_index("indexed", 20, all_sessions=True)
+                self.assertTrue(mine)
+                self.assertTrue(all(row["socket_path"] == sock_a for row in mine))
+                self.assertEqual(len(everything), len(mine) * 2)
+
+    def test_watcher_and_index_locks_are_per_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            state.mkdir()
+            sock_a = str(Path(tmp) / "a" / "herdr.sock")
+            sock_b = str(Path(tmp) / "b" / "herdr.sock")
+            with patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": str(state)}, clear=False):
+                with patch.dict(os.environ, {"HERDR_SOCKET_PATH": sock_a}, clear=False):
+                    pid_a = cli.watcher_pid_path()
+                with patch.dict(os.environ, {"HERDR_SOCKET_PATH": sock_b}, clear=False):
+                    pid_b = cli.watcher_pid_path()
+            self.assertNotEqual(pid_a, pid_b)
+
     def test_exclusive_lock_is_single_owner_and_follows_child_lifetime(self):
         with tempfile.TemporaryDirectory() as tmp:
             lock = Path(tmp) / "index.lock"

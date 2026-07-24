@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 
@@ -11,12 +12,15 @@ class HerdrCLIError(RuntimeError):
 
 
 class HerdrCLI:
-    def __init__(self, binary="herdr", runner=None):
+    def __init__(self, binary="herdr", runner=None, env=None):
         self.binary = binary
         self.runner = runner or subprocess.run
+        # Extra environment (e.g. HERDR_SOCKET_PATH) to target another session.
+        self.env = dict(env) if env else None
 
     def _run(self, args, *, timeout=30, json_output=False):
         command = [self.binary, *args]
+        run_env = {**os.environ, **self.env} if self.env else None
         try:
             result = self.runner(
                 command,
@@ -24,6 +28,7 @@ class HerdrCLI:
                 text=True,
                 timeout=timeout,
                 check=False,
+                env=run_env,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise HerdrCLIError(f"could not run {self.binary}: {exc}") from exc

@@ -223,6 +223,16 @@ Use `config.example.ini` as a starting point.
 `HERDR_SOCKET_PATH` selects the Herdr socket. Named sessions can instead use
 `HERDR_SESSION`.
 
+## Multiple sessions
+
+Concurrent Herdr sessions on one machine share the SQLite database but own
+disjoint index rows: each session's indexer and watcher only replace rows
+belonging to that session, so sessions never overwrite each other. Search and
+the picker show the current session by default; pass `--all-sessions` to
+`search` or `pick` to include every session. Selecting a result from another
+session focuses it through that session's socket. `doctor` prints the derived
+`herdr_session` key.
+
 ## Config
 
 Archive indexing is disabled by default. Enable it only if you want local agent

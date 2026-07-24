@@ -466,6 +466,27 @@ def herdr_bin() -> str:
     return os.environ.get("HERDR_BIN_PATH") or os.environ.get("HERDR_BIN") or app_config()["herdr_bin"]
 
 
+def herdr_session_identity():
+    """Return (session_key, socket_path) for the Herdr session this process targets.
+
+    The key stays stable per socket so concurrent sessions on one machine own
+    disjoint index rows, watcher locks, and background-index locks.
+    """
+    socket_path = resolve_socket_path()
+    name = os.environ.get("HERDR_SESSION") or ""
+    if not name:
+        parent = os.path.dirname(socket_path)
+        if os.path.basename(os.path.dirname(parent)) == "sessions":
+            name = os.path.basename(parent)
+    name = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or "default"
+    digest = hashlib.sha1(socket_path.encode("utf-8", "replace")).hexdigest()[:8]
+    return f"{name}-{digest}", socket_path
+
+
+def herdr_session_key() -> str:
+    return herdr_session_identity()[0]
+
+
 def connect():
     path = prepare_database_path(db_path())
     conn = None
@@ -593,11 +614,14 @@ def init_schema(conn):
         """
     )
     ensure_column(conn, "docs", "agent_session_id", "TEXT")
+    ensure_column(conn, "docs", "herdr_session", "TEXT")
+    ensure_column(conn, "docs", "socket_path", "TEXT")
     ensure_column(conn, "archive_sessions", "space_label", "TEXT")
     ensure_column(conn, "archive_docs", "space_label", "TEXT")
     conn.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_docs_agent_session_id ON docs(agent_session_id);
+        CREATE INDEX IF NOT EXISTS idx_docs_herdr_session ON docs(herdr_session);
         CREATE INDEX IF NOT EXISTS idx_archive_sessions_space_label ON archive_sessions(space_label);
         CREATE INDEX IF NOT EXISTS idx_archive_docs_space_label ON archive_docs(space_label);
         """
@@ -929,6 +953,7 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
     }
     panes = merge_agent_records(snapshot.get("panes", []), agent_cli.agent_list())
 
+    session_key, session_socket = herdr_session_identity()
     now = int(time.time())
     docs = []
     doc_tokens = []
@@ -948,10 +973,14 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
             continue
         workspace_label = workspace.get("label") or workspace_id
         body = workspace_metadata_text(workspace)
-        digest = hashlib.sha1(f"workspace\0{workspace_id}\0{body}".encode("utf-8", "replace")).hexdigest()
+        digest = hashlib.sha1(
+            f"{session_key}\0workspace\0{workspace_id}\0{body}".encode("utf-8", "replace")
+        ).hexdigest()
         docs.append(
             {
                 "stable_id": digest,
+                "herdr_session": session_key,
+                "socket_path": session_socket,
                 "workspace_id": workspace_id,
                 "workspace_label": workspace_label,
                 "tab_id": workspace.get("active_tab_id", ""),
@@ -982,10 +1011,14 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
             chunks = chunks or ["[empty pane]\n" + meta]
         for idx, chunk in enumerate(chunks):
             body = f"{meta}\n\n{chunk}"
-            digest = hashlib.sha1(f"{pane_id}\0{idx}\0{body}".encode("utf-8", "replace")).hexdigest()
+            digest = hashlib.sha1(
+                f"{session_key}\0{pane_id}\0{idx}\0{body}".encode("utf-8", "replace")
+            ).hexdigest()
             docs.append(
                 {
                     "stable_id": digest,
+                    "herdr_session": session_key,
+                    "socket_path": session_socket,
                     "workspace_id": pane.get("workspace_id", ""),
                     "workspace_label": workspace_label,
                     "tab_id": pane.get("tab_id", ""),
@@ -1009,22 +1042,33 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
 
     conn = connect()
     with conn:
-        conn.execute("DELETE FROM docs")
-        conn.execute("DELETE FROM docs_fts")
-        conn.execute("DELETE FROM terms")
-        conn.execute("DELETE FROM token_docs")
-        conn.execute("DELETE FROM token_trigrams")
+        # Replace only this session's rows so concurrent Herdr sessions on the
+        # same machine never clobber each other. Rows without a session are
+        # pre-upgrade leftovers and are swept by whichever session runs first.
+        stale = (
+            "SELECT stable_id FROM docs WHERE herdr_session = :session OR herdr_session IS NULL"
+        )
+        conn.execute(
+            f"DELETE FROM docs_fts WHERE stable_id IN ({stale})", {"session": session_key}
+        )
+        conn.execute(
+            f"DELETE FROM token_docs WHERE stable_id IN ({stale})", {"session": session_key}
+        )
+        conn.execute(
+            "DELETE FROM docs WHERE herdr_session = :session OR herdr_session IS NULL",
+            {"session": session_key},
+        )
         conn.executemany(
             """
             INSERT INTO docs (
-                stable_id, workspace_id, workspace_label, tab_id, pane_id, terminal_id,
-                pane_label, agent, agent_session_id, agent_status, cwd, foreground_cwd, chunk_index,
-                content, indexed_at
+                stable_id, herdr_session, socket_path, workspace_id, workspace_label, tab_id,
+                terminal_id, pane_id, pane_label, agent, agent_session_id, agent_status, cwd,
+                foreground_cwd, chunk_index, content, indexed_at
             )
             VALUES (
-                :stable_id, :workspace_id, :workspace_label, :tab_id, :pane_id, :terminal_id,
-                :pane_label, :agent, :agent_session_id, :agent_status, :cwd, :foreground_cwd, :chunk_index,
-                :content, :indexed_at
+                :stable_id, :herdr_session, :socket_path, :workspace_id, :workspace_label, :tab_id,
+                :terminal_id, :pane_id, :pane_label, :agent, :agent_session_id, :agent_status, :cwd,
+                :foreground_cwd, :chunk_index, :content, :indexed_at
             )
             """,
             docs,
@@ -1054,6 +1098,10 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed_at', ?)",
             (str(now),),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (f"last_indexed_at:{session_key}", str(now)),
         )
     conn.close()
     return len(docs)
@@ -1120,10 +1168,15 @@ def spawn_locked_background(cmd, lock_fd) -> None:
 
 
 def maybe_background_index(lines: int, include_empty: bool, include_wrappers: bool, stale_seconds: int):
+    session_key = herdr_session_key()
     conn = connect()
     try:
-        doc_count = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
-        last = conn.execute("SELECT value FROM meta WHERE key = 'last_indexed_at'").fetchone()
+        doc_count = conn.execute(
+            "SELECT COUNT(*) FROM docs WHERE herdr_session = ?", (session_key,)
+        ).fetchone()[0]
+        last = conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (f"last_indexed_at:{session_key}",)
+        ).fetchone()
     finally:
         conn.close()
 
@@ -1131,7 +1184,7 @@ def maybe_background_index(lines: int, include_empty: bool, include_wrappers: bo
     if doc_count and int(time.time()) - last_indexed < stale_seconds:
         return
 
-    lock_fd = try_exclusive_lock(data_dir() / "index.lock")
+    lock_fd = try_exclusive_lock(data_dir() / f"index-{session_key}.lock")
     if lock_fd is None:
         return
 
@@ -1577,7 +1630,7 @@ def fts_query(query: str) -> str:
     return " ".join(quoted)
 
 
-def search_index(query: str, limit: int, *, status=None, agent=None, snippets=True):
+def search_index(query: str, limit: int, *, status=None, agent=None, snippets=True, all_sessions=False):
     query, filters = parse_filters(query)
     if status:
         filters["status"] = status
@@ -1587,6 +1640,9 @@ def search_index(query: str, limit: int, *, status=None, agent=None, snippets=Tr
 
     clauses = []
     params = {}
+    if not all_sessions:
+        clauses.append("d.herdr_session = :herdr_session")
+        params["herdr_session"] = herdr_session_key()
     if filters.get("status"):
         clauses.append("COALESCE(d.agent_status, '') = :status")
         params["status"] = filters["status"]
@@ -1805,8 +1861,10 @@ def decorate_live_tree(rows):
     return decorated
 
 
-def grouped_search_index(query: str, limit: int, *, status=None, agent=None, snippets=True):
-    rows = search_index(query, max(limit * 8, 120), status=status, agent=agent, snippets=snippets)
+def grouped_search_index(query: str, limit: int, *, status=None, agent=None, snippets=True, all_sessions=False):
+    rows = search_index(
+        query, max(limit * 8, 120), status=status, agent=agent, snippets=snippets, all_sessions=all_sessions
+    )
     grouped = {}
     for row in rows:
         pane_id = row["pane_id"]
@@ -2242,12 +2300,31 @@ def format_result(row, *, multiline=False):
     )
 
 
-def focused_pane_id() -> str:
-    return HerdrClient().snapshot().get("focused_pane_id") or ""
+def focused_pane_id(client=None) -> str:
+    return (client or HerdrClient()).snapshot().get("focused_pane_id") or ""
+
+
+def row_socket_path(row):
+    """Return the row's socket when it belongs to a different Herdr session."""
+    socket_path = row.get("socket_path") or ""
+    if socket_path and socket_path != resolve_socket_path():
+        return socket_path
+    return None
+
+
+def row_client(row) -> HerdrClient:
+    return HerdrClient(socket_path=row_socket_path(row))
+
+
+def row_agent_cli(row) -> HerdrCLI:
+    socket_path = row_socket_path(row)
+    if socket_path:
+        return HerdrCLI(herdr_bin(), env={"HERDR_SOCKET_PATH": socket_path})
+    return HerdrCLI(herdr_bin())
 
 
 def focus_workspace_tab(row) -> bool:
-    client = HerdrClient()
+    client = row_client(row)
     try:
         if row.get("workspace_id"):
             client.focus_workspace(row["workspace_id"])
@@ -2265,12 +2342,12 @@ def focus_exact_pane(row) -> bool:
     try:
         if pane_agent(row):
             try:
-                HerdrCLI(herdr_bin()).agent_focus(pane_id)
+                row_agent_cli(row).agent_focus(pane_id)
             except HerdrCLIError:
-                HerdrClient().focus_pane(pane_id)
+                row_client(row).focus_pane(pane_id)
         else:
-            HerdrClient().focus_pane(pane_id)
-        return focused_pane_id() == pane_id
+            row_client(row).focus_pane(pane_id)
+        return focused_pane_id(row_client(row)) == pane_id
     except HerdrError:
         return False
 
@@ -2764,7 +2841,14 @@ def render_picker(
 def picker_rows(args, query, *, snippets=False):
     if getattr(args, "archive", False):
         return grouped_archive_search_index(query, args.limit, agent=args.agent, snippets=snippets)
-    return grouped_search_index(query, args.limit, status=getattr(args, "status", None), agent=args.agent, snippets=snippets)
+    return grouped_search_index(
+        query,
+        args.limit,
+        status=getattr(args, "status", None),
+        agent=args.agent,
+        snippets=snippets,
+        all_sessions=getattr(args, "all_sessions", False),
+    )
 
 
 def picker_focus(args, stable_id):
@@ -2910,7 +2994,7 @@ def execute_action(stdscr, args, row, action):
         if not label:
             return None, "rename cancelled", False
         try:
-            HerdrClient().rename_workspace(row["workspace_id"], label)
+            row_client(row).rename_workspace(row["workspace_id"], label)
         except HerdrError as exc:
             return None, f"workspace rename failed: {exc}", False
         refresh_picker_index(args)
@@ -2920,7 +3004,7 @@ def execute_action(stdscr, args, row, action):
         if not label:
             return None, "rename cancelled", False
         try:
-            HerdrClient().rename_pane(row["pane_id"], label)
+            row_client(row).rename_pane(row["pane_id"], label)
         except HerdrError as exc:
             return None, f"pane rename failed: {exc}", False
         refresh_picker_index(args)
@@ -3166,11 +3250,11 @@ def curses_picker(stdscr, args) -> int:
 
 
 def watcher_pid_path() -> Path:
-    return data_dir() / "watch.pid"
+    return data_dir() / f"watch-{herdr_session_key()}.pid"
 
 
 def watcher_log_path() -> Path:
-    return data_dir() / "watch.log"
+    return data_dir() / f"watch-{herdr_session_key()}.log"
 
 
 def read_watcher_pid() -> int:
@@ -3228,9 +3312,27 @@ def watcher_is_running() -> bool:
     return lock_is_held(watcher_pid_path())
 
 
+def stop_legacy_watcher() -> None:
+    # Watchers from releases before per-session scoping rebuilt the whole
+    # docs table and would clobber other sessions; stop them on upgrade.
+    legacy = data_dir() / "watch.pid"
+    if legacy == watcher_pid_path() or not lock_is_held(legacy):
+        return
+    try:
+        pid = int(legacy.read_text(encoding="utf-8").split()[0])
+    except (OSError, ValueError, IndexError):
+        return
+    if pid > 0 and pid != os.getpid():
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            pass
+
+
 def watch_live_index(lines: int, debounce: float) -> int:
     # The flock outlives any crash, so liveness never depends on stale pid
     # contents; the pid is only written for status messages and watch-stop.
+    stop_legacy_watcher()
     lock_fd = try_exclusive_lock(watcher_pid_path())
     if lock_fd is None:
         print(f"watcher already running: {read_watcher_pid()}")
@@ -3352,7 +3454,13 @@ def cmd_index(args) -> int:
 
 
 def cmd_search(args) -> int:
-    rows = grouped_search_index(" ".join(args.query), args.limit, status=args.status, agent=args.agent)
+    rows = grouped_search_index(
+        " ".join(args.query),
+        args.limit,
+        status=args.status,
+        agent=args.agent,
+        all_sessions=args.all_sessions,
+    )
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -3416,6 +3524,7 @@ def cmd_doctor(_args) -> int:
     print(f"db: {db_path()}")
     print(f"herdr: {herdr_bin()}")
     print(f"herdr_socket: {resolve_socket_path()}")
+    print(f"herdr_session: {herdr_session_key()}")
     snapshot = HerdrClient().snapshot()
     print(f"herdr_version: {snapshot.get('version', 'unknown')}")
     print(f"herdr_protocol: {snapshot.get('protocol', 'unknown')}")
@@ -3486,6 +3595,7 @@ def main(argv=None) -> int:
     p.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     p.add_argument("--status")
     p.add_argument("--agent")
+    p.add_argument("--all-sessions", action="store_true", help="include rows from every Herdr session")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_search)
 
@@ -3514,6 +3624,7 @@ def main(argv=None) -> int:
     p.add_argument("--stale-seconds", type=int, default=10)
     p.add_argument("--include-empty", action="store_true")
     p.add_argument("--include-wrappers", action="store_true")
+    p.add_argument("--all-sessions", action="store_true", help="include rows from every Herdr session")
     picker = p.add_mutually_exclusive_group()
     picker.add_argument("--native", action="store_true", help="force the native terminal picker")
     picker.add_argument("--fzf", action="store_true", help="use fzf instead of the native picker")
