@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 - 2026-07-24
+
+- Scope the live index, watcher, and background indexing per Herdr session so
+  concurrent sessions on one machine no longer overwrite each other's rows.
+- Filter search and the pickers to the current session by default; add
+  `--all-sessions` and route cross-session focus and rename through the
+  originating session's socket.
+- Stop legacy pre-session watchers on upgrade before they can rebuild the
+  shared table.
+
 ## 0.3.6 - 2026-07-23
 
 - Parse watcher lock metadata correctly when reporting or stopping its process.

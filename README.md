@@ -45,7 +45,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To pin this release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.3.6
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.4.0
 ```
 
 Herdr plugin manifests do not modify user keybindings. The portable recommended
