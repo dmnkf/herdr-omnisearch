@@ -300,22 +300,43 @@ class CliTests(unittest.TestCase):
             # /var -> /private/var symlink.
             self.assertEqual(os.path.realpath(legacy), os.path.realpath(db))
 
-    def test_two_sessions_share_the_index_without_overwriting(self):
+    def _start_socket_server(self, path):
+        # A listener that accepts and drops connections, like a real Herdr
+        # session. macOS refuses further connects once un-accepted probe
+        # connections fill the backlog, so a bind-only listener is not enough.
         import socket as socket_module
+        import threading
 
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+        server.bind(str(path))
+        server.listen(16)
+        server.settimeout(0.05)
+        stop = threading.Event()
+
+        def drain():
+            while not stop.is_set():
+                try:
+                    connection, _ = server.accept()
+                except OSError:
+                    continue
+                connection.close()
+
+        thread = threading.Thread(target=drain, daemon=True)
+        thread.start()
+        self.addCleanup(server.close)
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(stop.set)
+        return server
+
+    def test_two_sessions_share_the_index_without_overwriting(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "index.sqlite3"
             sock_a = str(Path(tmp) / "a" / "herdr.sock")
             sock_b = str(Path(tmp) / "b" / "herdr.sock")
             # Both sessions must accept connections or the reaper removes them.
-            listeners = []
-            for sock in (sock_a, sock_b):
-                Path(sock).parent.mkdir(parents=True, exist_ok=True)
-                server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
-                server.bind(sock)
-                server.listen(1)
-                listeners.append(server)
-            self.addCleanup(lambda: [server.close() for server in listeners])
+            self._start_socket_server(sock_a)
+            self._start_socket_server(sock_b)
             with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(db)}, clear=False):
                 with patch.object(cli, "HerdrClient", FakeHerdrClient), patch.object(
                     cli, "HerdrCLI", FakeHerdrCLI
@@ -370,50 +391,41 @@ class CliTests(unittest.TestCase):
         conn.close()
 
     def test_dead_sessions_are_reaped_on_index(self):
-        import socket as socket_module
-
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "index.sqlite3"
             state = Path(tmp) / "state"
             state.mkdir()
             live_sock = Path(tmp) / "live.sock"
-            server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
-            server.bind(str(live_sock))
-            server.listen(1)
-            try:
-                with patch.dict(
-                    os.environ,
-                    {
-                        "HERDR_OMNISEARCH_DB": str(db),
-                        "HERDR_PLUGIN_STATE_DIR": str(state),
-                        "HERDR_SOCKET_PATH": str(Path(tmp) / "current.sock"),
-                    },
-                    clear=False,
+            self._start_socket_server(live_sock)
+            with patch.dict(
+                os.environ,
+                {
+                    "HERDR_OMNISEARCH_DB": str(db),
+                    "HERDR_PLUGIN_STATE_DIR": str(state),
+                    "HERDR_SOCKET_PATH": str(Path(tmp) / "current.sock"),
+                },
+                clear=False,
+            ):
+                cli.connect().close()
+                self._seed_session_doc(db, "dead-11111111", str(Path(tmp) / "gone.sock"))
+                self._seed_session_doc(db, "live-22222222", str(live_sock))
+                (state / "watch-dead-11111111.log").write_text("old\n", encoding="utf-8")
+                with patch.object(cli, "HerdrClient", FakeHerdrClient), patch.object(
+                    cli, "HerdrCLI", FakeHerdrCLI
                 ):
-                    cli.connect().close()
-                    self._seed_session_doc(db, "dead-11111111", str(Path(tmp) / "gone.sock"))
-                    self._seed_session_doc(db, "live-22222222", str(live_sock))
-                    (state / "watch-dead-11111111.log").write_text("old\n", encoding="utf-8")
-                    with patch.object(cli, "HerdrClient", FakeHerdrClient), patch.object(
-                        cli, "HerdrCLI", FakeHerdrCLI
-                    ):
-                        cli.index_session(50, False, False)
-                    conn = sqlite3.connect(db)
-                    try:
-                        sessions = {
-                            row[0]
-                            for row in conn.execute(
-                                "SELECT DISTINCT herdr_session FROM docs"
-                            )
-                        }
-                    finally:
-                        conn.close()
-                    self.assertNotIn("dead-11111111", sessions)
-                    self.assertIn("live-22222222", sessions)
-                    self.assertIn(cli.herdr_session_key(), sessions)
-                    self.assertFalse((state / "watch-dead-11111111.log").exists())
-            finally:
-                server.close()
+                    cli.index_session(50, False, False)
+                conn = sqlite3.connect(db)
+                try:
+                    sessions = {
+                        row[0]
+                        for row in conn.execute("SELECT DISTINCT herdr_session FROM docs")
+                    }
+                finally:
+                    conn.close()
+                self.assertNotIn("dead-11111111", sessions)
+                self.assertIn("live-22222222", sessions)
+                self.assertIn(cli.herdr_session_key(), sessions)
+                self.assertFalse((state / "watch-dead-11111111.log").exists())
 
     def test_watcher_and_index_locks_are_per_session(self):
         with tempfile.TemporaryDirectory() as tmp:
