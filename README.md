@@ -233,6 +233,11 @@ the picker show the current session by default; pass `--all-sessions` to
 session focuses it through that session's socket. `doctor` prints the derived
 `herdr_session` key.
 
+Index runs automatically reap sessions whose socket no longer accepts
+connections: their rows, staleness markers, and watcher state files are
+removed, so closed sessions do not linger in the shared database. `purge`
+stops every session's watcher and removes all lock and log state.
+
 ## Config
 
 Archive indexing is disabled by default. Enable it only if you want local agent

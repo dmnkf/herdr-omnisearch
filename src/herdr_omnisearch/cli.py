@@ -20,7 +20,13 @@ from datetime import datetime
 from pathlib import Path
 
 from .herdr_cli import HerdrCLI, HerdrCLIError
-from .herdr_socket import HerdrClient, HerdrError, HerdrTimeout, resolve_socket_path
+from .herdr_socket import (
+    HerdrClient,
+    HerdrError,
+    HerdrTimeout,
+    resolve_socket_path,
+    socket_is_alive,
+)
 
 
 DEFAULT_LINES = 500
@@ -356,11 +362,18 @@ def prepare_database_path(path: Path) -> Path:
         if not candidate.exists():
             continue
         if not candidate.is_file():
-            raise sqlite3.OperationalError(
-                f"database path is not a regular file: {candidate}"
-            )
+            # WAL sidecars appear and vanish while concurrent processes
+            # checkpoint; only a path that still exists as something other
+            # than a regular file is an error.
+            if candidate.exists():
+                raise sqlite3.OperationalError(
+                    f"database path is not a regular file: {candidate}"
+                )
+            continue
         try:
             candidate.chmod(0o600)
+        except FileNotFoundError:
+            continue
         except OSError as exc:
             if not os.access(candidate, os.R_OK | os.W_OK):
                 raise sqlite3.OperationalError(
@@ -1103,8 +1116,44 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
             (f"last_indexed_at:{session_key}", str(now)),
         )
+        reap_dead_sessions(conn, session_key)
     conn.close()
     return len(docs)
+
+
+def reap_dead_sessions(conn, current_key: str) -> int:
+    """Drop index rows and state files of sessions whose socket is gone."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT herdr_session, socket_path FROM docs
+        WHERE herdr_session IS NOT NULL AND herdr_session != ?
+        """,
+        (current_key,),
+    ).fetchall()
+    dead = [
+        row["herdr_session"]
+        for row in rows
+        if not socket_is_alive(row["socket_path"] or "")
+    ]
+    for key in dead:
+        stale = "SELECT stable_id FROM docs WHERE herdr_session = ?"
+        conn.execute(f"DELETE FROM docs_fts WHERE stable_id IN ({stale})", (key,))
+        conn.execute(f"DELETE FROM token_docs WHERE stable_id IN ({stale})", (key,))
+        conn.execute("DELETE FROM docs WHERE herdr_session = ?", (key,))
+        conn.execute("DELETE FROM meta WHERE key = ?", (f"last_indexed_at:{key}",))
+        stop_watcher_at(data_dir() / f"watch-{key}.pid")
+        for leftover in (
+            data_dir() / f"watch-{key}.pid",
+            data_dir() / f"watch-{key}.log",
+            data_dir() / f"index-{key}.lock",
+        ):
+            if lock_is_held(leftover):
+                continue
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+    return len(dead)
 
 
 def release_index_lock():
@@ -3312,14 +3361,12 @@ def watcher_is_running() -> bool:
     return lock_is_held(watcher_pid_path())
 
 
-def stop_legacy_watcher() -> None:
-    # Watchers from releases before per-session scoping rebuilt the whole
-    # docs table and would clobber other sessions; stop them on upgrade.
-    legacy = data_dir() / "watch.pid"
-    if legacy == watcher_pid_path() or not lock_is_held(legacy):
+def stop_watcher_at(pid_path: Path) -> None:
+    """Terminate the watcher process holding this pid file's lock, if any."""
+    if not lock_is_held(pid_path):
         return
     try:
-        pid = int(legacy.read_text(encoding="utf-8").split()[0])
+        pid = int(pid_path.read_text(encoding="utf-8").split()[0])
     except (OSError, ValueError, IndexError):
         return
     if pid > 0 and pid != os.getpid():
@@ -3327,6 +3374,14 @@ def stop_legacy_watcher() -> None:
             os.kill(pid, 15)
         except OSError:
             pass
+
+
+def stop_legacy_watcher() -> None:
+    # Watchers from releases before per-session scoping rebuilt the whole
+    # docs table and would clobber other sessions; stop them on upgrade.
+    legacy = data_dir() / "watch.pid"
+    if legacy != watcher_pid_path():
+        stop_watcher_at(legacy)
 
 
 def watch_live_index(lines: int, debounce: float) -> int:
@@ -3568,9 +3623,20 @@ def cmd_purge(args) -> int:
         print("refusing to purge without --yes", file=sys.stderr)
         return 2
     cmd_watch_stop(args)
+    for pid_file in sorted(data_dir().glob("watch*.pid")):
+        stop_watcher_at(pid_file)
+    for _ in range(40):
+        if not any(lock_is_held(pid_file) for pid_file in data_dir().glob("watch*.pid")):
+            break
+        time.sleep(0.05)
     path = db_path()
+    candidates = [path, Path(str(path) + "-wal"), Path(str(path) + "-shm")]
+    for pattern in ("watch*.pid", "watch*.log", "index*.lock", "migrate.lock"):
+        candidates.extend(sorted(data_dir().glob(pattern)))
     removed = 0
-    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+    for candidate in candidates:
+        if lock_is_held(candidate):
+            continue
         try:
             candidate.unlink()
             removed += 1

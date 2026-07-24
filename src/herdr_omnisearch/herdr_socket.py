@@ -43,6 +43,21 @@ def resolve_socket_path(explicit=None, env=None, home=None):
     return str(config_home / "herdr.sock")
 
 
+def socket_is_alive(socket_path: str, timeout: float = 0.5) -> bool:
+    """Probe whether a Herdr session still accepts connections on this socket."""
+    if not socket_path:
+        return False
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(timeout)
+    try:
+        probe.connect(socket_path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
 class HerdrClient:
     """Use fresh control connections and persistent subscription connections."""
 
