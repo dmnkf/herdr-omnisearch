@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 - 2026-07-24
+
+- Reap index rows, staleness markers, and watcher state of sessions whose
+  Herdr socket no longer accepts connections.
+- Make purge stop every session's watcher and remove all lock and log state.
+- Tolerate WAL sidecar files vanishing while concurrent processes checkpoint.
+
 ## 0.4.0 - 2026-07-24
 
 - Scope the live index, watcher, and background indexing per Herdr session so

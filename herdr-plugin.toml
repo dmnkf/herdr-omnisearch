@@ -1,6 +1,6 @@
 id = "herdr.omnisearch"
 name = "Herdr OmniSearch"
-version = "0.4.0"
+version = "0.4.1"
 min_herdr_version = "0.7.5"
 description = "Fast local search across live Herdr panes and archived agent sessions"
 platforms = ["linux", "macos"]
