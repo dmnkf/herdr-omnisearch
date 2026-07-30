@@ -812,6 +812,105 @@ class CliTests(unittest.TestCase):
                 self.assertTrue(cli.archive_window_is_indexed(conn, 14, 1, now=now_dt.timestamp()))
                 conn.close()
 
+    def test_archive_window_discovery_and_query_preflight_are_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now_dt = datetime(2026, 7, 30, 12, 0, 0)
+            newest = root / "newest.jsonl"
+            older = root / "older.jsonl"
+            newest.write_text('{"text":"current work"}\n', encoding="utf-8")
+            older.write_text('{"text":"completed target extension"}\n', encoding="utf-8")
+            os.utime(newest, ((now_dt - timedelta(days=2)).timestamp(),) * 2)
+            os.utime(older, ((now_dt - timedelta(days=16)).timestamp(),) * 2)
+
+            def parse_archive(path, _thread_names):
+                return {
+                    "session_id": path.stem,
+                    "title": path.stem,
+                    "cwd": str(root),
+                    "path": str(path),
+                    "content": "completed target extension" if path == older else "current work",
+                }
+
+            with patch.object(cli, "archive_paths", return_value=[newest, older]), patch.object(
+                cli.time, "time", return_value=now_dt.timestamp()
+            ), patch.object(cli, "parse_codex_archive", side_effect=parse_archive):
+                self.assertEqual(
+                    cli.archive_max_window_offset({"codex"}, 14, now=now_dt.timestamp()),
+                    1,
+                )
+                self.assertFalse(
+                    cli.archive_window_might_match(
+                        "target",
+                        {"codex"},
+                        14,
+                        0,
+                        0,
+                    )
+                )
+                self.assertTrue(
+                    cli.archive_window_might_match(
+                        "target",
+                        {"codex"},
+                        14,
+                        1,
+                        0,
+                    )
+                )
+
+    def test_archive_record_reader_discards_oversized_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "archive.jsonl"
+            path.write_bytes(
+                b'{"id":"first"}\n'
+                + b'{"content":"'
+                + (b"x" * 256)
+                + b'"}\n'
+                + b'{"id":"last"}\n'
+            )
+
+            records = list(cli.iter_archive_records(path, max_record_bytes=64))
+
+        self.assertEqual([record["id"] for record in records], ["first", "last"])
+
+    def test_zero_result_archive_search_chains_to_next_candidate_window(self):
+        args = Namespace(
+            agents="",
+            agent=None,
+            archive=True,
+            limit=40,
+            max_files=0,
+            since_days=None,
+            status=None,
+            window_days=14,
+            window_offset=0,
+        )
+        expected = [{"stable_id": "archive:match", "title": "target extension"}]
+        progress = Mock()
+        with patch.object(cli, "selected_archive_sources", return_value={"codex"}), patch.object(
+            cli, "archive_max_window_offset", return_value=3
+        ), patch.object(
+            cli, "archive_window_has_metadata_match", side_effect=[False, True]
+        ) as preflight, patch.object(
+            cli, "index_archive", return_value=(1, 1)
+        ) as index, patch.object(
+            cli, "cached_picker_rows", return_value=expected
+        ):
+            rows, message = cli.archive_fallback_rows(args, "target", {}, progress=progress)
+
+        self.assertEqual(rows, expected)
+        self.assertIn("Found matches", message)
+        self.assertEqual(args.window_offset, 2)
+        self.assertEqual(preflight.call_count, 2)
+        index.assert_called_once_with(
+            "",
+            0,
+            None,
+            window_days=14,
+            window_offset=2,
+        )
+        self.assertEqual(progress.call_count, 3)
+
     def test_purge_requires_confirmation_and_removes_index_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "index.sqlite3"

@@ -32,6 +32,7 @@ from .herdr_socket import (
 
 DEFAULT_LINES = 500
 DEFAULT_LIMIT = 30
+ARCHIVE_MAX_RECORD_BYTES = 2 * 1024 * 1024
 STATUS_WEIGHT = {
     "workspace": 0,
     "working": 0,
@@ -1391,16 +1392,35 @@ def load_codex_thread_names():
     names = {}
     if not path or not path.exists():
         return names
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
+    for item in iter_archive_records(path):
+        session_id = item.get("id")
+        if session_id:
+            names[session_id] = item.get("thread_name") or ""
+    return names
+
+
+def iter_archive_records(path: Path, max_record_bytes: int = ARCHIVE_MAX_RECORD_BYTES):
+    with path.open("rb") as handle:
+        while True:
+            record = handle.readline(max_record_bytes + 1)
+            if not record:
+                return
+            complete = record.endswith(b"\n")
+            oversized = len(record) > max_record_bytes
+            while not complete:
+                remainder = handle.readline(max_record_bytes + 1)
+                if not remainder:
+                    break
+                complete = remainder.endswith(b"\n")
+                oversized = True
+            if oversized:
+                continue
             try:
-                item = json.loads(line)
+                item = json.loads(record.decode("utf-8", "replace"))
             except json.JSONDecodeError:
                 continue
-            session_id = item.get("id")
-            if session_id:
-                names[session_id] = item.get("thread_name") or ""
-    return names
+            if isinstance(item, dict):
+                yield item
 
 
 def parse_codex_archive(path: Path, thread_names):
@@ -1411,32 +1431,27 @@ def parse_codex_archive(path: Path, thread_names):
     title = ""
     parts = []
 
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            timestamp = item.get("timestamp") or ""
-            if timestamp:
-                updated_at = timestamp
-                started_at = started_at or timestamp
-            item_type = item.get("type")
-            payload = item.get("payload") or {}
-            if item_type == "session_meta":
-                session_id = payload.get("id") or session_id
-                cwd = payload.get("cwd") or cwd
-                started_at = payload.get("timestamp") or started_at
-                updated_at = payload.get("timestamp") or updated_at
-                continue
-            if item_type == "turn_context":
-                cwd = payload.get("cwd") or cwd
-                continue
-            if item_type == "event_msg":
-                continue
-            if item_type == "response_item" and payload.get("type") == "message":
-                role = payload.get("role") or "agent"
-                append_archive_part(parts, role, extract_message_text(payload.get("content")))
+    for item in iter_archive_records(path):
+        timestamp = item.get("timestamp") or ""
+        if timestamp:
+            updated_at = timestamp
+            started_at = started_at or timestamp
+        item_type = item.get("type")
+        payload = item.get("payload") or {}
+        if item_type == "session_meta":
+            session_id = payload.get("id") or session_id
+            cwd = payload.get("cwd") or cwd
+            started_at = payload.get("timestamp") or started_at
+            updated_at = payload.get("timestamp") or updated_at
+            continue
+        if item_type == "turn_context":
+            cwd = payload.get("cwd") or cwd
+            continue
+        if item_type == "event_msg":
+            continue
+        if item_type == "response_item" and payload.get("type") == "message":
+            role = payload.get("role") or "agent"
+            append_archive_part(parts, role, extract_message_text(payload.get("content")))
 
     if not session_id:
         match = re.search(r"([0-9a-f]{8}-[0-9a-f-]{27,})", path.name)
@@ -1463,25 +1478,20 @@ def parse_claude_archive(path: Path):
     slug = ""
     parts = []
 
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            timestamp = item.get("timestamp") or ""
-            if timestamp:
-                updated_at = timestamp
-                started_at = started_at or timestamp
-            session_id = item.get("sessionId") or session_id
-            cwd = item.get("cwd") or cwd
-            slug = item.get("slug") or slug
-            item_type = item.get("type")
-            if item_type not in ("user", "assistant"):
-                continue
-            message = item.get("message") or {}
-            role = message.get("role") or item_type
-            append_archive_part(parts, role, extract_message_text(message.get("content")))
+    for item in iter_archive_records(path):
+        timestamp = item.get("timestamp") or ""
+        if timestamp:
+            updated_at = timestamp
+            started_at = started_at or timestamp
+        session_id = item.get("sessionId") or session_id
+        cwd = item.get("cwd") or cwd
+        slug = item.get("slug") or slug
+        item_type = item.get("type")
+        if item_type not in ("user", "assistant"):
+            continue
+        message = item.get("message") or {}
+        role = message.get("role") or item_type
+        append_archive_part(parts, role, extract_message_text(message.get("content")))
 
     if not session_id:
         session_id = path.stem
@@ -1522,6 +1532,134 @@ def archive_source_paths(selected, window_days: int, window_offset: int, max_fil
     if max_files:
         paths = paths[:max_files]
     return [(agent, path) for _modified, agent, path in paths]
+
+
+def archive_max_window_offset(selected, window_days: int, *, now=None) -> int:
+    oldest = None
+    for agent in selected:
+        for path in archive_paths(agent):
+            try:
+                modified = path.stat().st_mtime
+            except OSError:
+                continue
+            oldest = modified if oldest is None else min(oldest, modified)
+    if oldest is None:
+        return 0
+    offset = 0
+    while True:
+        start, _end = archive_window_bounds(window_days, offset, now=now)
+        if oldest >= start:
+            return offset
+        offset += 1
+
+
+def archive_query_terms(query: str):
+    text, filters = parse_filters(query)
+    values = " ".join(str(value) for value in filters.values())
+    return list(dict.fromkeys(tokens(f"{text} {values}")))
+
+
+def archive_file_metadata(agent: str, path: Path, thread_names):
+    session_id = path.stem
+    title = ""
+    cwd = ""
+    slug = ""
+    try:
+        for item in iter_archive_records(path):
+            if agent == "codex":
+                if item.get("type") != "session_meta":
+                    continue
+                payload = item.get("payload") or {}
+                session_id = payload.get("id") or session_id
+                cwd = payload.get("cwd") or cwd
+                break
+            if agent == "claude":
+                session_id = item.get("sessionId") or session_id
+                cwd = item.get("cwd") or cwd
+                slug = item.get("slug") or slug
+                if session_id and (cwd or slug):
+                    break
+            else:
+                return None
+    except OSError:
+        return None
+    if agent == "codex":
+        title = thread_names.get(session_id) or ""
+    elif slug:
+        title = slug.replace("-", " ")
+    return {
+        "agent": agent,
+        "session_id": session_id,
+        "title": title,
+        "cwd": cwd,
+        "path": str(path),
+    }
+
+
+def archive_window_has_metadata_match(
+    query: str,
+    selected,
+    window_days: int,
+    window_offset: int,
+    max_files,
+) -> bool:
+    terms = archive_query_terms(query)
+    if not terms:
+        return False
+    thread_names = load_codex_thread_names() if "codex" in selected else {}
+    for agent, path in archive_source_paths(
+        selected,
+        window_days,
+        window_offset,
+        max_files,
+    ):
+        metadata = archive_file_metadata(agent, path, thread_names)
+        if not metadata:
+            continue
+        searchable = "\n".join(metadata.values()).lower()
+        if all(term in searchable for term in terms):
+            return True
+    return False
+
+
+def archive_window_might_match(
+    query: str,
+    selected,
+    window_days: int,
+    window_offset: int,
+    max_files,
+) -> bool:
+    terms = archive_query_terms(query)
+    if not terms:
+        return False
+    thread_names = load_codex_thread_names() if "codex" in selected else {}
+    for agent, path in archive_source_paths(
+        selected,
+        window_days,
+        window_offset,
+        max_files,
+    ):
+        try:
+            if agent == "codex":
+                session = parse_codex_archive(path, thread_names)
+            elif agent == "claude":
+                session = parse_claude_archive(path)
+            else:
+                continue
+        except OSError:
+            continue
+        searchable = "\n".join(
+            [
+                session.get("session_id") or "",
+                session.get("title") or "",
+                session.get("cwd") or "",
+                session.get("path") or "",
+                session.get("content") or "",
+            ]
+        ).lower()
+        if all(term in searchable for term in terms):
+            return True
+    return False
 
 
 def selected_archive_sources(agents: str):
@@ -3311,6 +3449,97 @@ def cached_picker_rows(args, query, cache):
     return rows
 
 
+def archive_rows_have_strong_match(rows, query: str) -> bool:
+    terms = archive_query_terms(query)
+    if not terms:
+        return False
+    for row in rows:
+        metadata = "\n".join(
+            str(row.get(field) or "")
+            for field in (
+                "agent",
+                "session_id",
+                "title",
+                "space_label",
+                "workspace_label",
+                "cwd",
+                "path",
+            )
+        ).lower()
+        if all(term in metadata for term in terms):
+            return True
+    return False
+
+
+def archive_fallback_rows(args, query, cache, progress=None, fallback_rows=None):
+    terms = archive_query_terms(query)
+    if sum(len(term) for term in terms) < 3:
+        return fallback_rows or [], ""
+    closest_rows = fallback_rows or []
+    selected_sources = selected_archive_sources(args.agents)
+    max_offset = archive_max_window_offset(selected_sources, args.window_days)
+    start_offset = args.window_offset
+    loaded_targets = set()
+
+    def load_target(target):
+        nonlocal closest_rows
+        if progress:
+            progress("Loading", target, max_offset)
+        args.window_offset = target
+        index_archive(
+            args.agents,
+            args.max_files,
+            args.since_days,
+            window_days=args.window_days,
+            window_offset=args.window_offset,
+        )
+        loaded_targets.add(target)
+        cache.clear()
+        rows = cached_picker_rows(args, query, cache)
+        if rows and not closest_rows:
+            closest_rows = rows
+        return rows
+
+    for target in range(start_offset + 1, max_offset + 1):
+        if progress:
+            progress("Scanning metadata", target, max_offset)
+        if not archive_window_has_metadata_match(
+            query,
+            selected_sources,
+            args.window_days,
+            target,
+            args.max_files,
+        ):
+            continue
+        rows = load_target(target)
+        if rows and archive_rows_have_strong_match(rows, query):
+            label = archive_window_label(args.window_days, args.window_offset)
+            return rows, f"Found matches in {label}"
+
+    for target in range(start_offset + 1, max_offset + 1):
+        if target in loaded_targets:
+            continue
+        if progress:
+            progress("Scanning content", target, max_offset)
+        if not archive_window_might_match(
+            query,
+            selected_sources,
+            args.window_days,
+            target,
+            args.max_files,
+        ):
+            continue
+        rows = load_target(target)
+        if rows:
+            label = archive_window_label(args.window_days, args.window_offset)
+            return rows, f"Found content matches in {label}"
+    if args.window_offset == start_offset:
+        message = "No direct matches in any older archive window"
+    else:
+        message = "No direct matches through the oldest archive window"
+    return closest_rows, message
+
+
 def curses_picker(stdscr, args) -> int:
     init_curses_colors()
     curses.noecho()
@@ -3329,6 +3558,36 @@ def curses_picker(stdscr, args) -> int:
     action_selected = 0
     pending = ""
     message = ""
+
+    def rows_with_archive_fallback(search_query, current_rows):
+        if not getattr(args, "archive", False) or not search_query.strip():
+            return current_rows, ""
+        if current_rows and archive_rows_have_strong_match(current_rows, search_query):
+            return current_rows, ""
+
+        def show_progress(stage, target, max_offset):
+            label = archive_window_label(args.window_days, target)
+            render_picker(
+                stdscr,
+                search_query,
+                [],
+                0,
+                title=picker_title(args),
+                help_text=picker_help(args),
+                mode="insert",
+                message=f"{stage} {label} ({target}/{max_offset})...",
+            )
+
+        return archive_fallback_rows(
+            args,
+            search_query,
+            row_cache,
+            progress=show_progress,
+            fallback_rows=current_rows,
+        )
+
+    rows, fallback_message = rows_with_archive_fallback(query, rows)
+    message = fallback_message or message
 
     while True:
         if selected >= len(rows):
@@ -3525,6 +3784,8 @@ def curses_picker(stdscr, args) -> int:
             if changed:
                 selected = 0
                 rows = cached_picker_rows(args, query, row_cache)
+                rows, fallback_message = rows_with_archive_fallback(query, rows)
+                message = fallback_message or message
 
 
 def watcher_pid_path() -> Path:

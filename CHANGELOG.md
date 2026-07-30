@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.3 - 2026-07-30
+
+- Continue archive searches through older 14-day windows when the active
+  window has no direct match, using metadata first and content only as needed.
+- Bound individual archive records before decoding so unusually large history
+  entries cannot cause large indexing memory spikes.
+
 ## 0.4.2 - 2026-07-30
 
 - Keep only one calendar-aligned archive window in the index, defaulting to the

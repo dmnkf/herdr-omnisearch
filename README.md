@@ -45,7 +45,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To pin this release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.4.2
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.4.3
 ```
 
 Herdr plugin manifests do not modify user keybindings. The portable recommended
@@ -187,8 +187,10 @@ herdr-omnisearch archive-pick --no-refresh --background-refresh --stale-seconds 
 ArchiveSearch keeps only one chronological window in SQLite at a time. The
 default window is the newest 14 calendar days. Use left/right in the native
 picker to replace it with the previous/next 14-day window; the title always
-shows the active dates. For non-interactive use, pass `--window-offset 1` to
-`archive-index` to load the previous window.
+shows the active dates. When a query has no direct match in the active window,
+the picker scans older windows and loads the first matching one. For
+non-interactive use, pass `--window-offset 1` to `archive-index` to load the
+previous window.
 
 Check state:
 
@@ -293,7 +295,9 @@ remove_words =
 Set `enabled = true` to opt in. `window_days` bounds the active archive by
 date, while `max_files` optionally caps files inside that window. Indexing
 streams sessions, chunks, and token metadata into SQLite instead of retaining
-the complete window in process memory.
+the complete window in process memory. Oversized individual JSONL records are
+discarded before decoding to keep malformed or unusually large tool output
+from causing an indexing memory spike.
 
 `launcher = agent` validates resumed sessions through `herdr agent start` and
 is the portable default. Use `launcher = shell` when the configured resume
