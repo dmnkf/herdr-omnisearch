@@ -1517,17 +1517,37 @@ def archive_paths(agent: str):
     return sorted(paths)
 
 
+def archive_path_timestamp(agent: str, path: Path) -> float:
+    match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})", path.name)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%Y-%m-%dT%H-%M-%S").timestamp()
+        except ValueError:
+            pass
+    try:
+        for item in iter_archive_records(path):
+            timestamp = item.get("timestamp") or ""
+            if agent == "codex" and item.get("type") == "session_meta":
+                timestamp = (item.get("payload") or {}).get("timestamp") or timestamp
+            parsed = iso_to_epoch(timestamp)
+            if parsed:
+                return parsed
+    except OSError:
+        pass
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def archive_source_paths(selected, window_days: int, window_offset: int, max_files, *, now=None):
     start, end = archive_window_bounds(window_days, window_offset, now=now)
     paths = []
     for agent in selected:
         for path in archive_paths(agent):
-            try:
-                modified = path.stat().st_mtime
-            except OSError:
-                continue
-            if start <= modified < end:
-                paths.append((modified, agent, path))
+            timestamp = archive_path_timestamp(agent, path)
+            if start <= timestamp < end:
+                paths.append((timestamp, agent, path))
     paths.sort(key=lambda item: item[0], reverse=True)
     if max_files:
         paths = paths[:max_files]
@@ -1538,11 +1558,10 @@ def archive_max_window_offset(selected, window_days: int, *, now=None) -> int:
     oldest = None
     for agent in selected:
         for path in archive_paths(agent):
-            try:
-                modified = path.stat().st_mtime
-            except OSError:
+            timestamp = archive_path_timestamp(agent, path)
+            if not timestamp:
                 continue
-            oldest = modified if oldest is None else min(oldest, modified)
+            oldest = timestamp if oldest is None else min(oldest, timestamp)
     if oldest is None:
         return 0
     offset = 0
@@ -1567,13 +1586,25 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
     try:
         for item in iter_archive_records(path):
             if agent == "codex":
-                if item.get("type") != "session_meta":
-                    continue
+                item_type = item.get("type")
                 payload = item.get("payload") or {}
-                session_id = payload.get("id") or session_id
-                cwd = payload.get("cwd") or cwd
-                break
-            if agent == "claude":
+                if item_type == "session_meta":
+                    session_id = payload.get("id") or session_id
+                    cwd = payload.get("cwd") or cwd
+                    title = thread_names.get(session_id) or title
+                    if title:
+                        break
+                    continue
+                if item_type == "turn_context":
+                    cwd = payload.get("cwd") or cwd
+                    continue
+                if item_type == "response_item" and payload.get("type") == "message":
+                    candidate = extract_message_text(payload.get("content"))
+                    if not is_archive_noise(candidate):
+                        title = title_from_text(candidate, "")
+                        if title:
+                            break
+            elif agent == "claude":
                 session_id = item.get("sessionId") or session_id
                 cwd = item.get("cwd") or cwd
                 slug = item.get("slug") or slug
@@ -1584,7 +1615,7 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
     except OSError:
         return None
     if agent == "codex":
-        title = thread_names.get(session_id) or ""
+        title = title or thread_names.get(session_id) or ""
     elif slug:
         title = slug.replace("-", " ")
     return {
@@ -1596,17 +1627,18 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
     }
 
 
-def archive_window_has_metadata_match(
+def archive_window_metadata_match_score(
     query: str,
     selected,
     window_days: int,
     window_offset: int,
     max_files,
-) -> bool:
+) -> int:
     terms = archive_query_terms(query)
     if not terms:
-        return False
+        return 0
     thread_names = load_codex_thread_names() if "codex" in selected else {}
+    best = 0
     for agent, path in archive_source_paths(
         selected,
         window_days,
@@ -1617,9 +1649,37 @@ def archive_window_has_metadata_match(
         if not metadata:
             continue
         searchable = "\n".join(metadata.values()).lower()
-        if all(term in searchable for term in terms):
-            return True
-    return False
+        if not all(term in searchable for term in terms):
+            continue
+        score = 10
+        for field, weight in (
+            ("title", 100),
+            ("session_id", 90),
+            ("cwd", 30),
+            ("path", 20),
+            ("agent", 10),
+        ):
+            value = str(metadata.get(field) or "").lower()
+            if all(term in value for term in terms):
+                score = max(score, weight)
+        best = max(best, score)
+    return best
+
+
+def archive_window_has_metadata_match(
+    query: str,
+    selected,
+    window_days: int,
+    window_offset: int,
+    max_files,
+) -> bool:
+    return archive_window_metadata_match_score(
+        query,
+        selected,
+        window_days,
+        window_offset,
+        max_files,
+    ) > 0
 
 
 def archive_window_might_match(
@@ -3500,18 +3560,24 @@ def archive_fallback_rows(args, query, cache, progress=None, fallback_rows=None)
             closest_rows = rows
         return rows
 
+    best_target = None
+    best_score = 0
     for target in range(start_offset + 1, max_offset + 1):
         if progress:
             progress("Scanning metadata", target, max_offset)
-        if not archive_window_has_metadata_match(
+        score = archive_window_metadata_match_score(
             query,
             selected_sources,
             args.window_days,
             target,
             args.max_files,
-        ):
-            continue
-        rows = load_target(target)
+        )
+        if score > best_score:
+            best_target = target
+            best_score = score
+
+    if best_target is not None:
+        rows = load_target(best_target)
         if rows and archive_rows_have_strong_match(rows, query):
             label = archive_window_label(args.window_days, args.window_offset)
             return rows, f"Found matches in {label}"

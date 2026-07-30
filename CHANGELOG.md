@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.4 - 2026-07-30
+
+- Assign archive windows by session creation time instead of mutable file
+  modification time.
+- Prefer title and session-id matches across all windows over newer incidental
+  path matches.
+
 ## 0.4.3 - 2026-07-30
 
 - Continue archive searches through older 14-day windows when the active

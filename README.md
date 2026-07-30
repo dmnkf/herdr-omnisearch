@@ -45,7 +45,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To pin this release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.4.3
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.4.4
 ```
 
 Herdr plugin manifests do not modify user keybindings. The portable recommended
@@ -185,10 +185,12 @@ herdr-omnisearch archive-pick --no-refresh --background-refresh --stale-seconds 
 ```
 
 ArchiveSearch keeps only one chronological window in SQLite at a time. The
-default window is the newest 14 calendar days. Use left/right in the native
+default window is the newest 14 calendar days by session creation date, not
+the history file's modification time. Use left/right in the native
 picker to replace it with the previous/next 14-day window; the title always
 shows the active dates. When a query has no direct match in the active window,
-the picker scans older windows and loads the first matching one. For
+the picker scans older windows and prefers title or session-id matches over
+incidental path matches before loading the best matching window. For
 non-interactive use, pass `--window-offset 1` to `archive-index` to load the
 previous window.
 

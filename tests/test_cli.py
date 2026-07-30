@@ -873,7 +873,50 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual([record["id"] for record in records], ["first", "last"])
 
-    def test_zero_result_archive_search_chains_to_next_candidate_window(self):
+    def test_archive_window_uses_session_date_instead_of_file_mtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-2026-05-04T02-43-03-session.jsonl"
+            path.write_text('{}\n', encoding="utf-8")
+            now_dt = datetime(2026, 7, 30, 12, 0, 0)
+            os.utime(path, (now_dt.timestamp(), now_dt.timestamp()))
+
+            with patch.object(cli, "archive_paths", return_value=[path]):
+                selected = cli.archive_source_paths(
+                    {"codex"},
+                    14,
+                    6,
+                    0,
+                    now=now_dt.timestamp(),
+                )
+
+        self.assertEqual(selected, [("codex", path)])
+
+    def test_archive_metadata_derives_missing_title_from_first_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-2026-05-04T02-43-03-session.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-05-04T00:43:03Z",
+                    "type": "session_meta",
+                    "payload": {"id": "session-id", "cwd": "/project"},
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Target migration"}],
+                    },
+                },
+            ]
+            path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+            metadata = cli.archive_file_metadata("codex", path, {})
+
+        self.assertEqual(metadata["session_id"], "session-id")
+        self.assertEqual(metadata["title"], "Target migration")
+
+    def test_archive_search_prefers_older_title_match_over_newer_path_match(self):
         args = Namespace(
             agents="",
             agent=None,
@@ -890,7 +933,7 @@ class CliTests(unittest.TestCase):
         with patch.object(cli, "selected_archive_sources", return_value={"codex"}), patch.object(
             cli, "archive_max_window_offset", return_value=3
         ), patch.object(
-            cli, "archive_window_has_metadata_match", side_effect=[False, True]
+            cli, "archive_window_metadata_match_score", side_effect=[30, 100, 0]
         ) as preflight, patch.object(
             cli, "index_archive", return_value=(1, 1)
         ) as index, patch.object(
@@ -901,7 +944,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rows, expected)
         self.assertIn("Found matches", message)
         self.assertEqual(args.window_offset, 2)
-        self.assertEqual(preflight.call_count, 2)
+        self.assertEqual(preflight.call_count, 3)
         index.assert_called_once_with(
             "",
             0,
@@ -909,7 +952,7 @@ class CliTests(unittest.TestCase):
             window_days=14,
             window_offset=2,
         )
-        self.assertEqual(progress.call_count, 3)
+        self.assertEqual(progress.call_count, 4)
 
     def test_purge_requires_confirmation_and_removes_index_files(self):
         with tempfile.TemporaryDirectory() as tmp:
