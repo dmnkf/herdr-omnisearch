@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.5 - 2026-07-30
+
+- Continue cross-window metadata ranking when the active window contains only
+  a lower-quality space-label or path match.
+
 ## 0.4.4 - 2026-07-30
 
 - Assign archive windows by session creation time instead of mutable file

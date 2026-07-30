@@ -3509,26 +3509,35 @@ def cached_picker_rows(args, query, cache):
     return rows
 
 
-def archive_rows_have_strong_match(rows, query: str) -> bool:
+def archive_rows_metadata_match_score(rows, query: str) -> int:
     terms = archive_query_terms(query)
     if not terms:
-        return False
+        return 0
+    best = 0
     for row in rows:
-        metadata = "\n".join(
-            str(row.get(field) or "")
-            for field in (
-                "agent",
-                "session_id",
-                "title",
-                "space_label",
-                "workspace_label",
-                "cwd",
-                "path",
-            )
-        ).lower()
-        if all(term in metadata for term in terms):
-            return True
-    return False
+        fields = (
+            ("title", 100),
+            ("session_id", 90),
+            ("space_label", 50),
+            ("workspace_label", 50),
+            ("cwd", 30),
+            ("path", 20),
+            ("agent", 10),
+        )
+        metadata = "\n".join(str(row.get(field) or "") for field, _weight in fields).lower()
+        if not all(term in metadata for term in terms):
+            continue
+        score = 10
+        for field, weight in fields:
+            value = str(row.get(field) or "").lower()
+            if all(term in value for term in terms):
+                score = max(score, weight)
+        best = max(best, score)
+    return best
+
+
+def archive_rows_have_strong_match(rows, query: str) -> bool:
+    return archive_rows_metadata_match_score(rows, query) > 0
 
 
 def archive_fallback_rows(args, query, cache, progress=None, fallback_rows=None):
@@ -3536,6 +3545,7 @@ def archive_fallback_rows(args, query, cache, progress=None, fallback_rows=None)
     if sum(len(term) for term in terms) < 3:
         return fallback_rows or [], ""
     closest_rows = fallback_rows or []
+    current_score = archive_rows_metadata_match_score(closest_rows, query)
     selected_sources = selected_archive_sources(args.agents)
     max_offset = archive_max_window_offset(selected_sources, args.window_days)
     start_offset = args.window_offset
@@ -3561,7 +3571,7 @@ def archive_fallback_rows(args, query, cache, progress=None, fallback_rows=None)
         return rows
 
     best_target = None
-    best_score = 0
+    best_score = current_score
     for target in range(start_offset + 1, max_offset + 1):
         if progress:
             progress("Scanning metadata", target, max_offset)
@@ -3581,6 +3591,9 @@ def archive_fallback_rows(args, query, cache, progress=None, fallback_rows=None)
         if rows and archive_rows_have_strong_match(rows, query):
             label = archive_window_label(args.window_days, args.window_offset)
             return rows, f"Found matches in {label}"
+
+    if current_score:
+        return closest_rows, ""
 
     for target in range(start_offset + 1, max_offset + 1):
         if target in loaded_targets:
@@ -3627,8 +3640,6 @@ def curses_picker(stdscr, args) -> int:
 
     def rows_with_archive_fallback(search_query, current_rows):
         if not getattr(args, "archive", False) or not search_query.strip():
-            return current_rows, ""
-        if current_rows and archive_rows_have_strong_match(current_rows, search_query):
             return current_rows, ""
 
         def show_progress(stage, target, max_offset):

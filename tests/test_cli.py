@@ -929,6 +929,7 @@ class CliTests(unittest.TestCase):
             window_offset=0,
         )
         expected = [{"stable_id": "archive:match", "title": "target extension"}]
+        current = [{"stable_id": "archive:current", "space_label": "target extension"}]
         progress = Mock()
         with patch.object(cli, "selected_archive_sources", return_value={"codex"}), patch.object(
             cli, "archive_max_window_offset", return_value=3
@@ -939,7 +940,13 @@ class CliTests(unittest.TestCase):
         ) as index, patch.object(
             cli, "cached_picker_rows", return_value=expected
         ):
-            rows, message = cli.archive_fallback_rows(args, "target", {}, progress=progress)
+            rows, message = cli.archive_fallback_rows(
+                args,
+                "target",
+                {},
+                progress=progress,
+                fallback_rows=current,
+            )
 
         self.assertEqual(rows, expected)
         self.assertIn("Found matches", message)
