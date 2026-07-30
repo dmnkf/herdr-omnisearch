@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import subprocess
@@ -5,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from argparse import Namespace
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -688,6 +690,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse(config["archive_enabled"])
         self.assertEqual(config["archive_max_files"], 500)
         self.assertEqual(config["archive_since_days"], 90)
+        self.assertEqual(config["archive_window_days"], 14)
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.ini"
             config_path.write_text("[archive]\nenabled = false\n", encoding="utf-8")
@@ -702,7 +705,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.ini"
             config.write_text(
-                "[archive]\nenabled = true\nmax_files = 25\nsince_days = 14\n",
+                "[archive]\nenabled = true\nmax_files = 25\nsince_days = 14\nwindow_days = 21\n",
                 encoding="utf-8",
             )
             with patch.dict(
@@ -713,6 +716,101 @@ class CliTests(unittest.TestCase):
             self.assertTrue(parsed["archive_enabled"])
             self.assertEqual(parsed["archive_max_files"], 25)
             self.assertEqual(parsed["archive_since_days"], 14)
+            self.assertEqual(parsed["archive_window_days"], 21)
+
+    def test_archive_windows_are_calendar_aligned_and_chronological(self):
+        now = datetime(2026, 7, 30, 12, 0, 0).timestamp()
+        newest_start, newest_end = cli.archive_window_bounds(14, 0, now=now)
+        older_start, older_end = cli.archive_window_bounds(14, 1, now=now)
+
+        self.assertEqual(datetime.fromtimestamp(newest_start), datetime(2026, 7, 17))
+        self.assertEqual(datetime.fromtimestamp(newest_end), datetime(2026, 7, 31))
+        self.assertEqual(older_end, newest_start)
+        self.assertEqual(older_end - older_start, 14 * 86400)
+
+    def test_archive_index_replaces_the_loaded_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "index.sqlite3"
+            config = root / "config.ini"
+            sessions = root / "sessions"
+            sessions.mkdir()
+            config.write_text(
+                "\n".join(
+                    [
+                        "[archive]",
+                        "enabled = true",
+                        "agents = codex",
+                        "max_files = 0",
+                        "window_days = 14",
+                        "",
+                        "[archive.codex]",
+                        f"sessions = {sessions}/*.jsonl",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            now_dt = datetime(2026, 7, 30, 12, 0, 0)
+
+            def write_session(name, session_id, modified, text):
+                path = sessions / f"{name}.jsonl"
+                timestamp = modified.isoformat()
+                records = [
+                    {
+                        "timestamp": timestamp,
+                        "type": "session_meta",
+                        "payload": {"id": session_id, "cwd": str(root), "timestamp": timestamp},
+                    },
+                    {
+                        "timestamp": timestamp,
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": text}],
+                        },
+                    },
+                ]
+                path.write_text(
+                    "\n".join(json.dumps(record) for record in records) + "\n",
+                    encoding="utf-8",
+                )
+                os.utime(path, (modified.timestamp(), modified.timestamp()))
+
+            write_session("new", "new-session", now_dt - timedelta(days=2), "new window")
+            write_session("old", "old-session", now_dt - timedelta(days=16), "old window")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "HERDR_OMNISEARCH_CONFIG": str(config),
+                    "HERDR_OMNISEARCH_DB": str(db),
+                },
+                clear=False,
+            ):
+                cli.CONFIG_CACHE = None
+                sessions_count, chunks = cli.index_archive(window_days=14, window_offset=0, now=now_dt.timestamp())
+                self.assertEqual(sessions_count, 1)
+                self.assertGreater(chunks, 0)
+                conn = cli.connect()
+                self.assertEqual(
+                    conn.execute("SELECT session_id FROM archive_sessions").fetchone()[0],
+                    "new-session",
+                )
+                self.assertTrue(cli.archive_window_is_indexed(conn, 14, 0, now=now_dt.timestamp()))
+                conn.close()
+
+                sessions_count, chunks = cli.index_archive(window_days=14, window_offset=1, now=now_dt.timestamp())
+                self.assertEqual(sessions_count, 1)
+                self.assertGreater(chunks, 0)
+                conn = cli.connect()
+                self.assertEqual(
+                    conn.execute("SELECT session_id FROM archive_sessions").fetchone()[0],
+                    "old-session",
+                )
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM archive_sessions").fetchone()[0], 1)
+                self.assertTrue(cli.archive_window_is_indexed(conn, 14, 1, now=now_dt.timestamp()))
+                conn.close()
 
     def test_purge_requires_confirmation_and_removes_index_files(self):
         with tempfile.TemporaryDirectory() as tmp:

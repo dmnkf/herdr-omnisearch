@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 - 2026-07-30
+
+- Keep only one calendar-aligned archive window in the index, defaulting to the
+  newest 14 days, with left/right picker navigation to older/newer windows.
+- Filter source files before parsing and stream archive rows and token metadata
+  into SQLite so index memory stays bounded.
+
 ## 0.4.1 - 2026-07-24
 
 - Reap index rows, staleness markers, and watcher state of sessions whose
