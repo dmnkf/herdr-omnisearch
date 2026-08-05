@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.6 - 2026-08-05
+
+- Return cross-window title and session metadata matches immediately instead
+  of blocking on a full 14-day content-index rebuild.
+- Resume metadata results directly and suppress the misleading `No matches`
+  line while a search is still scanning.
+
 ## 0.4.5 - 2026-07-30
 
 - Continue cross-window metadata ranking when the active window contains only

@@ -928,17 +928,27 @@ class CliTests(unittest.TestCase):
             window_days=14,
             window_offset=0,
         )
-        expected = [{"stable_id": "archive:match", "title": "target extension"}]
         current = [{"stable_id": "archive:current", "space_label": "target extension"}]
+        path_match = (30, {"agent": "codex", "session_id": "nearby", "title": "review"})
+        title_match = (
+            100,
+            {
+                "agent": "codex",
+                "session_id": "target-session",
+                "title": "target extension",
+                "cwd": "/project",
+                "path": "/archive/target.jsonl",
+                "started_at": "2026-05-04T12:00:00",
+                "updated_at": "2026-05-04T12:00:00",
+            },
+        )
         progress = Mock()
         with patch.object(cli, "selected_archive_sources", return_value={"codex"}), patch.object(
             cli, "archive_max_window_offset", return_value=3
         ), patch.object(
-            cli, "archive_window_metadata_match_score", side_effect=[30, 100, 0]
+            cli, "archive_window_metadata_matches", side_effect=[[path_match], [title_match], []]
         ) as preflight, patch.object(
-            cli, "index_archive", return_value=(1, 1)
-        ) as index, patch.object(
-            cli, "cached_picker_rows", return_value=expected
+            cli, "mark_archive_row", side_effect=lambda row: row
         ):
             rows, message = cli.archive_fallback_rows(
                 args,
@@ -948,18 +958,29 @@ class CliTests(unittest.TestCase):
                 fallback_rows=current,
             )
 
-        self.assertEqual(rows, expected)
-        self.assertIn("Found matches", message)
-        self.assertEqual(args.window_offset, 2)
+        self.assertEqual(rows[0]["session_id"], "target-session")
+        self.assertTrue(rows[0]["_archive_metadata"])
+        self.assertIn("Found title matches", message)
+        self.assertEqual(args.window_offset, 0)
         self.assertEqual(preflight.call_count, 3)
-        index.assert_called_once_with(
-            "",
-            0,
-            None,
-            window_days=14,
-            window_offset=2,
-        )
-        self.assertEqual(progress.call_count, 4)
+        self.assertEqual(progress.call_count, 3)
+
+    def test_archive_metadata_picker_result_resumes_without_database_lookup(self):
+        args = Namespace(archive=True)
+        row = {
+            "stable_id": "archive-meta:target",
+            "_archive_metadata": True,
+            "agent": "codex",
+            "session_id": "target-session",
+        }
+        with patch.object(cli, "focus_archive_row", return_value=0) as focus_row, patch.object(
+            cli, "focus_archive_result", return_value=2
+        ) as focus_result:
+            result = cli.picker_focus(args, row)
+
+        self.assertEqual(result, 0)
+        focus_row.assert_called_once_with(row)
+        focus_result.assert_not_called()
 
     def test_purge_requires_confirmation_and_removes_index_files(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -45,7 +45,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To pin this release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.4.5
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.4.6
 ```
 
 Herdr plugin manifests do not modify user keybindings. The portable recommended
@@ -190,7 +190,9 @@ the history file's modification time. Use left/right in the native
 picker to replace it with the previous/next 14-day window; the title always
 shows the active dates. When a query has no direct match in the active window,
 the picker scans older windows and prefers title or session-id matches over
-incidental path matches before loading the best matching window. For
+incidental path matches. Metadata matches appear immediately and can be
+resumed without rebuilding that window's full-text index; content-only matches
+still load the matching window. For
 non-interactive use, pass `--window-offset 1` to `archive-index` to load the
 previous window.
 

@@ -1618,27 +1618,49 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
         title = title or thread_names.get(session_id) or ""
     elif slug:
         title = slug.replace("-", " ")
+    started_epoch = archive_path_timestamp(agent, path)
+    started_at = datetime.fromtimestamp(started_epoch).isoformat() if started_epoch else ""
     return {
         "agent": agent,
         "session_id": session_id,
         "title": title,
         "cwd": cwd,
         "path": str(path),
+        "started_at": started_at,
+        "updated_at": started_at,
     }
 
 
-def archive_window_metadata_match_score(
+def archive_metadata_match_score(metadata, terms) -> int:
+    searchable = "\n".join(str(value) for value in metadata.values()).lower()
+    if not all(term in searchable for term in terms):
+        return 0
+    score = 10
+    for field, weight in (
+        ("title", 100),
+        ("session_id", 90),
+        ("cwd", 30),
+        ("path", 20),
+        ("agent", 10),
+    ):
+        value = str(metadata.get(field) or "").lower()
+        if all(term in value for term in terms):
+            score = max(score, weight)
+    return score
+
+
+def archive_window_metadata_matches(
     query: str,
     selected,
     window_days: int,
     window_offset: int,
     max_files,
-) -> int:
+):
     terms = archive_query_terms(query)
     if not terms:
-        return 0
+        return []
     thread_names = load_codex_thread_names() if "codex" in selected else {}
-    best = 0
+    matches = []
     for agent, path in archive_source_paths(
         selected,
         window_days,
@@ -1648,22 +1670,34 @@ def archive_window_metadata_match_score(
         metadata = archive_file_metadata(agent, path, thread_names)
         if not metadata:
             continue
-        searchable = "\n".join(metadata.values()).lower()
-        if not all(term in searchable for term in terms):
-            continue
-        score = 10
-        for field, weight in (
-            ("title", 100),
-            ("session_id", 90),
-            ("cwd", 30),
-            ("path", 20),
-            ("agent", 10),
-        ):
-            value = str(metadata.get(field) or "").lower()
-            if all(term in value for term in terms):
-                score = max(score, weight)
-        best = max(best, score)
-    return best
+        score = archive_metadata_match_score(metadata, terms)
+        if score:
+            matches.append((score, metadata))
+    return sorted(
+        matches,
+        key=lambda item: (
+            -item[0],
+            -iso_to_epoch(item[1].get("started_at") or ""),
+            item[1].get("title") or "",
+        ),
+    )
+
+
+def archive_window_metadata_match_score(
+    query: str,
+    selected,
+    window_days: int,
+    window_offset: int,
+    max_files,
+) -> int:
+    matches = archive_window_metadata_matches(
+        query,
+        selected,
+        window_days,
+        window_offset,
+        max_files,
+    )
+    return matches[0][0] if matches else 0
 
 
 def archive_window_has_metadata_match(
@@ -2935,7 +2969,10 @@ def focus_archive_result(stable_id: str) -> int:
     if not row:
         print(f"unknown archive result id: {stable_id}", file=sys.stderr)
         return 2
-    row = dict(row)
+    return focus_archive_row(dict(row))
+
+
+def focus_archive_row(row) -> int:
     try:
         pane = find_existing_archive_pane(row)
     except RuntimeError:
@@ -3217,7 +3254,8 @@ def render_picker(
         addnstr_safe(stdscr, 3, 0, shorten(message, width - 1), width - 1, curses.A_DIM)
 
     if not rows:
-        addnstr_safe(stdscr, 4, 0, "No matches.", width - 1, curses.A_DIM)
+        if not message:
+            addnstr_safe(stdscr, 4, 0, "No matches.", width - 1, curses.A_DIM)
         stdscr.refresh()
         return
 
@@ -3290,8 +3328,12 @@ def picker_rows(args, query, *, snippets=False):
     )
 
 
-def picker_focus(args, stable_id):
+def picker_focus(args, result):
+    row = result if isinstance(result, dict) else None
+    stable_id = row.get("stable_id") if row is not None else result
     if getattr(args, "archive", False):
+        if row is not None and row.get("_archive_metadata"):
+            return focus_archive_row(row)
         return focus_archive_result(stable_id)
     return focus_result(stable_id)
 
@@ -3430,7 +3472,7 @@ def refresh_picker_index(args):
 def execute_action(stdscr, args, row, action):
     name = action["name"]
     if name == "focus":
-        return picker_focus(args, row["stable_id"]), "", False
+        return picker_focus(args, row), "", False
     if name.startswith("yank-"):
         ok, message = clipboard_copy(action.get("value") or "")
         return None, message if ok else f"yank failed: {message}", False
@@ -3540,6 +3582,32 @@ def archive_rows_have_strong_match(rows, query: str) -> bool:
     return archive_rows_metadata_match_score(rows, query) > 0
 
 
+def archive_metadata_picker_rows(matches, limit: int):
+    rows = []
+    seen = set()
+    for score, metadata in matches:
+        key = (metadata.get("agent"), metadata.get("session_id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        row = dict(metadata)
+        row.update(
+            {
+                "stable_id": "archive-meta:"
+                + hashlib.sha1("\0".join(str(value or "") for value in key).encode()).hexdigest(),
+                "session_key": ":".join(str(value or "") for value in key),
+                "content": row.get("title") or row.get("cwd") or "",
+                "match_count": 1,
+                "rank": -score,
+                "_archive_metadata": True,
+            }
+        )
+        rows.append(mark_archive_row(row))
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def archive_fallback_rows(args, query, cache, progress=None, fallback_rows=None):
     terms = archive_query_terms(query)
     if sum(len(term) for term in terms) < 3:
@@ -3572,25 +3640,27 @@ def archive_fallback_rows(args, query, cache, progress=None, fallback_rows=None)
 
     best_target = None
     best_score = current_score
+    best_matches = []
     for target in range(start_offset + 1, max_offset + 1):
         if progress:
             progress("Scanning metadata", target, max_offset)
-        score = archive_window_metadata_match_score(
+        matches = archive_window_metadata_matches(
             query,
             selected_sources,
             args.window_days,
             target,
             args.max_files,
         )
+        score = matches[0][0] if matches else 0
         if score > best_score:
             best_target = target
             best_score = score
+            best_matches = matches
 
     if best_target is not None:
-        rows = load_target(best_target)
-        if rows and archive_rows_have_strong_match(rows, query):
-            label = archive_window_label(args.window_days, args.window_offset)
-            return rows, f"Found matches in {label}"
+        rows = archive_metadata_picker_rows(best_matches, args.limit)
+        label = archive_window_label(args.window_days, best_target)
+        return rows, f"Found title matches in {label}"
 
     if current_score:
         return closest_rows, ""
@@ -3750,7 +3820,7 @@ def curses_picker(stdscr, args) -> int:
 
         if key in ("\n", "\r"):
             if rows:
-                return picker_focus(args, rows[selected]["stable_id"])
+                return picker_focus(args, rows[selected])
             continue
 
         if isinstance(key, int):
