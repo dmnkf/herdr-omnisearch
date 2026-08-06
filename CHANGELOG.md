@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0 - 2026-08-06
+
+- Add a persistent, incremental archive catalog with bounded per-file memory.
+- Search all archive dates without rebuilding history windows during typing.
+- Make 14-day browsing instant and prioritize title matches over incidental paths.
+
 ## 0.4.6 - 2026-08-05
 
 - Return cross-window title and session metadata matches immediately instead

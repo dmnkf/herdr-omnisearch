@@ -6,7 +6,7 @@ The supported public installation path is:
 herdr plugin install dmnkf/herdr-omnisearch
 ```
 
-Use `--ref v0.4.6` to pin this release. The plugin has no runtime
+Use `--ref v0.5.0` to pin this release. The plugin has no runtime
 dependency outside Python 3.9+ and the `herdr` command.
 
 GitHub plugin installation does not modify `~/.config/herdr/config.toml`. Add
@@ -67,6 +67,7 @@ The default installer:
 - links the checkout as the `herdr.omnisearch` plugin
 - seeds Herdr's plugin config directory from the existing config
 - starts the socket event watcher
+- starts an incremental archive-catalog refresh when archive search is enabled
 - installs `plugin_action` keybindings in `~/.config/herdr/config.toml`
 
 It does not copy indexes or session data from another VM. On an existing
@@ -88,7 +89,13 @@ The installer reloads Herdr config. The plugin can be inspected directly:
 herdr plugin list --plugin herdr.omnisearch
 herdr plugin action list --plugin herdr.omnisearch
 herdr-omnisearch watch-status
+herdr-omnisearch archive-catalog-status
 ```
+
+Archive search is private and opt-in. Set `enabled = true` under `[archive]`
+in the plugin's `config.ini`, then run `herdr-omnisearch archive-catalog-index`
+once or let the plugin build it in the background. Partial results are usable
+while the first build is running.
 
 The default keybindings are:
 

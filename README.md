@@ -12,10 +12,11 @@ socket remains responsible for workspace topology, ordinary shell panes,
 plugin panes, and event subscriptions. SQLite FTS5 remains local and owns both
 live search data and archived-session search.
 
-It keeps a private SQLite FTS5 index in Herdr's plugin state directory:
+It keeps private SQLite FTS5 indexes in Herdr's plugin state directory:
 
 ```text
 ~/.local/state/herdr/plugins/herdr.omnisearch/index.sqlite3
+~/.local/state/herdr/plugins/herdr.omnisearch/archive-catalog.sqlite3
 ```
 
 Standalone CLI installs without the plugin use
@@ -45,7 +46,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To pin this release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.4.6
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.5.0
 ```
 
 Herdr plugin manifests do not modify user keybindings. The portable recommended
@@ -166,10 +167,18 @@ action mode:
 
 Current actions include exact focus, rename workspace, rename pane, and yanking cwd/session/pane/workspace ids.
 
-Index archived agent session logs:
+Archive indexing is private and disabled by default. Enable it in the plugin's
+`config.ini` first:
+
+```ini
+[archive]
+enabled = true
+```
+
+Build or incrementally refresh the archive catalog:
 
 ```bash
-herdr-omnisearch archive-index
+herdr-omnisearch archive-catalog-index
 ```
 
 Search archived sessions:
@@ -181,20 +190,21 @@ herdr-omnisearch archive-search migration notes
 Open the archive picker:
 
 ```bash
-herdr-omnisearch archive-pick --no-refresh --background-refresh --stale-seconds 3600
+herdr-omnisearch archive-pick --no-refresh --background-refresh --stale-seconds 300
 ```
 
-ArchiveSearch keeps only one chronological window in SQLite at a time. The
-default window is the newest 14 calendar days by session creation date, not
-the history file's modification time. Use left/right in the native
-picker to replace it with the previous/next 14-day window; the title always
-shows the active dates. When a query has no direct match in the active window,
-the picker scans older windows and prefers title or session-id matches over
-incidental path matches. Metadata matches appear immediately and can be
-resumed without rebuilding that window's full-text index; content-only matches
-still load the matching window. For
-non-interactive use, pass `--window-offset 1` to `archive-index` to load the
-previous window.
+ArchiveSearch stores one compact, disk-backed search document per session. The
+first catalog build streams one history file at a time and commits partial
+results in batches; later refreshes only reread files whose size or modification
+time changed. The plugin starts refreshes in the background, and interactive
+typing never opens raw history files or rebuilds an archive window.
+
+The picker initially browses the newest 14 calendar days by session creation
+date. Left/right changes that date filter instantly. When the best match is
+outside the active dates, the picker searches the complete catalog and returns
+the older result directly, with title and session matches ranked above
+incidental path matches. Exact and typo-tolerant content searches use the same
+catalog and can be resumed without a second indexing pass.
 
 Check state:
 
@@ -229,6 +239,8 @@ Use `config.example.ini` as a starting point.
 `HERDR_BIN` overrides the Herdr binary path. The portable default is `herdr` from `PATH`.
 
 `HERDR_OMNISEARCH_DB` overrides the SQLite database path.
+
+`HERDR_OMNISEARCH_CATALOG_DB` overrides the archive catalog database path.
 
 `HERDR_OMNISEARCH_COMMAND` overrides the command used for background indexing and fzf previews. Normally this is discovered automatically from the installed `herdr-omnisearch` command.
 

@@ -43,10 +43,12 @@ STATUS_WEIGHT = {
 }
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]*")
 TOKEN_TABLES = {
-    "live": ("terms", "token_docs", "token_trigrams"),
-    "archive": ("archive_terms", "archive_token_docs", "archive_token_trigrams"),
+    "live": ("terms", "token_trigrams"),
+    "archive": ("archive_terms", "archive_token_trigrams"),
+    "catalog": ("catalog_terms", "catalog_token_trigrams"),
 }
 CONFIG_CACHE = None
+ARCHIVE_CATALOG_SCHEMA_READY = set()
 
 
 def split_config_list(value: str):
@@ -304,6 +306,13 @@ def db_path() -> Path:
         finally:
             os.close(lock_fd)
     return path
+
+
+def archive_catalog_db_path() -> Path:
+    override = os.environ.get("HERDR_OMNISEARCH_CATALOG_DB")
+    if override:
+        return Path(override)
+    return data_dir() / "archive-catalog.sqlite3"
 
 
 def needs_database_repair(path: Path, legacy: Path) -> bool:
@@ -647,6 +656,77 @@ def init_schema(conn):
     )
 
 
+def archive_catalog_connect():
+    requested_path = archive_catalog_db_path().expanduser()
+    existed = requested_path.exists()
+    path = prepare_database_path(requested_path)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=500")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    cache_key = str(path.absolute())
+    if not existed:
+        ARCHIVE_CATALOG_SCHEMA_READY.discard(cache_key)
+    if cache_key in ARCHIVE_CATALOG_SCHEMA_READY:
+        return conn
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS catalog_sessions (
+            session_key TEXT PRIMARY KEY,
+            agent TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            space_label TEXT,
+            title TEXT,
+            cwd TEXT,
+            path TEXT NOT NULL UNIQUE,
+            started_at TEXT,
+            updated_at TEXT,
+            started_epoch INTEGER NOT NULL DEFAULT 0,
+            updated_epoch INTEGER NOT NULL DEFAULT 0,
+            preview TEXT,
+            is_wrapper INTEGER NOT NULL DEFAULT 0,
+            source_size INTEGER NOT NULL,
+            source_mtime_ns INTEGER NOT NULL,
+            indexed_at INTEGER NOT NULL
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS catalog_fts USING fts5(
+            session_key UNINDEXED,
+            body,
+            tokenize = 'porter unicode61'
+        );
+
+        CREATE TABLE IF NOT EXISTS catalog_terms (
+            token TEXT PRIMARY KEY
+        );
+
+        CREATE TABLE IF NOT EXISTS catalog_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS catalog_token_trigrams (
+            trigram TEXT NOT NULL,
+            token TEXT NOT NULL,
+            PRIMARY KEY (trigram, token)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_catalog_sessions_agent ON catalog_sessions(agent);
+        CREATE INDEX IF NOT EXISTS idx_catalog_sessions_started_epoch ON catalog_sessions(started_epoch);
+        CREATE INDEX IF NOT EXISTS idx_catalog_token_trigrams_token ON catalog_token_trigrams(token);
+        """
+    )
+    ensure_column(conn, "catalog_sessions", "space_label", "TEXT")
+    ensure_column(conn, "catalog_sessions", "started_epoch", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "catalog_sessions", "updated_epoch", "INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_catalog_sessions_started_epoch ON catalog_sessions(started_epoch)"
+    )
+    ARCHIVE_CATALOG_SCHEMA_READY.add(cache_key)
+    return conn
+
+
 def ensure_column(conn, table: str, column: str, definition: str):
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
@@ -763,7 +843,7 @@ def token_tables(scope: str):
 def candidate_tokens_for_term(conn, term: str, *, limit: int = 180, scope: str = "live"):
     term = term.lower()
     candidates = set()
-    terms_table, _token_docs_table, trigrams_table = token_tables(scope)
+    terms_table, trigrams_table = token_tables(scope)
 
     upper = prefix_upper_bound(term)
     if upper:
@@ -812,7 +892,7 @@ def has_prefix_token(conn, term: str, *, scope: str = "live") -> bool:
     upper = prefix_upper_bound(term)
     if not upper:
         return False
-    terms_table, _token_docs_table, _trigrams_table = token_tables(scope)
+    terms_table, _trigrams_table = token_tables(scope)
     return (
         conn.execute(
             f"""
@@ -1760,6 +1840,474 @@ def selected_archive_sources(agents: str):
     configured = app_config()["archive_agents"]
     selected = {agent.strip() for agent in (agents or ",".join(configured)).split(",") if agent.strip()}
     return selected or set(configured)
+
+
+def archive_catalog_message(agent: str, item) -> str:
+    if agent == "codex":
+        payload = item.get("payload") or {}
+        if item.get("type") == "response_item" and payload.get("type") == "message":
+            return extract_message_text(payload.get("content"))
+        return ""
+    if agent == "claude" and item.get("type") in ("user", "assistant"):
+        return extract_message_text((item.get("message") or {}).get("content"))
+    return ""
+
+
+def archive_catalog_is_wrapper(title: str, preview: str) -> bool:
+    value = f"{title}\n{preview}".lower()
+    markers = (
+        "agent history whose request action you are assessing",
+        ">>> approval request start",
+        "assess the exact planned action below",
+    )
+    return any(marker in value for marker in markers)
+
+
+def archive_catalog_document(agent: str, path: Path, thread_names):
+    metadata = archive_file_metadata(agent, path, thread_names)
+    if not metadata:
+        return None
+    terms = set()
+    for field in ("agent", "session_id", "title", "cwd", "path"):
+        terms.update(tokens(str(metadata.get(field) or "")))
+    preview = ""
+    updated_at = metadata.get("updated_at") or metadata.get("started_at") or ""
+    try:
+        for item in iter_archive_records(path):
+            timestamp = item.get("timestamp") or ""
+            if timestamp:
+                updated_at = timestamp
+            text = archive_catalog_message(agent, item)
+            if not text or is_archive_noise(text):
+                continue
+            clipped = clip_text(text)
+            if not preview:
+                preview = shorten(clipped, 600)
+            terms.update(tokens(clipped))
+    except OSError:
+        return None
+    metadata["updated_at"] = updated_at
+    metadata["preview"] = preview or metadata.get("title") or ""
+    metadata["space_label"] = derive_space_label_from_cwd(metadata.get("cwd") or "")
+    terms.update(tokens(metadata["space_label"]))
+    metadata["started_epoch"] = int(
+        iso_to_epoch(metadata.get("started_at") or "") or archive_path_timestamp(agent, path)
+    )
+    metadata["updated_epoch"] = int(
+        iso_to_epoch(metadata.get("updated_at") or "") or metadata["started_epoch"]
+    )
+    metadata["is_wrapper"] = int(
+        archive_catalog_is_wrapper(metadata.get("title") or "", metadata["preview"])
+    )
+    return metadata, terms
+
+
+def archive_catalog_search_body(metadata, document_terms) -> str:
+    weighted = []
+    for field, weight in (
+        ("title", 12),
+        ("session_id", 8),
+        ("space_label", 6),
+        ("cwd", 3),
+        ("agent", 2),
+    ):
+        field_terms = tokens(str(metadata.get(field) or ""))
+        for _ in range(weight):
+            weighted.extend(field_terms)
+    weighted.extend(sorted(document_terms))
+    return " ".join(weighted)
+
+
+def insert_archive_catalog_terms(conn, document_terms) -> None:
+    ordered = sorted(document_terms)
+    new_terms = []
+    for offset in range(0, len(ordered), 400):
+        batch = ordered[offset : offset + 400]
+        placeholders = ",".join("?" for _ in batch)
+        existing = {
+            row["token"]
+            for row in conn.execute(
+                f"SELECT token FROM catalog_terms WHERE token IN ({placeholders})",
+                batch,
+            ).fetchall()
+        }
+        new_terms.extend(token for token in batch if token not in existing)
+    if not new_terms:
+        return
+    conn.executemany(
+        "INSERT INTO catalog_terms (token) VALUES (?)",
+        ((token,) for token in new_terms),
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO catalog_token_trigrams (trigram, token) VALUES (?, ?)",
+        (
+            (trigram, token)
+            for token in new_terms
+            for trigram in token_trigrams(token)
+        ),
+    )
+
+
+def archive_catalog_index(agents: str = ""):
+    require_archive_enabled()
+    inherited_lock = os.environ.get("HERDR_OMNISEARCH_CATALOG_LOCK_FD")
+    lock_fd = None
+    if not inherited_lock:
+        lock_fd = exclusive_lock(data_dir() / "archive-catalog.lock")
+    try:
+        return _archive_catalog_index_unlocked(agents)
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+
+
+def _archive_catalog_index_unlocked(agents: str = ""):
+    selected = selected_archive_sources(agents)
+    thread_names = load_codex_thread_names() if "codex" in selected else {}
+    sources = []
+    for agent in sorted(selected):
+        sources.extend((agent, path) for path in archive_paths(agent))
+    sources = list(dict.fromkeys(sources))
+    sources.sort(
+        key=lambda item: archive_path_timestamp(item[0], item[1]),
+        reverse=True,
+    )
+    conn = archive_catalog_connect()
+    existing = {
+        row["path"]: row
+        for row in conn.execute(
+            """
+            SELECT session_key, agent, path, source_size, source_mtime_ns, started_epoch
+            FROM catalog_sessions
+            """
+        ).fetchall()
+    }
+    source_paths = {str(path) for _agent, path in sources}
+    changed = 0
+    unchanged = 0
+    removed = 0
+    token_count = 0
+    indexed_at = int(time.time())
+    try:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_meta (key, value) VALUES ('index_started_at', ?)",
+                (str(indexed_at),),
+            )
+            stale_paths = {
+                path
+                for path, row in existing.items()
+                if row["agent"] in selected and path not in source_paths
+            }
+            for stale_path in sorted(stale_paths):
+                old = existing[stale_path]
+                conn.execute("DELETE FROM catalog_fts WHERE session_key = ?", (old["session_key"],))
+                conn.execute("DELETE FROM catalog_sessions WHERE session_key = ?", (old["session_key"],))
+                removed += 1
+
+        pending_commits = 0
+        for agent, path in sources:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            old = existing.get(str(path))
+            if (
+                old
+                and int(old["source_size"]) == stat.st_size
+                and int(old["source_mtime_ns"]) == stat.st_mtime_ns
+                and int(old["started_epoch"] or 0) > 0
+            ):
+                unchanged += 1
+                continue
+            document = archive_catalog_document(agent, path, thread_names)
+            if not document:
+                continue
+            metadata, document_terms = document
+            session_key = f"{agent}:{metadata['session_id']}"
+            row = {
+                **metadata,
+                "session_key": session_key,
+                "source_size": stat.st_size,
+                "source_mtime_ns": stat.st_mtime_ns,
+                "indexed_at": indexed_at,
+            }
+            if old:
+                conn.execute("DELETE FROM catalog_fts WHERE session_key = ?", (old["session_key"],))
+                conn.execute("DELETE FROM catalog_sessions WHERE session_key = ?", (old["session_key"],))
+            conn.execute("DELETE FROM catalog_fts WHERE session_key = ?", (session_key,))
+            conn.execute("DELETE FROM catalog_sessions WHERE session_key = ?", (session_key,))
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO catalog_sessions (
+                    session_key, agent, session_id, space_label, title, cwd, path,
+                    started_at, updated_at, started_epoch, updated_epoch, preview, is_wrapper,
+                    source_size, source_mtime_ns, indexed_at
+                ) VALUES (
+                    :session_key, :agent, :session_id, :space_label, :title, :cwd, :path,
+                    :started_at, :updated_at, :started_epoch, :updated_epoch, :preview, :is_wrapper,
+                    :source_size, :source_mtime_ns, :indexed_at
+                )
+                """,
+                row,
+            )
+            conn.execute(
+                "INSERT INTO catalog_fts (session_key, body) VALUES (?, ?)",
+                (session_key, archive_catalog_search_body(metadata, document_terms)),
+            )
+            insert_archive_catalog_terms(conn, document_terms)
+            pending_commits += 1
+            if pending_commits >= 25:
+                conn.commit()
+                pending_commits = 0
+            changed += 1
+            token_count += len(document_terms)
+
+        if pending_commits:
+            conn.commit()
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_meta (key, value) VALUES ('last_indexed_at', ?)",
+                (str(int(time.time())),),
+            )
+    finally:
+        conn.close()
+    return changed, unchanged, removed, token_count
+
+
+def archive_catalog_state():
+    conn = archive_catalog_connect()
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM catalog_sessions").fetchone()[0]
+        last = conn.execute(
+            "SELECT value FROM catalog_meta WHERE key = 'last_indexed_at'"
+        ).fetchone()
+    finally:
+        conn.close()
+    return count, int(last[0]) if last else 0
+
+
+def archive_catalog_state_name(count: int, last: int) -> str:
+    if lock_is_held(data_dir() / "archive-catalog.lock"):
+        return "updating"
+    if not count:
+        return "empty"
+    if not last:
+        return "partial"
+    return "ready"
+
+
+def maybe_background_archive_catalog_index(agents: str = "", stale_seconds: int = 60):
+    require_archive_enabled()
+    count, last = archive_catalog_state()
+    if count and int(time.time()) - last < stale_seconds:
+        return
+    lock_path = data_dir() / "archive-catalog.lock"
+    lock_fd = try_exclusive_lock(lock_path)
+    if lock_fd is None:
+        return
+    cmd = [*cli_command(), "archive-catalog-index", "--agents", agents]
+    spawn_locked_background(
+        cmd,
+        lock_fd,
+        lock_env="HERDR_OMNISEARCH_CATALOG_LOCK_FD",
+    )
+
+
+def archive_catalog_fuzzy_query(conn, query_terms):
+    groups = []
+    for term in query_terms:
+        candidates = candidate_tokens_for_term(conn, term, limit=24, scope="catalog")
+        if not candidates:
+            return ""
+        quoted = []
+        for token, _score in candidates:
+            quoted.append('"' + token.replace('"', '""') + '"')
+        groups.append("(" + " OR ".join(quoted) + ")")
+    return " ".join(groups)
+
+
+def archive_catalog_metadata_score(row, query_terms) -> int:
+    if not query_terms:
+        return 0
+    for field, weight in (
+        ("title", 100),
+        ("session_id", 90),
+        ("space_label", 60),
+        ("cwd", 30),
+        ("path", 20),
+        ("agent", 10),
+    ):
+        field_terms = tokens(str(row.get(field) or ""))
+        if field_terms and all(
+            any(
+                score_token_candidate(term, candidate) >= fuzzy_score_threshold(term)
+                for candidate in field_terms
+            )
+            for term in query_terms
+        ):
+            return weight
+    return 0
+
+
+def archive_catalog_result_row(row):
+    result = dict(row)
+    result.update(
+        {
+            "stable_id": archive_catalog_stable_id(result["session_key"]),
+            "content": result.get("preview") or result.get("title") or "",
+            "match_count": 1,
+            "source": "archive",
+            "agent_status": "archive",
+            "workspace_label": result.get("space_label") or "archive",
+            "pane_label": result.get("title") or result.get("session_id"),
+            "pane_id": result.get("session_id"),
+            "foreground_cwd": result.get("cwd") or "",
+            "_archive_catalog": True,
+        }
+    )
+    return result
+
+
+def archive_catalog_stable_id(session_key: str) -> str:
+    encoded = base64.urlsafe_b64encode(session_key.encode("utf-8")).decode("ascii")
+    return "archive-catalog:" + encoded.rstrip("=")
+
+
+def archive_catalog_session_key(stable_id: str) -> str:
+    prefix = "archive-catalog:"
+    if not stable_id.startswith(prefix):
+        return ""
+    encoded = stable_id[len(prefix) :]
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        return base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def archive_catalog_result(stable_id: str):
+    session_key = archive_catalog_session_key(stable_id)
+    if not session_key:
+        return None
+    conn = archive_catalog_connect()
+    try:
+        row = conn.execute(
+            "SELECT *, 0.0 AS rank FROM catalog_sessions WHERE session_key = ?",
+            (session_key,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return archive_catalog_result_row(row) if row else None
+
+
+def archive_catalog_max_window_offset(agent, window_days: int, *, now=None) -> int:
+    conn = archive_catalog_connect()
+    try:
+        if agent:
+            row = conn.execute(
+                "SELECT MIN(started_epoch) FROM catalog_sessions WHERE agent = ?",
+                (agent,),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT MIN(started_epoch) FROM catalog_sessions").fetchone()
+    finally:
+        conn.close()
+    oldest = int(row[0] or 0) if row else 0
+    if not oldest:
+        return 0
+    offset = 0
+    while True:
+        start, _end = archive_window_bounds(window_days, offset, now=now)
+        if oldest >= start:
+            return offset
+        offset += 1
+
+
+def archive_catalog_search(
+    query: str,
+    limit: int,
+    *,
+    agent=None,
+    window_days=None,
+    window_offset=None,
+):
+    text, filters = parse_filters(query)
+    if agent:
+        filters["agent"] = agent
+    clauses = ["COALESCE(s.is_wrapper, 0) = 0"]
+    params = {"limit": limit}
+    if filters.get("agent"):
+        clauses.append("s.agent = :agent")
+        params["agent"] = filters["agent"]
+    if filters.get("cwd"):
+        clauses.append("COALESCE(s.cwd, '') LIKE :cwd")
+        params["cwd"] = f"%{filters['cwd']}%"
+    if filters.get("workspace"):
+        clauses.append(
+            "(COALESCE(s.space_label, '') LIKE :workspace OR COALESCE(s.title, '') LIKE :workspace OR COALESCE(s.cwd, '') LIKE :workspace)"
+        )
+        params["workspace"] = f"%{filters['workspace']}%"
+    if window_days is not None and window_offset is not None:
+        start, end = archive_window_bounds(window_days, window_offset)
+        clauses.extend(["s.started_epoch >= :window_start", "s.started_epoch < :window_end"])
+        params["window_start"] = start
+        params["window_end"] = end
+
+    conn = archive_catalog_connect()
+    query_terms = list(dict.fromkeys(tokens(text)))
+    rows = []
+    try:
+        if query_terms:
+            exact = fts_query(text)
+            searches = [exact] if exact else []
+            fuzzy = archive_catalog_fuzzy_query(conn, query_terms)
+            if fuzzy and fuzzy != exact:
+                searches.append(fuzzy)
+            seen = set()
+            candidate_limit = min(1000, max(limit * 40, 400))
+            for search in searches:
+                sql = f"""
+                    SELECT s.*, bm25(catalog_fts) AS rank
+                    FROM catalog_fts
+                    JOIN catalog_sessions s ON s.session_key = catalog_fts.session_key
+                    WHERE catalog_fts MATCH :search AND {' AND '.join(clauses)}
+                    ORDER BY rank ASC, s.updated_epoch DESC
+                    LIMIT :candidate_limit
+                """
+                matched = conn.execute(
+                    sql,
+                    {**params, "search": search, "candidate_limit": candidate_limit},
+                ).fetchall()
+                for row in matched:
+                    if row["session_key"] in seen:
+                        continue
+                    seen.add(row["session_key"])
+                    rows.append(archive_catalog_result_row(row))
+                if matched:
+                    break
+            rows.sort(
+                key=lambda row: (
+                    -archive_catalog_metadata_score(row, query_terms),
+                    float(row.get("rank") or 0.0),
+                    -int(row.get("updated_epoch") or 0),
+                )
+            )
+        else:
+            sql = f"""
+                SELECT s.*, 0.0 AS rank
+                FROM catalog_sessions s
+                WHERE {' AND '.join(clauses)}
+                ORDER BY s.started_epoch DESC, s.title ASC
+                LIMIT :limit
+            """
+            rows = [
+                archive_catalog_result_row(row)
+                for row in conn.execute(sql, params).fetchall()
+            ]
+    finally:
+        conn.close()
+    return rows[:limit]
 
 
 def require_archive_enabled() -> None:
@@ -2972,6 +3520,14 @@ def focus_archive_result(stable_id: str) -> int:
     return focus_archive_row(dict(row))
 
 
+def focus_archive_catalog_result(stable_id: str) -> int:
+    row = archive_catalog_result(stable_id)
+    if not row:
+        print(f"unknown archive catalog result id: {stable_id}", file=sys.stderr)
+        return 2
+    return focus_archive_row(row)
+
+
 def focus_archive_row(row) -> int:
     try:
         pane = find_existing_archive_pane(row)
@@ -3013,19 +3569,29 @@ def pick(args) -> int:
 
 def archive_pick(args) -> int:
     args.archive = True
-    loaded = ensure_archive_window(args, force=args.refresh)
-    if loaded is not None:
-        sessions, chunks = loaded
+    args.window_days = (
+        args.window_days
+        or args.since_days
+        or app_config()["archive_window_days"]
+    )
+    args.window_offset = max(0, args.window_offset)
+    require_archive_enabled()
+    if args.refresh:
+        changed, unchanged, removed, token_count = archive_catalog_index(args.agents)
         if args.verbose:
-            print(f"indexed {sessions} archived sessions / {chunks} chunks", file=sys.stderr)
+            print(
+                f"cataloged {changed} changed / {unchanged} unchanged / "
+                f"{removed} removed sessions ({token_count} terms)",
+                file=sys.stderr,
+            )
     elif args.background_refresh:
-        maybe_background_archive_index(
-            args.agents,
-            args.max_files,
-            args.since_days,
-            args.stale_seconds,
-            window_days=args.window_days,
-            window_offset=args.window_offset,
+        maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
+    count, _last = archive_catalog_state()
+    if not count:
+        args.initial_message = (
+            "Building the archive catalog in the background..."
+            if lock_is_held(data_dir() / "archive-catalog.lock")
+            else "Archive catalog is empty; refresh the archive index"
         )
     if args.native or (not args.fzf and sys.stdin.isatty() and sys.stdout.isatty()):
         return curses.wrapper(lambda stdscr: curses_picker(stdscr, args))
@@ -3033,7 +3599,10 @@ def archive_pick(args) -> int:
 
 
 def fzf_picker(args) -> int:
-    rows = picker_rows(args, " ".join(args.query))
+    query = " ".join(args.query)
+    rows = picker_rows(args, query)
+    if getattr(args, "archive", False) and query.strip():
+        rows, _message = archive_fallback_rows(args, query, {}, fallback_rows=rows)
     if not rows:
         print("No OmniSearch matches.", file=sys.stderr)
         return 1
@@ -3317,7 +3886,13 @@ def render_picker(
 
 def picker_rows(args, query, *, snippets=False):
     if getattr(args, "archive", False):
-        return grouped_archive_search_index(query, args.limit, agent=args.agent, snippets=snippets)
+        return archive_catalog_search(
+            query,
+            args.limit,
+            agent=args.agent,
+            window_days=args.window_days,
+            window_offset=args.window_offset,
+        )
     return grouped_search_index(
         query,
         args.limit,
@@ -3332,8 +3907,10 @@ def picker_focus(args, result):
     row = result if isinstance(result, dict) else None
     stable_id = row.get("stable_id") if row is not None else result
     if getattr(args, "archive", False):
-        if row is not None and row.get("_archive_metadata"):
+        if row is not None and (row.get("_archive_metadata") or row.get("_archive_catalog")):
             return focus_archive_row(row)
+        if stable_id.startswith("archive-catalog:"):
+            return focus_archive_catalog_result(stable_id)
         return focus_archive_result(stable_id)
     return focus_result(stable_id)
 
@@ -3612,81 +4189,27 @@ def archive_fallback_rows(args, query, cache, progress=None, fallback_rows=None)
     terms = archive_query_terms(query)
     if sum(len(term) for term in terms) < 3:
         return fallback_rows or [], ""
-    closest_rows = fallback_rows or []
-    current_score = archive_rows_metadata_match_score(closest_rows, query)
-    selected_sources = selected_archive_sources(args.agents)
-    max_offset = archive_max_window_offset(selected_sources, args.window_days)
-    start_offset = args.window_offset
-    loaded_targets = set()
+    current_rows = fallback_rows or []
+    global_rows = archive_catalog_search(query, args.limit, agent=args.agent)
+    if not global_rows:
+        if lock_is_held(data_dir() / "archive-catalog.lock"):
+            return current_rows, "Archive catalog is updating; partial results are available"
+        return current_rows, "No matches across the archive catalog"
+    if not current_rows:
+        return global_rows, "Showing matches from all archive dates"
 
-    def load_target(target):
-        nonlocal closest_rows
-        if progress:
-            progress("Loading", target, max_offset)
-        args.window_offset = target
-        index_archive(
-            args.agents,
-            args.max_files,
-            args.since_days,
-            window_days=args.window_days,
-            window_offset=args.window_offset,
-        )
-        loaded_targets.add(target)
-        cache.clear()
-        rows = cached_picker_rows(args, query, cache)
-        if rows and not closest_rows:
-            closest_rows = rows
-        return rows
-
-    best_target = None
-    best_score = current_score
-    best_matches = []
-    for target in range(start_offset + 1, max_offset + 1):
-        if progress:
-            progress("Scanning metadata", target, max_offset)
-        matches = archive_window_metadata_matches(
-            query,
-            selected_sources,
-            args.window_days,
-            target,
-            args.max_files,
-        )
-        score = matches[0][0] if matches else 0
-        if score > best_score:
-            best_target = target
-            best_score = score
-            best_matches = matches
-
-    if best_target is not None:
-        rows = archive_metadata_picker_rows(best_matches, args.limit)
-        label = archive_window_label(args.window_days, best_target)
-        return rows, f"Found title matches in {label}"
-
-    if current_score:
-        return closest_rows, ""
-
-    for target in range(start_offset + 1, max_offset + 1):
-        if target in loaded_targets:
-            continue
-        if progress:
-            progress("Scanning content", target, max_offset)
-        if not archive_window_might_match(
-            query,
-            selected_sources,
-            args.window_days,
-            target,
-            args.max_files,
-        ):
-            continue
-        rows = load_target(target)
-        if rows:
-            label = archive_window_label(args.window_days, args.window_offset)
-            return rows, f"Found content matches in {label}"
-    if args.window_offset == start_offset:
-        message = "No direct matches in any older archive window"
-    else:
-        message = "No direct matches through the oldest archive window"
-    return closest_rows, message
+    current_score = archive_rows_metadata_match_score(current_rows, query)
+    global_score = archive_rows_metadata_match_score(global_rows, query)
+    current_rank = float(current_rows[0].get("rank") or 0.0)
+    global_rank = float(global_rows[0].get("rank") or 0.0)
+    current_ids = {row.get("session_key") for row in current_rows}
+    global_best_is_current = global_rows[0].get("session_key") in current_ids
+    if (
+        not global_best_is_current
+        and (global_score > current_score or global_rank < current_rank)
+    ):
+        return global_rows, "Showing better matches from all archive dates"
+    return current_rows, ""
 
 
 def curses_picker(stdscr, args) -> int:
@@ -3706,7 +4229,7 @@ def curses_picker(stdscr, args) -> int:
     action_query = ""
     action_selected = 0
     pending = ""
-    message = ""
+    message = getattr(args, "initial_message", "")
 
     def rows_with_archive_fallback(search_query, current_rows):
         if not getattr(args, "archive", False) or not search_query.strip():
@@ -3826,38 +4349,28 @@ def curses_picker(stdscr, args) -> int:
         if isinstance(key, int):
             if getattr(args, "archive", False) and key in (curses.KEY_LEFT, curses.KEY_RIGHT):
                 delta = 1 if key == curses.KEY_LEFT else -1
-                target = max(0, args.window_offset + delta)
+                max_offset = archive_catalog_max_window_offset(args.agent, args.window_days)
+                target = min(max_offset, max(0, args.window_offset + delta))
                 if target == args.window_offset:
-                    message = "Already showing the newest archive window"
+                    message = (
+                        "Already showing the newest archive window"
+                        if delta < 0
+                        else "Already showing the oldest archive window"
+                    )
                     continue
-                loading = archive_window_label(args.window_days, target)
-                render_picker(
-                    stdscr,
-                    query,
-                    rows,
-                    selected,
-                    title=picker_title(args),
-                    help_text=picker_help(args),
-                    mode=mode,
-                    message=f"Loading {loading}...",
-                )
                 args.window_offset = target
-                sessions, chunks = index_archive(
-                    args.agents,
-                    args.max_files,
-                    args.since_days,
-                    window_days=args.window_days,
-                    window_offset=args.window_offset,
-                )
                 row_cache.clear()
                 rows = cached_picker_rows(args, query, row_cache)
+                rows, fallback_message = rows_with_archive_fallback(query, rows)
                 selected = 0
-                message = f"Loaded {sessions} sessions / {chunks} chunks"
+                message = fallback_message or f"Showing {archive_window_label(args.window_days, target)}"
             elif key in (curses.KEY_BACKSPACE, curses.KEY_DC):
                 if mode == "insert":
                     query = query[:-1]
                     selected = 0
                     rows = cached_picker_rows(args, query, row_cache)
+                    rows, fallback_message = rows_with_archive_fallback(query, rows)
+                    message = fallback_message or message
             elif key == curses.KEY_UP:
                 selected = max(0, selected - 1)
             elif key == curses.KEY_DOWN:
@@ -4177,8 +4690,41 @@ def cmd_archive_index(args) -> int:
         release_index_lock()
 
 
+def cmd_archive_catalog_index(args) -> int:
+    changed, unchanged, removed, token_count = archive_catalog_index(args.agents)
+    print(
+        f"cataloged {changed} changed / {unchanged} unchanged / {removed} removed "
+        f"sessions ({token_count} terms) into {archive_catalog_db_path()}"
+    )
+    return 0
+
+
+def cmd_archive_catalog_start(args) -> int:
+    if not app_config()["archive_enabled"]:
+        print("archive catalog: disabled")
+        return 0
+    maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
+    count, last = archive_catalog_state()
+    state = archive_catalog_state_name(count, last)
+    print(f"archive catalog: {state} ({count} sessions, last indexed {last or 'never'})")
+    return 0
+
+
+def cmd_archive_catalog_status(_args) -> int:
+    count, last = archive_catalog_state()
+    state = archive_catalog_state_name(count, last)
+    print(f"archive catalog: {state}")
+    print(f"archive catalog sessions: {count}")
+    if last:
+        print(
+            "archive catalog last indexed: "
+            + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last))
+        )
+    return 0
+
+
 def cmd_archive_search(args) -> int:
-    rows = grouped_archive_search_index(" ".join(args.query), args.limit, agent=args.agent)
+    rows = archive_catalog_search(" ".join(args.query), args.limit, agent=args.agent)
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -4193,15 +4739,20 @@ def cmd_focus(args) -> int:
 
 
 def cmd_archive_resume(args) -> int:
+    if args.stable_id.startswith("archive-catalog:"):
+        return focus_archive_catalog_result(args.stable_id)
     return focus_archive_result(args.stable_id)
 
 
 def cmd_preview(args) -> int:
-    conn = connect()
-    row = conn.execute("SELECT * FROM docs WHERE stable_id = ?", (args.stable_id,)).fetchone()
-    if not row:
-        row = conn.execute("SELECT * FROM archive_docs WHERE stable_id = ?", (args.stable_id,)).fetchone()
-    conn.close()
+    if args.stable_id.startswith("archive-catalog:"):
+        row = archive_catalog_result(args.stable_id)
+    else:
+        conn = connect()
+        row = conn.execute("SELECT * FROM docs WHERE stable_id = ?", (args.stable_id,)).fetchone()
+        if not row:
+            row = conn.execute("SELECT * FROM archive_docs WHERE stable_id = ?", (args.stable_id,)).fetchone()
+        conn.close()
     if not row:
         return 1
     row = dict(row)
@@ -4220,6 +4771,7 @@ def cmd_preview(args) -> int:
 
 def cmd_doctor(_args) -> int:
     print(f"db: {db_path()}")
+    print(f"archive_catalog_db: {archive_catalog_db_path()}")
     print(f"herdr: {herdr_bin()}")
     print(f"herdr_socket: {resolve_socket_path()}")
     print(f"herdr_session: {herdr_session_key()}")
@@ -4240,6 +4792,16 @@ def cmd_doctor(_args) -> int:
         if path.exists()
     )
     print(f"database_size_bytes: {size}")
+    catalog_size = sum(
+        path.stat().st_size
+        for path in (
+            archive_catalog_db_path(),
+            Path(str(archive_catalog_db_path()) + "-wal"),
+            Path(str(archive_catalog_db_path()) + "-shm"),
+        )
+        if path.exists()
+    )
+    print(f"archive_catalog_size_bytes: {catalog_size}")
     print(f"archive_indexing: {'enabled' if app_config()['archive_enabled'] else 'disabled'}")
     print(f"fzf: {shutil.which('fzf') or 'missing'}")
     conn = connect()
@@ -4274,6 +4836,14 @@ def cmd_doctor(_args) -> int:
         )
     if archive_last:
         print(f"last_archive_indexed_at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(archive_last[0])))}")
+    catalog_count, catalog_last = archive_catalog_state()
+    print(f"archive_catalog_sessions: {catalog_count}")
+    print(f"archive_catalog: {archive_catalog_state_name(catalog_count, catalog_last)}")
+    if catalog_last:
+        print(
+            "last_archive_catalog_indexed_at: "
+            + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(catalog_last))
+        )
     pid = read_watcher_pid()
     print(f"watcher: {'running ' + str(pid) if watcher_is_running() else 'stopped'}")
     return 0
@@ -4291,7 +4861,16 @@ def cmd_purge(args) -> int:
             break
         time.sleep(0.05)
     path = db_path()
-    candidates = [path, Path(str(path) + "-wal"), Path(str(path) + "-shm")]
+    catalog_path = archive_catalog_db_path()
+    candidates = [
+        path,
+        Path(str(path) + "-wal"),
+        Path(str(path) + "-shm"),
+        catalog_path,
+        Path(str(catalog_path) + "-wal"),
+        Path(str(catalog_path) + "-shm"),
+        data_dir() / "archive-catalog.lock",
+    ]
     for pattern in ("watch*.pid", "watch*.log", "index*.lock", "migrate.lock"):
         candidates.extend(sorted(data_dir().glob(pattern)))
     removed = 0
@@ -4333,6 +4912,21 @@ def main(argv=None) -> int:
     p.add_argument("--window-days", type=int, help="days held in the active archive window")
     p.add_argument("--window-offset", type=int, default=0, help="14-day windows before the newest window")
     p.set_defaults(func=cmd_archive_index)
+
+    p = sub.add_parser(
+        "archive-catalog-index",
+        help="incrementally catalog all persisted agent sessions",
+    )
+    p.add_argument("--agents", default="", help="comma-separated agents to catalog")
+    p.set_defaults(func=cmd_archive_catalog_index)
+
+    p = sub.add_parser("archive-catalog-start", help="refresh the archive catalog in the background")
+    p.add_argument("--agents", default="", help="comma-separated agents to catalog")
+    p.add_argument("--stale-seconds", type=int, default=300)
+    p.set_defaults(func=cmd_archive_catalog_start)
+
+    p = sub.add_parser("archive-catalog-status", help="show archive catalog state")
+    p.set_defaults(func=cmd_archive_catalog_status)
 
     p = sub.add_parser("archive-search", help="search persisted agent sessions")
     p.add_argument("query", nargs="*", default=[])

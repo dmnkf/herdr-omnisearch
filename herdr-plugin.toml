@@ -1,12 +1,15 @@
 id = "herdr.omnisearch"
 name = "Herdr OmniSearch"
-version = "0.4.6"
+version = "0.5.0"
 min_herdr_version = "0.7.5"
 description = "Fast local search across live Herdr panes and archived agent sessions"
 platforms = ["linux", "macos"]
 
 [[startup]]
 command = ["bin/herdr-omnisearch", "watch-start"]
+
+[[startup]]
+command = ["bin/herdr-omnisearch", "archive-catalog-start", "--stale-seconds", "300"]
 
 [[actions]]
 id = "open-live"
@@ -25,8 +28,8 @@ command = ["bin/herdr-omnisearch", "index"]
 
 [[actions]]
 id = "refresh-archive"
-title = "Refresh archived session index"
-command = ["bin/herdr-omnisearch", "archive-index"]
+title = "Refresh archive catalog"
+command = ["bin/herdr-omnisearch", "archive-catalog-index"]
 
 [[actions]]
 id = "watch-start"
@@ -58,7 +61,7 @@ command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch\" pick --
 id = "archive"
 title = "Archive Search"
 placement = "overlay"
-command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch\" archive-pick --native --no-refresh --background-refresh --stale-seconds 3600"]
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch\" archive-pick --native --no-refresh --background-refresh --stale-seconds 300"]
 
 [[events]]
 on = "workspace.created"
