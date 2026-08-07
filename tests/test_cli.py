@@ -1387,6 +1387,22 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(cli.archive_catalog_search("shell-artifact-marker", 10), [])
                 self.assertEqual(cli.archive_catalog_search("approval-artifact-marker", 10), [])
                 self.assertTrue(cli.is_archive_noise('{"outcome":"allow"}'))
+                for prefix in (
+                    "<turn_aborted>",
+                    "<task-notification>",
+                    "<goal_context>",
+                    "<thinking>",
+                    "<local-command-stderr>",
+                    "<recommended_plugins>",
+                    "<bash-input>",
+                    "<bash-stdout>",
+                    "[routing",
+                    "<skill>",
+                    "<system-reminder>",
+                    "<subagent_notification>",
+                ):
+                    self.assertTrue(cli.is_archive_noise(prefix + "control payload"))
+                self.assertFalse(cli.is_archive_noise("<proposed_plan>Keep this useful plan"))
 
     def test_scoped_archive_catalog_refresh_preserves_other_agents(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -35,7 +35,7 @@ DEFAULT_LIMIT = 30
 ARCHIVE_MAX_RECORD_BYTES = 2 * 1024 * 1024
 ARCHIVE_MESSAGE_MAX_CHARS = 16000
 ARCHIVE_PREVIEW_MESSAGES = 3
-ARCHIVE_CATALOG_CONTENT_VERSION = 4
+ARCHIVE_CATALOG_CONTENT_VERSION = 5
 STATUS_WEIGHT = {
     "workspace": 0,
     "working": 0,
@@ -1419,6 +1419,18 @@ def is_archive_noise(text: str) -> bool:
         "<user_shell_command>",
         "The following is the Codex agent history",
         "The following skills are available",
+        "<turn_aborted>",
+        "<task-notification>",
+        "<goal_context>",
+        "<thinking>",
+        "<local-command-stderr>",
+        "<recommended_plugins>",
+        "<bash-input>",
+        "<bash-stdout>",
+        "[routing",
+        "<skill>",
+        "<system-reminder>",
+        "<subagent_notification>",
     )
     if any(text.startswith(prefix) for prefix in noise_prefixes):
         return True

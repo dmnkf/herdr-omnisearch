@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.4 - 2026-08-07
+
+- Exclude remaining task, goal, reasoning, shell, skill, and routing envelopes.
+
 ## 0.6.3 - 2026-08-07
 
 - Exclude structured approval decisions from conversational content.
