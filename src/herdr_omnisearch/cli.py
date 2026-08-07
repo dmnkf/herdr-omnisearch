@@ -35,7 +35,7 @@ DEFAULT_LIMIT = 30
 ARCHIVE_MAX_RECORD_BYTES = 2 * 1024 * 1024
 ARCHIVE_MESSAGE_MAX_CHARS = 16000
 ARCHIVE_PREVIEW_MESSAGES = 3
-ARCHIVE_CATALOG_CONTENT_VERSION = 2
+ARCHIVE_CATALOG_CONTENT_VERSION = 3
 STATUS_WEIGHT = {
     "workspace": 0,
     "working": 0,
@@ -1401,12 +1401,31 @@ def is_archive_noise(text: str) -> bool:
         "<local-command-stdout>",
         "<command-name>",
         "<command-message>",
+        "[external_agent_tool_call",
+        "[external_agent_tool_result",
+        "<external_agent_tool",
+        "<user_shell_command>",
+        "The following is the Codex agent history",
+        "The following skills are available",
     )
     if any(text.startswith(prefix) for prefix in noise_prefixes):
         return True
     if len(text) > 12000 and ("You are Codex" in text or "AGENTS.md" in text):
         return True
     return False
+
+
+def is_archive_preview_noise(text: str) -> bool:
+    value = " ".join(clean_text(text).lower().split())
+    return value in {
+        "continue",
+        "continue?",
+        "go on",
+        "hello",
+        "hi",
+        "ok",
+        "okay",
+    }
 
 
 def extract_message_text(content) -> str:
@@ -1943,9 +1962,10 @@ def archive_catalog_document(
                 message_sink(turn)
             if len(first_turns) < ARCHIVE_PREVIEW_MESSAGES:
                 first_turns.append(turn)
-            recent_turns.append(turn)
-            if len(recent_turns) > ARCHIVE_PREVIEW_MESSAGES:
-                recent_turns.pop(0)
+            if not is_archive_preview_noise(turn["content"]):
+                recent_turns.append(turn)
+                if len(recent_turns) > ARCHIVE_PREVIEW_MESSAGES:
+                    recent_turns.pop(0)
             message_count += 1
     except OSError:
         return None

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2 - 2026-08-07
+
+- Exclude legacy tool, shell, skill, and approval wrappers from content search.
+- Prefer substantive chat turns over reconnect greetings in session previews.
+
 ## 0.6.1 - 2026-08-07
 
 - Keep archive chat summaries clear of the fixed cwd display column.

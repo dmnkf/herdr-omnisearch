@@ -1291,6 +1291,33 @@ class CliTests(unittest.TestCase):
                         "content": "<local-command-stdout>control-marker</local-command-stdout>",
                     },
                 },
+                {
+                    "timestamp": "2026-08-04T12:00:04Z",
+                    "type": "user",
+                    "sessionId": "secondary-session",
+                    "cwd": "/projects/example",
+                    "message": {"role": "user", "content": "hello"},
+                },
+                {
+                    "timestamp": "2026-08-04T12:00:05Z",
+                    "type": "assistant",
+                    "sessionId": "secondary-session",
+                    "cwd": "/projects/example",
+                    "message": {
+                        "role": "assistant",
+                        "content": "[external_agent_tool_result] legacy-artifact-marker",
+                    },
+                },
+                {
+                    "timestamp": "2026-08-04T12:00:06Z",
+                    "type": "user",
+                    "sessionId": "secondary-session",
+                    "cwd": "/projects/example",
+                    "message": {
+                        "role": "user",
+                        "content": "<user_shell_command>shell-artifact-marker</user_shell_command>",
+                    },
+                },
             ]
             path.write_text(
                 "".join(json.dumps(record) + "\n" for record in records),
@@ -1313,9 +1340,13 @@ class CliTests(unittest.TestCase):
                 latest = cli.archive_catalog_search("", 10)[0]
                 self.assertIn("assistant: The visible-response-marker is indexed.", latest["content"])
                 self.assertNotIn("Request interrupted", latest["content"])
+                self.assertNotIn("user: hello", latest["content"])
+                self.assertEqual(cli.archive_catalog_search("hello", 10)[0]["session_id"], "secondary-session")
                 self.assertEqual(cli.archive_catalog_search("private-reasoning-marker", 10), [])
                 self.assertEqual(cli.archive_catalog_search("private-tool-marker", 10), [])
                 self.assertEqual(cli.archive_catalog_search("control-marker", 10), [])
+                self.assertEqual(cli.archive_catalog_search("legacy-artifact-marker", 10), [])
+                self.assertEqual(cli.archive_catalog_search("shell-artifact-marker", 10), [])
 
     def test_scoped_archive_catalog_refresh_preserves_other_agents(self):
         with tempfile.TemporaryDirectory() as tmp:
