@@ -35,7 +35,7 @@ DEFAULT_LIMIT = 30
 ARCHIVE_MAX_RECORD_BYTES = 2 * 1024 * 1024
 ARCHIVE_MESSAGE_MAX_CHARS = 16000
 ARCHIVE_PREVIEW_MESSAGES = 3
-ARCHIVE_CATALOG_CONTENT_VERSION = 3
+ARCHIVE_CATALOG_CONTENT_VERSION = 4
 STATUS_WEIGHT = {
     "workspace": 0,
     "working": 0,
@@ -1387,6 +1387,18 @@ def is_archive_noise(text: str) -> bool:
     text = clean_text(text)
     if not text:
         return True
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            value = None
+        approval_keys = {"outcome", "risk_level", "rationale", "user_authorization"}
+        if (
+            isinstance(value, dict)
+            and "outcome" in value
+            and set(value).issubset(approval_keys)
+        ):
+            return True
     noise_prefixes = (
         "# AGENTS.md instructions",
         "<environment_context>",
@@ -1970,7 +1982,7 @@ def archive_catalog_document(
     except OSError:
         return None
     metadata["updated_at"] = updated_at
-    metadata["preview"] = archive_catalog_preview(recent_turns) or metadata.get("title") or ""
+    metadata["preview"] = archive_catalog_preview(recent_turns)
     metadata["message_count"] = message_count
     metadata["space_label"] = derive_space_label_from_cwd(metadata.get("cwd") or "")
     metadata["started_epoch"] = int(
@@ -2566,6 +2578,7 @@ def archive_catalog_search(
                 )
             )
         else:
+            clauses.append("COALESCE(s.preview, '') <> ''")
             sql = f"""
                 SELECT s.*, 0.0 AS rank
                 FROM catalog_sessions s

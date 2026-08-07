@@ -1318,15 +1318,48 @@ class CliTests(unittest.TestCase):
                         "content": "<user_shell_command>shell-artifact-marker</user_shell_command>",
                     },
                 },
+                {
+                    "timestamp": "2026-08-04T12:00:07Z",
+                    "type": "assistant",
+                    "sessionId": "secondary-session",
+                    "cwd": "/projects/example",
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "risk_level": "low",
+                                "user_authorization": "high",
+                                "outcome": "allow",
+                                "rationale": "approval-artifact-marker",
+                            }
+                        ),
+                    },
+                },
             ]
             path.write_text(
                 "".join(json.dumps(record) + "\n" for record in records),
                 encoding="utf-8",
             )
+            trivial = root / "trivial.jsonl"
+            trivial.write_text(
+                "".join(
+                    json.dumps(record) + "\n"
+                    for record in [
+                        {
+                            "timestamp": "2026-08-05T12:00:00Z",
+                            "type": "user",
+                            "sessionId": "trivial-session",
+                            "cwd": "/projects/trivial",
+                            "message": {"role": "user", "content": "hello"},
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
             config = cli.default_config()
             config["archive_enabled"] = True
             config["archive_agents"] = ["claude"]
-            config["archive"]["claude"]["sessions"] = [str(path)]
+            config["archive"]["claude"]["sessions"] = [str(root / "*.jsonl")]
             environment = {
                 "HERDR_PLUGIN_STATE_DIR": str(root / "state"),
                 "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
@@ -1338,15 +1371,22 @@ class CliTests(unittest.TestCase):
                 result = cli.archive_catalog_search("visible-response-marker", 10)[0]
                 self.assertIn("assistant: The visible-response-marker is indexed.", result["content"])
                 latest = cli.archive_catalog_search("", 10)[0]
+                self.assertEqual(len(cli.archive_catalog_search("", 10)), 1)
+                self.assertEqual(latest["session_id"], "secondary-session")
                 self.assertIn("assistant: The visible-response-marker is indexed.", latest["content"])
                 self.assertNotIn("Request interrupted", latest["content"])
                 self.assertNotIn("user: hello", latest["content"])
-                self.assertEqual(cli.archive_catalog_search("hello", 10)[0]["session_id"], "secondary-session")
+                self.assertEqual(
+                    {row["session_id"] for row in cli.archive_catalog_search("hello", 10)},
+                    {"secondary-session", "trivial-session"},
+                )
                 self.assertEqual(cli.archive_catalog_search("private-reasoning-marker", 10), [])
                 self.assertEqual(cli.archive_catalog_search("private-tool-marker", 10), [])
                 self.assertEqual(cli.archive_catalog_search("control-marker", 10), [])
                 self.assertEqual(cli.archive_catalog_search("legacy-artifact-marker", 10), [])
                 self.assertEqual(cli.archive_catalog_search("shell-artifact-marker", 10), [])
+                self.assertEqual(cli.archive_catalog_search("approval-artifact-marker", 10), [])
+                self.assertTrue(cli.is_archive_noise('{"outcome":"allow"}'))
 
     def test_scoped_archive_catalog_refresh_preserves_other_agents(self):
         with tempfile.TemporaryDirectory() as tmp:

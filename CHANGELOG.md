@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.3 - 2026-08-07
+
+- Exclude structured approval decisions from conversational content.
+- Hide sessions without a substantive latest-turn preview from empty browsing.
+
 ## 0.6.2 - 2026-08-07
 
 - Exclude legacy tool, shell, skill, and approval wrappers from content search.
