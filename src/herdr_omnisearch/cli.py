@@ -2303,8 +2303,9 @@ def maybe_background_archive_catalog_index(agents: str = "", stale_seconds: int 
     )
 
 
-def archive_catalog_candidate_tokens(conn, term: str, limit: int = 24):
+def archive_catalog_candidate_tokens(conn, term: str, limit: int = 24, exclude=None):
     term = term.lower()
+    exclude = {token.lower() for token in (exclude or ())}
     if len(term) < 4:
         return []
     distance = fuzzy_distance_limit(term)
@@ -2337,6 +2338,7 @@ def archive_catalog_candidate_tokens(conn, term: str, limit: int = 24):
         scored = [
             (candidate, score_token_candidate(term, candidate))
             for candidate in candidates
+            if candidate not in exclude
         ]
         scored = [item for item in scored if item[1] >= fuzzy_score_threshold(term)]
         if scored:
@@ -2352,10 +2354,15 @@ def archive_catalog_candidate_tokens(conn, term: str, limit: int = 24):
     return []
 
 
-def archive_catalog_fuzzy_query(conn, query_terms):
+def archive_catalog_fuzzy_query(conn, query_terms, *, exclude_exact=False):
     groups = []
     for term in query_terms:
-        candidates = archive_catalog_candidate_tokens(conn, term, limit=24)
+        candidates = archive_catalog_candidate_tokens(
+            conn,
+            term,
+            limit=24,
+            exclude={term} if exclude_exact else None,
+        )
         if not candidates:
             return ""
         quoted = []
@@ -2566,7 +2573,11 @@ def archive_catalog_search(
 
             matched = run_message_search(exact) if exact else []
             if not matched:
-                fuzzy = archive_catalog_fuzzy_query(conn, query_terms)
+                fuzzy = archive_catalog_fuzzy_query(
+                    conn,
+                    query_terms,
+                    exclude_exact=True,
+                )
                 if fuzzy and fuzzy != exact:
                     matched = run_message_search(fuzzy)
             grouped = {}

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.5 - 2026-08-07
+
+- Ignore inactive exact vocabulary when falling back to typo-tolerant search.
+
 ## 0.6.4 - 2026-08-07
 
 - Exclude remaining task, goal, reasoning, shell, skill, and routing envelopes.

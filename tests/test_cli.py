@@ -1202,6 +1202,54 @@ class CliTests(unittest.TestCase):
                     "conversation-session",
                 )
 
+    def test_archive_catalog_fuzzy_search_ignores_stale_exact_vocabulary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "session.jsonl"
+
+            def write_answer(answer):
+                records = [
+                    {
+                        "timestamp": "2026-08-04T12:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"id": "fuzzy-session", "cwd": "/projects/example"},
+                    },
+                    {
+                        "timestamp": "2026-08-04T12:00:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": answer}],
+                        },
+                    },
+                ]
+                path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records),
+                    encoding="utf-8",
+                )
+
+            config = cli.default_config()
+            config["archive_enabled"] = True
+            config["archive_agents"] = ["codex"]
+            config["archive"]["codex"]["sessions"] = [str(path)]
+            config["archive"]["codex"]["thread_names"] = str(root / "missing.jsonl")
+            environment = {
+                "HERDR_PLUGIN_STATE_DIR": str(root / "state"),
+                "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
+            }
+            with patch.dict(os.environ, environment, clear=False), patch.object(
+                cli, "CONFIG_CACHE", config
+            ):
+                write_answer("asaa")
+                cli.archive_catalog_index()
+                write_answer("asa")
+                cli.archive_catalog_index()
+
+                result = cli.archive_catalog_search("asaa", 10)[0]
+                self.assertEqual(result["session_id"], "fuzzy-session")
+                self.assertEqual(result["matched_tokens"], ["asa"])
+
     def test_archive_catalog_hides_review_wrappers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
