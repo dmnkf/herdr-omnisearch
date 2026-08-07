@@ -1058,9 +1058,21 @@ class CliTests(unittest.TestCase):
                 changed, unchanged, removed, _terms = cli.archive_catalog_index()
                 self.assertEqual((changed, unchanged, removed), (2, 0, 0))
                 self.assertEqual(cli.archive_catalog_search("routine", 10)[0]["session_id"], "recent-session")
-                self.assertEqual(cli.archive_catalog_search("target", 10)[0]["session_id"], "older-session")
-                self.assertEqual(cli.archive_catalog_search("ExampleMappingKey", 10)[0]["session_id"], "older-session")
-                self.assertEqual(cli.archive_catalog_search("ExampleMappingKez", 10)[0]["session_id"], "older-session")
+                exact = cli.archive_catalog_search("ExampleMappingKey", 10)[0]
+                self.assertEqual(exact["session_id"], "older-session")
+                self.assertIn("assistant: Implemented the ExampleMappingKey mapping.", exact["content"])
+                self.assertIn("assistant: Implemented the ExampleMappingKey", cli.row_title(exact))
+                self.assertEqual(
+                    cli.archive_catalog_search("ExampleMappingKez", 10)[0]["session_id"],
+                    "older-session",
+                )
+                self.assertEqual(cli.archive_catalog_search("older-session", 10), [])
+                filtered = cli.archive_catalog_search("cwd:older-session", 10)
+                self.assertEqual(filtered[0]["session_id"], "older-session")
+                recent_preview = cli.archive_catalog_search("", 10)[0]
+                self.assertEqual(recent_preview["session_id"], "recent-session")
+                self.assertIn("user: Routine maintenance", recent_preview["content"])
+                self.assertIn("assistant: Updated an unrelated component", recent_preview["content"])
                 self.assertEqual(
                     cli.archive_catalog_search(
                         "ExampleMappingKey",
@@ -1082,6 +1094,113 @@ class CliTests(unittest.TestCase):
                 )
                 changed, unchanged, removed, _terms = cli.archive_catalog_index()
                 self.assertEqual((changed, unchanged, removed), (1, 1, 0))
+                refreshed = cli.archive_catalog_search("final validation", 10)[0]
+                self.assertIn("assistant: Implemented the ExampleMappingKey", refreshed["content"])
+
+                conn = cli.archive_catalog_connect()
+                try:
+                    self.assertEqual(
+                        conn.execute(
+                            """
+                            SELECT COUNT(*)
+                            FROM catalog_messages m
+                            JOIN catalog_sessions s ON s.session_key = m.session_key
+                            WHERE m.indexed_generation = s.message_generation
+                            """
+                        ).fetchone()[0],
+                        4,
+                    )
+                finally:
+                    conn.close()
+
+    def test_archive_catalog_indexes_only_conversational_message_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "session.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-08-04T12:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "conversation-session",
+                        "cwd": "/projects/metadata-only-marker",
+                    },
+                },
+                {
+                    "timestamp": "2026-08-04T12:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "private-system-marker"}],
+                    },
+                },
+                {
+                    "timestamp": "2026-08-04T12:00:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "opening-turn-marker"}],
+                    },
+                },
+                {
+                    "timestamp": "2026-08-04T12:00:03Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Intermediate reply"}],
+                    },
+                },
+                {
+                    "timestamp": "2026-08-04T12:00:04Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Find the conversation marker"}],
+                    },
+                },
+                {
+                    "timestamp": "2026-08-04T12:00:05Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "The searchable-answer is here."}],
+                    },
+                },
+            ]
+            path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            config = cli.default_config()
+            config["archive_enabled"] = True
+            config["archive_agents"] = ["codex"]
+            config["archive"]["codex"]["sessions"] = [str(path)]
+            config["archive"]["codex"]["thread_names"] = str(root / "missing.jsonl")
+            environment = {
+                "HERDR_PLUGIN_STATE_DIR": str(root / "state"),
+                "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
+            }
+            with patch.dict(os.environ, environment, clear=False), patch.object(
+                cli, "CONFIG_CACHE", config
+            ):
+                cli.archive_catalog_index()
+                result = cli.archive_catalog_search("searchable-answer", 10)[0]
+                self.assertIn("assistant: The searchable-answer is here.", result["content"])
+                latest = cli.archive_catalog_search("", 10)[0]
+                self.assertNotIn("opening-turn-marker", latest["content"])
+                self.assertIn("assistant: Intermediate reply", latest["content"])
+                self.assertIn("user: Find the conversation marker", latest["content"])
+                self.assertEqual(cli.archive_catalog_search("private-system-marker", 10), [])
+                self.assertEqual(cli.archive_catalog_search("metadata-only-marker", 10), [])
+                self.assertEqual(
+                    cli.archive_catalog_search("cwd:metadata-only-marker", 10)[0]["session_id"],
+                    "conversation-session",
+                )
 
     def test_archive_catalog_hides_review_wrappers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1125,6 +1244,58 @@ class CliTests(unittest.TestCase):
                 cli.archive_catalog_index()
                 self.assertEqual(cli.archive_catalog_search("hidden-marker", 10), [])
 
+    def test_archive_catalog_ignores_reasoning_and_tool_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "conversation.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-08-04T12:00:00Z",
+                    "type": "user",
+                    "sessionId": "secondary-session",
+                    "cwd": "/projects/example",
+                    "message": {"role": "user", "content": "Search the visible response"},
+                },
+                {
+                    "timestamp": "2026-08-04T12:00:01Z",
+                    "type": "assistant",
+                    "sessionId": "secondary-session",
+                    "cwd": "/projects/example",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "private-reasoning-marker"},
+                            {"type": "text", "text": "The visible-response-marker is indexed."},
+                            {
+                                "type": "tool_use",
+                                "name": "example",
+                                "input": {"query": "private-tool-marker"},
+                            },
+                        ],
+                    },
+                },
+            ]
+            path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            config = cli.default_config()
+            config["archive_enabled"] = True
+            config["archive_agents"] = ["claude"]
+            config["archive"]["claude"]["sessions"] = [str(path)]
+            environment = {
+                "HERDR_PLUGIN_STATE_DIR": str(root / "state"),
+                "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
+            }
+            with patch.dict(os.environ, environment, clear=False), patch.object(
+                cli, "CONFIG_CACHE", config
+            ):
+                cli.archive_catalog_index()
+                result = cli.archive_catalog_search("visible-response-marker", 10)[0]
+                self.assertIn("assistant: The visible-response-marker is indexed.", result["content"])
+                self.assertEqual(cli.archive_catalog_search("private-reasoning-marker", 10), [])
+                self.assertEqual(cli.archive_catalog_search("private-tool-marker", 10), [])
+
     def test_scoped_archive_catalog_refresh_preserves_other_agents(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1155,14 +1326,21 @@ class CliTests(unittest.TestCase):
                     cli.archive_catalog_index("codex")
                 conn = cli.archive_catalog_connect()
                 try:
-                    agents = {
+                    active_agents = {
+                        row[0]
+                        for row in conn.execute(
+                            "SELECT agent FROM catalog_sessions WHERE is_present = 1"
+                        ).fetchall()
+                    }
+                    retained_agents = {
                         row[0]
                         for row in conn.execute("SELECT agent FROM catalog_sessions").fetchall()
                     }
                 finally:
                     conn.close()
 
-        self.assertEqual(agents, {"claude"})
+        self.assertEqual(active_agents, {"claude"})
+        self.assertEqual(retained_agents, {"codex", "claude"})
 
     def test_archive_metadata_picker_result_resumes_without_database_lookup(self):
         args = Namespace(archive=True)

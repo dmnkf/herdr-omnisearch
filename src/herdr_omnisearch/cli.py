@@ -33,6 +33,9 @@ from .herdr_socket import (
 DEFAULT_LINES = 500
 DEFAULT_LIMIT = 30
 ARCHIVE_MAX_RECORD_BYTES = 2 * 1024 * 1024
+ARCHIVE_MESSAGE_MAX_CHARS = 16000
+ARCHIVE_PREVIEW_MESSAGES = 3
+ARCHIVE_CATALOG_CONTENT_VERSION = 1
 STATUS_WEIGHT = {
     "workspace": 0,
     "working": 0,
@@ -45,7 +48,6 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]*")
 TOKEN_TABLES = {
     "live": ("terms", "token_trigrams"),
     "archive": ("archive_terms", "archive_token_trigrams"),
-    "catalog": ("catalog_terms", "catalog_token_trigrams"),
 }
 CONFIG_CACHE = None
 ARCHIVE_CATALOG_SCHEMA_READY = set()
@@ -688,17 +690,35 @@ def archive_catalog_connect():
             is_wrapper INTEGER NOT NULL DEFAULT 0,
             source_size INTEGER NOT NULL,
             source_mtime_ns INTEGER NOT NULL,
-            indexed_at INTEGER NOT NULL
+            indexed_at INTEGER NOT NULL,
+            message_generation INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            message_index_version INTEGER NOT NULL DEFAULT 0,
+            is_present INTEGER NOT NULL DEFAULT 1
         );
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS catalog_fts USING fts5(
-            session_key UNINDEXED,
-            body,
-            tokenize = 'porter unicode61'
+        CREATE TABLE IF NOT EXISTS catalog_messages (
+            id INTEGER PRIMARY KEY,
+            message_key TEXT NOT NULL UNIQUE,
+            session_key TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            message_at TEXT,
+            message_epoch INTEGER NOT NULL DEFAULT 0,
+            content TEXT NOT NULL,
+            indexed_generation INTEGER NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS catalog_terms (
-            token TEXT PRIMARY KEY
+        CREATE VIRTUAL TABLE IF NOT EXISTS catalog_message_fts USING fts5(
+            content,
+            content = 'catalog_messages',
+            content_rowid = 'id',
+            tokenize = 'unicode61'
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS catalog_message_vocab USING fts5vocab(
+            catalog_message_fts,
+            'row'
         );
 
         CREATE TABLE IF NOT EXISTS catalog_meta (
@@ -706,20 +726,19 @@ def archive_catalog_connect():
             value TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS catalog_token_trigrams (
-            trigram TEXT NOT NULL,
-            token TEXT NOT NULL,
-            PRIMARY KEY (trigram, token)
-        );
-
         CREATE INDEX IF NOT EXISTS idx_catalog_sessions_agent ON catalog_sessions(agent);
         CREATE INDEX IF NOT EXISTS idx_catalog_sessions_started_epoch ON catalog_sessions(started_epoch);
-        CREATE INDEX IF NOT EXISTS idx_catalog_token_trigrams_token ON catalog_token_trigrams(token);
+        CREATE INDEX IF NOT EXISTS idx_catalog_messages_session_generation_ordinal
+            ON catalog_messages(session_key, indexed_generation, ordinal);
         """
     )
     ensure_column(conn, "catalog_sessions", "space_label", "TEXT")
     ensure_column(conn, "catalog_sessions", "started_epoch", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "catalog_sessions", "updated_epoch", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "catalog_sessions", "message_generation", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "catalog_sessions", "message_count", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "catalog_sessions", "message_index_version", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "catalog_sessions", "is_present", "INTEGER NOT NULL DEFAULT 1")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_catalog_sessions_started_epoch ON catalog_sessions(started_epoch)"
     )
@@ -1678,7 +1697,11 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
                 if item_type == "turn_context":
                     cwd = payload.get("cwd") or cwd
                     continue
-                if item_type == "response_item" and payload.get("type") == "message":
+                if (
+                    item_type == "response_item"
+                    and payload.get("type") == "message"
+                    and payload.get("role") == "user"
+                ):
                     candidate = extract_message_text(payload.get("content"))
                     if not is_archive_noise(candidate):
                         title = title_from_text(candidate, "")
@@ -1842,15 +1865,40 @@ def selected_archive_sources(agents: str):
     return selected or set(configured)
 
 
-def archive_catalog_message(agent: str, item) -> str:
+def archive_catalog_turn(agent: str, item):
+    role = ""
+    content = None
     if agent == "codex":
         payload = item.get("payload") or {}
         if item.get("type") == "response_item" and payload.get("type") == "message":
-            return extract_message_text(payload.get("content"))
-        return ""
-    if agent == "claude" and item.get("type") in ("user", "assistant"):
-        return extract_message_text((item.get("message") or {}).get("content"))
-    return ""
+            role = payload.get("role") or ""
+            content = payload.get("content")
+    elif agent == "claude" and item.get("type") in ("user", "assistant"):
+        message = item.get("message") or {}
+        role = message.get("role") or item.get("type") or ""
+        content = message.get("content")
+    if role not in ("user", "assistant"):
+        return None
+    text = extract_message_text(content)
+    if is_archive_noise(text):
+        return None
+    text = clip_text(text, ARCHIVE_MESSAGE_MAX_CHARS)
+    if not text:
+        return None
+    timestamp = item.get("timestamp") or ""
+    return {
+        "role": role,
+        "message_at": timestamp,
+        "message_epoch": int(iso_to_epoch(timestamp) or 0),
+        "content": text,
+    }
+
+
+def archive_catalog_preview(turns) -> str:
+    return "\n".join(
+        f"{turn['role']}: {shorten(turn['content'], 900)}"
+        for turn in turns
+    )
 
 
 def archive_catalog_is_wrapper(title: str, preview: str) -> bool:
@@ -1863,33 +1911,43 @@ def archive_catalog_is_wrapper(title: str, preview: str) -> bool:
     return any(marker in value for marker in markers)
 
 
-def archive_catalog_document(agent: str, path: Path, thread_names):
-    metadata = archive_file_metadata(agent, path, thread_names)
+def archive_catalog_document(
+    agent: str,
+    path: Path,
+    thread_names,
+    message_sink=None,
+    metadata=None,
+):
+    metadata = metadata or archive_file_metadata(agent, path, thread_names)
     if not metadata:
         return None
-    terms = set()
-    for field in ("agent", "session_id", "title", "cwd", "path"):
-        terms.update(tokens(str(metadata.get(field) or "")))
-    preview = ""
+    recent_turns = []
+    first_turns = []
+    message_count = 0
     updated_at = metadata.get("updated_at") or metadata.get("started_at") or ""
     try:
         for item in iter_archive_records(path):
             timestamp = item.get("timestamp") or ""
             if timestamp:
                 updated_at = timestamp
-            text = archive_catalog_message(agent, item)
-            if not text or is_archive_noise(text):
+            turn = archive_catalog_turn(agent, item)
+            if not turn:
                 continue
-            clipped = clip_text(text)
-            if not preview:
-                preview = shorten(clipped, 600)
-            terms.update(tokens(clipped))
+            turn["ordinal"] = message_count
+            if message_sink is not None:
+                message_sink(turn)
+            if len(first_turns) < ARCHIVE_PREVIEW_MESSAGES:
+                first_turns.append(turn)
+            recent_turns.append(turn)
+            if len(recent_turns) > ARCHIVE_PREVIEW_MESSAGES:
+                recent_turns.pop(0)
+            message_count += 1
     except OSError:
         return None
     metadata["updated_at"] = updated_at
-    metadata["preview"] = preview or metadata.get("title") or ""
+    metadata["preview"] = archive_catalog_preview(recent_turns) or metadata.get("title") or ""
+    metadata["message_count"] = message_count
     metadata["space_label"] = derive_space_label_from_cwd(metadata.get("cwd") or "")
-    terms.update(tokens(metadata["space_label"]))
     metadata["started_epoch"] = int(
         iso_to_epoch(metadata.get("started_at") or "") or archive_path_timestamp(agent, path)
     )
@@ -1897,54 +1955,79 @@ def archive_catalog_document(agent: str, path: Path, thread_names):
         iso_to_epoch(metadata.get("updated_at") or "") or metadata["started_epoch"]
     )
     metadata["is_wrapper"] = int(
-        archive_catalog_is_wrapper(metadata.get("title") or "", metadata["preview"])
+        archive_catalog_is_wrapper(
+            metadata.get("title") or "",
+            archive_catalog_preview(first_turns),
+        )
     )
-    return metadata, terms
+    return metadata, message_count
 
 
-def archive_catalog_search_body(metadata, document_terms) -> str:
-    weighted = []
-    for field, weight in (
-        ("title", 12),
-        ("session_id", 8),
-        ("space_label", 6),
-        ("cwd", 3),
-        ("agent", 2),
-    ):
-        field_terms = tokens(str(metadata.get(field) or ""))
-        for _ in range(weight):
-            weighted.extend(field_terms)
-    weighted.extend(sorted(document_terms))
-    return " ".join(weighted)
-
-
-def insert_archive_catalog_terms(conn, document_terms) -> None:
-    ordered = sorted(document_terms)
-    new_terms = []
-    for offset in range(0, len(ordered), 400):
-        batch = ordered[offset : offset + 400]
-        placeholders = ",".join("?" for _ in batch)
-        existing = {
-            row["token"]
-            for row in conn.execute(
-                f"SELECT token FROM catalog_terms WHERE token IN ({placeholders})",
-                batch,
-            ).fetchall()
-        }
-        new_terms.extend(token for token in batch if token not in existing)
-    if not new_terms:
+def archive_catalog_store_message_batch(conn, session_key: str, generation: int, turns) -> None:
+    if not turns:
         return
+    rows = []
+    for turn in turns:
+        material = "\0".join(
+            (
+                session_key,
+                str(turn["ordinal"]),
+                turn["role"],
+                turn["content"],
+            )
+        )
+        rows.append(
+            {
+                **turn,
+                "message_key": hashlib.sha1(
+                    material.encode("utf-8", "replace")
+                ).hexdigest(),
+                "session_key": session_key,
+                "indexed_generation": generation,
+            }
+        )
+
+    keys = [row["message_key"] for row in rows]
+    placeholders = ",".join("?" for _ in keys)
+    existing = {
+        row["message_key"]
+        for row in conn.execute(
+            f"SELECT message_key FROM catalog_messages WHERE message_key IN ({placeholders})",
+            keys,
+        ).fetchall()
+    }
     conn.executemany(
-        "INSERT INTO catalog_terms (token) VALUES (?)",
-        ((token,) for token in new_terms),
+        """
+        INSERT INTO catalog_messages (
+            message_key, session_key, ordinal, role, message_at, message_epoch,
+            content, indexed_generation
+        ) VALUES (
+            :message_key, :session_key, :ordinal, :role, :message_at, :message_epoch,
+            :content, :indexed_generation
+        )
+        ON CONFLICT(message_key) DO UPDATE SET
+            session_key = excluded.session_key,
+            ordinal = excluded.ordinal,
+            role = excluded.role,
+            message_at = excluded.message_at,
+            message_epoch = excluded.message_epoch,
+            indexed_generation = excluded.indexed_generation
+        """,
+        rows,
     )
+    new_rows = [row for row in rows if row["message_key"] not in existing]
+    if not new_rows:
+        return
+    ids = {
+        row["message_key"]: row["id"]
+        for row in conn.execute(
+            f"SELECT id, message_key FROM catalog_messages WHERE message_key IN ({placeholders})",
+            keys,
+        ).fetchall()
+    }
     conn.executemany(
-        "INSERT OR IGNORE INTO catalog_token_trigrams (trigram, token) VALUES (?, ?)",
-        (
-            (trigram, token)
-            for token in new_terms
-            for trigram in token_trigrams(token)
-        ),
+        "INSERT INTO catalog_message_fts (rowid, content) VALUES (?, ?)",
+        ((ids[row["message_key"]], row["content"]) for row in new_rows),
     )
 
 
@@ -1977,7 +2060,8 @@ def _archive_catalog_index_unlocked(agents: str = ""):
         row["path"]: row
         for row in conn.execute(
             """
-            SELECT session_key, agent, path, source_size, source_mtime_ns, started_epoch
+            SELECT session_key, agent, path, source_size, source_mtime_ns, started_epoch,
+                   message_index_version, is_present
             FROM catalog_sessions
             """
         ).fetchall()
@@ -1986,12 +2070,15 @@ def _archive_catalog_index_unlocked(agents: str = ""):
     changed = 0
     unchanged = 0
     removed = 0
-    token_count = 0
+    message_count = 0
     indexed_at = int(time.time())
     try:
         with conn:
             conn.execute(
-                "INSERT OR REPLACE INTO catalog_meta (key, value) VALUES ('index_started_at', ?)",
+                """
+                INSERT INTO catalog_meta (key, value) VALUES ('index_started_at', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
                 (str(indexed_at),),
             )
             stale_paths = {
@@ -2001,11 +2088,13 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             }
             for stale_path in sorted(stale_paths):
                 old = existing[stale_path]
-                conn.execute("DELETE FROM catalog_fts WHERE session_key = ?", (old["session_key"],))
-                conn.execute("DELETE FROM catalog_sessions WHERE session_key = ?", (old["session_key"],))
-                removed += 1
+                if int(old["is_present"] or 0):
+                    conn.execute(
+                        "UPDATE catalog_sessions SET is_present = 0 WHERE session_key = ?",
+                        (old["session_key"],),
+                    )
+                    removed += 1
 
-        pending_commits = 0
         for agent, path in sources:
             try:
                 stat = path.stat()
@@ -2017,68 +2106,119 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                 and int(old["source_size"]) == stat.st_size
                 and int(old["source_mtime_ns"]) == stat.st_mtime_ns
                 and int(old["started_epoch"] or 0) > 0
+                and int(old["message_index_version"] or 0)
+                == ARCHIVE_CATALOG_CONTENT_VERSION
+                and int(old["is_present"] or 0) == 1
             ):
                 unchanged += 1
                 continue
-            document = archive_catalog_document(agent, path, thread_names)
-            if not document:
+            base_metadata = archive_file_metadata(agent, path, thread_names)
+            if not base_metadata:
                 continue
-            metadata, document_terms = document
-            session_key = f"{agent}:{metadata['session_id']}"
+            session_key = old["session_key"] if old else f"{agent}:{base_metadata['session_id']}"
+            generation = time.time_ns()
+            message_batch = []
+
+            def store_turn(turn):
+                message_batch.append(turn)
+                if len(message_batch) >= 200:
+                    archive_catalog_store_message_batch(
+                        conn,
+                        session_key,
+                        generation,
+                        message_batch,
+                    )
+                    message_batch.clear()
+
+            conn.execute("SAVEPOINT archive_catalog_source")
+            document = archive_catalog_document(
+                agent,
+                path,
+                thread_names,
+                message_sink=store_turn,
+                metadata=base_metadata,
+            )
+            if not document:
+                conn.execute("ROLLBACK TO SAVEPOINT archive_catalog_source")
+                conn.execute("RELEASE SAVEPOINT archive_catalog_source")
+                continue
+            archive_catalog_store_message_batch(
+                conn,
+                session_key,
+                generation,
+                message_batch,
+            )
+            metadata, indexed_messages = document
             row = {
                 **metadata,
                 "session_key": session_key,
                 "source_size": stat.st_size,
                 "source_mtime_ns": stat.st_mtime_ns,
                 "indexed_at": indexed_at,
+                "message_generation": generation,
+                "message_index_version": ARCHIVE_CATALOG_CONTENT_VERSION,
+                "is_present": 1,
             }
-            if old:
-                conn.execute("DELETE FROM catalog_fts WHERE session_key = ?", (old["session_key"],))
-                conn.execute("DELETE FROM catalog_sessions WHERE session_key = ?", (old["session_key"],))
-            conn.execute("DELETE FROM catalog_fts WHERE session_key = ?", (session_key,))
-            conn.execute("DELETE FROM catalog_sessions WHERE session_key = ?", (session_key,))
             conn.execute(
                 """
-                INSERT OR REPLACE INTO catalog_sessions (
+                INSERT INTO catalog_sessions (
                     session_key, agent, session_id, space_label, title, cwd, path,
                     started_at, updated_at, started_epoch, updated_epoch, preview, is_wrapper,
-                    source_size, source_mtime_ns, indexed_at
+                    source_size, source_mtime_ns, indexed_at, message_generation,
+                    message_count, message_index_version, is_present
                 ) VALUES (
                     :session_key, :agent, :session_id, :space_label, :title, :cwd, :path,
                     :started_at, :updated_at, :started_epoch, :updated_epoch, :preview, :is_wrapper,
-                    :source_size, :source_mtime_ns, :indexed_at
+                    :source_size, :source_mtime_ns, :indexed_at, :message_generation,
+                    :message_count, :message_index_version, :is_present
                 )
+                ON CONFLICT(session_key) DO UPDATE SET
+                    agent = excluded.agent,
+                    session_id = excluded.session_id,
+                    space_label = excluded.space_label,
+                    title = excluded.title,
+                    cwd = excluded.cwd,
+                    path = excluded.path,
+                    started_at = excluded.started_at,
+                    updated_at = excluded.updated_at,
+                    started_epoch = excluded.started_epoch,
+                    updated_epoch = excluded.updated_epoch,
+                    preview = excluded.preview,
+                    is_wrapper = excluded.is_wrapper,
+                    source_size = excluded.source_size,
+                    source_mtime_ns = excluded.source_mtime_ns,
+                    indexed_at = excluded.indexed_at,
+                    message_generation = excluded.message_generation,
+                    message_count = excluded.message_count,
+                    message_index_version = excluded.message_index_version,
+                    is_present = excluded.is_present
                 """,
                 row,
             )
-            conn.execute(
-                "INSERT INTO catalog_fts (session_key, body) VALUES (?, ?)",
-                (session_key, archive_catalog_search_body(metadata, document_terms)),
-            )
-            insert_archive_catalog_terms(conn, document_terms)
-            pending_commits += 1
-            if pending_commits >= 25:
-                conn.commit()
-                pending_commits = 0
-            changed += 1
-            token_count += len(document_terms)
-
-        if pending_commits:
+            conn.execute("RELEASE SAVEPOINT archive_catalog_source")
             conn.commit()
+            changed += 1
+            message_count += indexed_messages
+
         with conn:
             conn.execute(
-                "INSERT OR REPLACE INTO catalog_meta (key, value) VALUES ('last_indexed_at', ?)",
+                """
+                INSERT INTO catalog_meta (key, value) VALUES ('last_indexed_at', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
                 (str(int(time.time())),),
             )
     finally:
         conn.close()
-    return changed, unchanged, removed, token_count
+    return changed, unchanged, removed, message_count
 
 
 def archive_catalog_state():
     conn = archive_catalog_connect()
     try:
-        count = conn.execute("SELECT COUNT(*) FROM catalog_sessions").fetchone()[0]
+        count = conn.execute(
+            "SELECT COUNT(*) FROM catalog_sessions WHERE COALESCE(is_present, 1) = 1"
+        ).fetchone()[0]
         last = conn.execute(
             "SELECT value FROM catalog_meta WHERE key = 'last_indexed_at'"
         ).fetchone()
@@ -2114,10 +2254,59 @@ def maybe_background_archive_catalog_index(agents: str = "", stale_seconds: int 
     )
 
 
+def archive_catalog_candidate_tokens(conn, term: str, limit: int = 24):
+    term = term.lower()
+    if len(term) < 4:
+        return []
+    distance = fuzzy_distance_limit(term)
+    candidates = set()
+    prefixes = [term[:2]]
+    if len(term) >= 8:
+        prefixes.append(term[:1])
+    for prefix in prefixes:
+        upper = prefix_upper_bound(prefix)
+        if not upper:
+            continue
+        rows = conn.execute(
+            """
+            SELECT term
+            FROM catalog_message_vocab
+            WHERE term >= ? AND term < ?
+              AND length(term) BETWEEN ? AND ?
+            ORDER BY abs(length(term) - ?) ASC, term ASC
+            LIMIT 12000
+            """,
+            (
+                prefix,
+                upper,
+                max(2, len(term) - distance),
+                len(term) + distance,
+                len(term),
+            ),
+        ).fetchall()
+        candidates.update(row["term"] for row in rows)
+        scored = [
+            (candidate, score_token_candidate(term, candidate))
+            for candidate in candidates
+        ]
+        scored = [item for item in scored if item[1] >= fuzzy_score_threshold(term)]
+        if scored:
+            scored.sort(
+                key=lambda item: (
+                    -item[1],
+                    abs(len(item[0]) - len(term)),
+                    item[0],
+                )
+            )
+            best_score = scored[0][1]
+            return [item for item in scored if item[1] >= best_score - 0.02][:limit]
+    return []
+
+
 def archive_catalog_fuzzy_query(conn, query_terms):
     groups = []
     for term in query_terms:
-        candidates = candidate_tokens_for_term(conn, term, limit=24, scope="catalog")
+        candidates = archive_catalog_candidate_tokens(conn, term, limit=24)
         if not candidates:
             return ""
         quoted = []
@@ -2127,36 +2316,67 @@ def archive_catalog_fuzzy_query(conn, query_terms):
     return " ".join(groups)
 
 
-def archive_catalog_metadata_score(row, query_terms) -> int:
-    if not query_terms:
-        return 0
-    for field, weight in (
-        ("title", 100),
-        ("session_id", 90),
-        ("space_label", 60),
-        ("cwd", 30),
-        ("path", 20),
-        ("agent", 10),
-    ):
-        field_terms = tokens(str(row.get(field) or ""))
-        if field_terms and all(
-            any(
-                score_token_candidate(term, candidate) >= fuzzy_score_threshold(term)
-                for candidate in field_terms
-            )
-            for term in query_terms
-        ):
-            return weight
-    return 0
+def archive_catalog_matched_tokens(content: str, query_terms):
+    content_terms = set(tokens(content or ""))
+    matched = []
+    for query_term in query_terms:
+        candidates = [
+            (score_token_candidate(query_term, candidate), candidate)
+            for candidate in content_terms
+        ]
+        candidates = [candidate for candidate in candidates if candidate[0] > 0]
+        if candidates:
+            matched.append(max(candidates)[1])
+    return list(dict.fromkeys(matched))
 
 
-def archive_catalog_result_row(row):
+def archive_catalog_context(conn, row, matched_tokens) -> str:
+    ordinal = row.get("match_ordinal")
+    if ordinal is None:
+        return row.get("preview") or row.get("title") or ""
+    turns = conn.execute(
+        """
+        SELECT ordinal, role, content
+        FROM catalog_messages
+        WHERE session_key = ?
+          AND indexed_generation = ?
+          AND ordinal BETWEEN ? AND ?
+        ORDER BY ordinal ASC
+        """,
+        (
+            row["session_key"],
+            row["message_generation"],
+            max(0, int(ordinal) - 1),
+            int(ordinal) + 1,
+        ),
+    ).fetchall()
+    lines = []
+    for turn in turns:
+        if int(turn["ordinal"]) == int(ordinal):
+            text = fuzzy_snippet(turn["content"], matched_tokens)
+        else:
+            text = shorten(turn["content"], 420)
+        lines.append(f"{turn['role']}: {text}")
+    return "\n".join(lines) or row.get("match_content") or row.get("preview") or ""
+
+
+def archive_catalog_result_row(row, conn=None, query_terms=None):
     result = dict(row)
+    matched_tokens = archive_catalog_matched_tokens(
+        result.get("match_content") or "",
+        query_terms or [],
+    )
+    if conn is not None and result.get("match_ordinal") is not None:
+        content = archive_catalog_context(conn, result, matched_tokens)
+    else:
+        content = result.get("preview") or result.get("title") or ""
     result.update(
         {
             "stable_id": archive_catalog_stable_id(result["session_key"]),
-            "content": result.get("preview") or result.get("title") or "",
-            "match_count": 1,
+            "content": content,
+            "snippet": content,
+            "matched_tokens": matched_tokens,
+            "match_count": int(result.get("match_count") or 1),
             "source": "archive",
             "agent_status": "archive",
             "workspace_label": result.get("space_label") or "archive",
@@ -2193,7 +2413,11 @@ def archive_catalog_result(stable_id: str):
     conn = archive_catalog_connect()
     try:
         row = conn.execute(
-            "SELECT *, 0.0 AS rank FROM catalog_sessions WHERE session_key = ?",
+            """
+            SELECT *, 0.0 AS rank
+            FROM catalog_sessions
+            WHERE session_key = ? AND COALESCE(is_present, 1) = 1
+            """,
             (session_key,),
         ).fetchone()
     finally:
@@ -2206,11 +2430,21 @@ def archive_catalog_max_window_offset(agent, window_days: int, *, now=None) -> i
     try:
         if agent:
             row = conn.execute(
-                "SELECT MIN(started_epoch) FROM catalog_sessions WHERE agent = ?",
+                """
+                SELECT MIN(started_epoch)
+                FROM catalog_sessions
+                WHERE agent = ? AND COALESCE(is_present, 1) = 1
+                """,
                 (agent,),
             ).fetchone()
         else:
-            row = conn.execute("SELECT MIN(started_epoch) FROM catalog_sessions").fetchone()
+            row = conn.execute(
+                """
+                SELECT MIN(started_epoch)
+                FROM catalog_sessions
+                WHERE COALESCE(is_present, 1) = 1
+                """
+            ).fetchone()
     finally:
         conn.close()
     oldest = int(row[0] or 0) if row else 0
@@ -2235,7 +2469,7 @@ def archive_catalog_search(
     text, filters = parse_filters(query)
     if agent:
         filters["agent"] = agent
-    clauses = ["COALESCE(s.is_wrapper, 0) = 0"]
+    clauses = ["COALESCE(s.is_wrapper, 0) = 0", "COALESCE(s.is_present, 1) = 1"]
     params = {"limit": limit}
     if filters.get("agent"):
         clauses.append("s.agent = :agent")
@@ -2260,35 +2494,48 @@ def archive_catalog_search(
     try:
         if query_terms:
             exact = fts_query(text)
-            searches = [exact] if exact else []
-            fuzzy = archive_catalog_fuzzy_query(conn, query_terms)
-            if fuzzy and fuzzy != exact:
-                searches.append(fuzzy)
-            seen = set()
             candidate_limit = min(1000, max(limit * 40, 400))
-            for search in searches:
+
+            def run_message_search(search):
                 sql = f"""
-                    SELECT s.*, bm25(catalog_fts) AS rank
-                    FROM catalog_fts
-                    JOIN catalog_sessions s ON s.session_key = catalog_fts.session_key
-                    WHERE catalog_fts MATCH :search AND {' AND '.join(clauses)}
-                    ORDER BY rank ASC, s.updated_epoch DESC
+                    SELECT s.*, m.ordinal AS match_ordinal, m.role AS match_role,
+                           m.message_at AS match_at, m.content AS match_content,
+                           bm25(catalog_message_fts) AS rank
+                    FROM catalog_message_fts
+                    JOIN catalog_messages m ON m.id = catalog_message_fts.rowid
+                    JOIN catalog_sessions s ON s.session_key = m.session_key
+                    WHERE catalog_message_fts MATCH :search
+                      AND m.indexed_generation = s.message_generation
+                      AND {' AND '.join(clauses)}
+                    ORDER BY rank ASC, m.message_epoch DESC, s.updated_epoch DESC
                     LIMIT :candidate_limit
                 """
-                matched = conn.execute(
+                return conn.execute(
                     sql,
                     {**params, "search": search, "candidate_limit": candidate_limit},
                 ).fetchall()
-                for row in matched:
-                    if row["session_key"] in seen:
-                        continue
-                    seen.add(row["session_key"])
-                    rows.append(archive_catalog_result_row(row))
-                if matched:
-                    break
+
+            matched = run_message_search(exact) if exact else []
+            if not matched:
+                fuzzy = archive_catalog_fuzzy_query(conn, query_terms)
+                if fuzzy and fuzzy != exact:
+                    matched = run_message_search(fuzzy)
+            grouped = {}
+            for row in matched:
+                session_key = row["session_key"]
+                current = grouped.get(session_key)
+                if current is None:
+                    current = dict(row)
+                    current["match_count"] = 1
+                    grouped[session_key] = current
+                else:
+                    current["match_count"] += 1
+            rows = [
+                archive_catalog_result_row(row, conn, query_terms)
+                for row in grouped.values()
+            ]
             rows.sort(
                 key=lambda row: (
-                    -archive_catalog_metadata_score(row, query_terms),
                     float(row.get("rank") or 0.0),
                     -int(row.get("updated_epoch") or 0),
                 )
@@ -3577,11 +3824,11 @@ def archive_pick(args) -> int:
     args.window_offset = max(0, args.window_offset)
     require_archive_enabled()
     if args.refresh:
-        changed, unchanged, removed, token_count = archive_catalog_index(args.agents)
+        changed, unchanged, removed, message_count = archive_catalog_index(args.agents)
         if args.verbose:
             print(
                 f"cataloged {changed} changed / {unchanged} unchanged / "
-                f"{removed} removed sessions ({token_count} terms)",
+                f"{removed} removed sessions ({message_count} messages)",
                 file=sys.stderr,
             )
     elif args.background_refresh:
@@ -3695,10 +3942,20 @@ def row_title(row):
         agent = row.get("agent") or "agent"
         space = row.get("workspace_label") or "archive"
         date = (row.get("updated_at") or row.get("started_at") or "archive")[:10]
-        title = row.get("title") or row.get("session_id") or "session"
+        if row.get("match_content"):
+            summary = fuzzy_snippet(
+                row["match_content"],
+                row.get("matched_tokens") or [],
+            )
+            role = row.get("match_role") or "message"
+            summary = f"{role}: {summary}"
+        else:
+            preview_lines = clean_text(row.get("content") or "").splitlines()
+            summary = preview_lines[-1] if preview_lines else row.get("title") or "session"
+        summary = shorten(summary, 76)
         matches = row.get("match_count")
         count = f" x{matches}" if matches and int(matches) > 1 else ""
-        return f"[archive] {space} / {agent} / {title} / {date}{count}"
+        return f"[archive] {space} / {agent} / {summary} / {date}{count}"
     if is_workspace_row(row):
         workspace = row.get("workspace_label") or row.get("workspace_id")
         matches = row.get("match_count")
@@ -4691,10 +4948,10 @@ def cmd_archive_index(args) -> int:
 
 
 def cmd_archive_catalog_index(args) -> int:
-    changed, unchanged, removed, token_count = archive_catalog_index(args.agents)
+    changed, unchanged, removed, message_count = archive_catalog_index(args.agents)
     print(
         f"cataloged {changed} changed / {unchanged} unchanged / {removed} removed "
-        f"sessions ({token_count} terms) into {archive_catalog_db_path()}"
+        f"sessions ({message_count} messages) into {archive_catalog_db_path()}"
     )
     return 0
 

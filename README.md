@@ -46,7 +46,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To pin this release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.5.0
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.0
 ```
 
 Herdr plugin manifests do not modify user keybindings. The portable recommended
@@ -193,17 +193,23 @@ Open the archive picker:
 herdr-omnisearch archive-pick --no-refresh --background-refresh --stale-seconds 300
 ```
 
-ArchiveSearch stores one compact, disk-backed search document per session. The
-first catalog build streams one history file at a time and commits partial
-results in batches; later refreshes only reread files whose size or modification
-time changed. The plugin starts refreshes in the background, and interactive
-typing never opens raw history files or rebuilds an archive window.
+ArchiveSearch stores bounded user and assistant messages in a disk-backed FTS5
+catalog. It excludes system instructions, reasoning records, and tool payloads.
+The first build streams one history file at a time and writes messages in small
+batches; later refreshes only reread files whose size or modification time
+changed. The plugin starts refreshes in the background, and interactive typing
+never opens raw history files or rebuilds an archive window.
+
+Normal text queries search conversation content only. Session titles, paths,
+working directories, and agent names remain navigation metadata and do not
+produce text matches; use `agent:`, `workspace:`, or `cwd:` for explicit
+metadata filtering. Results show the matching turn with adjacent chat context,
+while an empty query previews each session's three latest conversational turns.
 
 The picker initially browses the newest 14 calendar days by session creation
-date. Left/right changes that date filter instantly. When the best match is
+date. Left/right changes that date filter instantly. When a content match is
 outside the active dates, the picker searches the complete catalog and returns
-the older result directly, with title and session matches ranked above
-incidental path matches. Exact and typo-tolerant content searches use the same
+the older result directly. Exact and typo-tolerant content searches use the same
 catalog and can be resumed without a second indexing pass.
 
 Check state:

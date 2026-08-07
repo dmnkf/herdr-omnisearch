@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0 - 2026-08-07
+
+- Index bounded user and assistant turns instead of session metadata token bags.
+- Show matching chat context and latest-turn previews in archive results.
+- Keep exact and typo-tolerant content search fast with one disk-backed FTS index.
+
 ## 0.5.0 - 2026-08-06
 
 - Add a persistent, incremental archive catalog with bounded per-file memory.
