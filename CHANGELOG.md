@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 - 2026-08-07
+
+- Keep archive chat summaries clear of the fixed cwd display column.
+- Exclude interruption and local-command control messages from chat previews.
+
 ## 0.6.0 - 2026-08-07
 
 - Index bounded user and assistant turns instead of session metadata token bags.

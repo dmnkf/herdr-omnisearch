@@ -35,7 +35,7 @@ DEFAULT_LIMIT = 30
 ARCHIVE_MAX_RECORD_BYTES = 2 * 1024 * 1024
 ARCHIVE_MESSAGE_MAX_CHARS = 16000
 ARCHIVE_PREVIEW_MESSAGES = 3
-ARCHIVE_CATALOG_CONTENT_VERSION = 1
+ARCHIVE_CATALOG_CONTENT_VERSION = 2
 STATUS_WEIGHT = {
     "workspace": 0,
     "working": 0,
@@ -1396,6 +1396,11 @@ def is_archive_noise(text: str) -> bool:
         "<skills_instructions>",
         "<plugins_instructions>",
         "<INSTRUCTIONS>",
+        "[Request interrupted by user",
+        "<local-command-caveat>",
+        "<local-command-stdout>",
+        "<command-name>",
+        "<command-message>",
     )
     if any(text.startswith(prefix) for prefix in noise_prefixes):
         return True
@@ -4102,7 +4107,7 @@ def render_picker(
         highlight_attr = curses.color_pair(7) | curses.A_BOLD
         add_highlighted(stdscr, y, 0, row_title(row), width - 1, attr, highlight_attr, terms)
         cwd = row.get("cwd") or ""
-        if width > 100:
+        if width > 100 and row.get("source") != "archive":
             cwd_x = min(62, width // 2)
             add_highlighted(
                 stdscr,

@@ -1274,6 +1274,23 @@ class CliTests(unittest.TestCase):
                         ],
                     },
                 },
+                {
+                    "timestamp": "2026-08-04T12:00:02Z",
+                    "type": "user",
+                    "sessionId": "secondary-session",
+                    "cwd": "/projects/example",
+                    "message": {"role": "user", "content": "[Request interrupted by user]"},
+                },
+                {
+                    "timestamp": "2026-08-04T12:00:03Z",
+                    "type": "user",
+                    "sessionId": "secondary-session",
+                    "cwd": "/projects/example",
+                    "message": {
+                        "role": "user",
+                        "content": "<local-command-stdout>control-marker</local-command-stdout>",
+                    },
+                },
             ]
             path.write_text(
                 "".join(json.dumps(record) + "\n" for record in records),
@@ -1293,8 +1310,12 @@ class CliTests(unittest.TestCase):
                 cli.archive_catalog_index()
                 result = cli.archive_catalog_search("visible-response-marker", 10)[0]
                 self.assertIn("assistant: The visible-response-marker is indexed.", result["content"])
+                latest = cli.archive_catalog_search("", 10)[0]
+                self.assertIn("assistant: The visible-response-marker is indexed.", latest["content"])
+                self.assertNotIn("Request interrupted", latest["content"])
                 self.assertEqual(cli.archive_catalog_search("private-reasoning-marker", 10), [])
                 self.assertEqual(cli.archive_catalog_search("private-tool-marker", 10), [])
+                self.assertEqual(cli.archive_catalog_search("control-marker", 10), [])
 
     def test_scoped_archive_catalog_refresh_preserves_other_agents(self):
         with tempfile.TemporaryDirectory() as tmp:
