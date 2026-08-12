@@ -3892,7 +3892,6 @@ def archive_pick(args) -> int:
     )
     args.window_offset = max(0, args.window_offset)
     require_archive_enabled()
-    deferred_background_refresh = False
     if args.refresh:
         changed, unchanged, removed, message_count = archive_catalog_index(args.agents)
         if args.verbose:
@@ -3902,11 +3901,7 @@ def archive_pick(args) -> int:
                 file=sys.stderr,
             )
     elif args.background_refresh:
-        existing_count, _last = archive_catalog_state()
-        if existing_count:
-            deferred_background_refresh = True
-        else:
-            maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
+        maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
     count, _last = archive_catalog_state()
     if not count:
         args.initial_message = (
@@ -3914,13 +3909,9 @@ def archive_pick(args) -> int:
             if lock_is_held(data_dir() / "archive-catalog.lock")
             else "Archive catalog is empty; refresh the archive index"
         )
-    try:
-        if args.native or (not args.fzf and sys.stdin.isatty() and sys.stdout.isatty()):
-            return curses.wrapper(lambda stdscr: curses_picker(stdscr, args))
-        return fzf_picker(args)
-    finally:
-        if deferred_background_refresh:
-            maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
+    if args.native or (not args.fzf and sys.stdin.isatty() and sys.stdout.isatty()):
+        return curses.wrapper(lambda stdscr: curses_picker(stdscr, args))
+    return fzf_picker(args)
 
 
 def fzf_picker(args) -> int:

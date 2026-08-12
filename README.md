@@ -46,7 +46,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To pin this release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.6
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.7
 ```
 
 Herdr plugin manifests do not modify user keybindings. The portable recommended
@@ -198,9 +198,7 @@ catalog. It excludes system instructions, reasoning records, and tool payloads.
 The first build streams one history file at a time and writes messages in small
 batches; later refreshes only reread files whose size or modification time
 changed. The plugin starts refreshes in the background, and interactive typing
-never opens raw history files or rebuilds an archive window. A stale refresh
-requested by the picker starts after that picker closes, keeping index writes
-out of the interactive search path.
+never opens raw history files or rebuilds an archive window.
 
 Normal text queries search conversation content only. Session titles, paths,
 working directories, and agent names remain navigation metadata and do not

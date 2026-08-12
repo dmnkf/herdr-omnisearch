@@ -140,11 +140,8 @@ class CliTests(unittest.TestCase):
         )
         config = cli.default_config()
         config["archive_enabled"] = True
-        events = []
         with patch.object(cli, "CONFIG_CACHE", config), patch.object(
-            cli,
-            "maybe_background_archive_catalog_index",
-            side_effect=lambda *_args: events.append("refresh"),
+            cli, "maybe_background_archive_catalog_index"
         ) as background, patch.object(
             cli, "archive_catalog_state", return_value=(4, 1)
         ), patch.object(
@@ -152,14 +149,11 @@ class CliTests(unittest.TestCase):
         ) as legacy_window, patch.object(
             cli, "index_archive"
         ) as legacy_index, patch.object(
-            cli.curses,
-            "wrapper",
-            side_effect=lambda _picker: events.append("picker") or 0,
+            cli.curses, "wrapper", return_value=0
         ):
             self.assertEqual(cli.archive_pick(args), 0)
 
         background.assert_called_once_with("", 300)
-        self.assertEqual(events, ["picker", "refresh"])
         legacy_window.assert_not_called()
         legacy_index.assert_not_called()
 

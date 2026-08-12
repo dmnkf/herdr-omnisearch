@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.7 - 2026-08-12
+
+- Keep stale catalog refreshes reliable when archive panes are force-closed.
+
 ## 0.6.6 - 2026-08-12
 
 - Render archive input immediately and search once after a short typing pause.
