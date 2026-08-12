@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6 - 2026-08-12
+
+- Render archive input immediately and search once after a short typing pause.
+- Keep the first two typed characters index-free, then use bounded exact/prefix search.
+- Defer catalog refreshes until the picker closes and bound result enrichment.
+
 ## 0.6.5 - 2026-08-07
 
 - Ignore inactive exact vocabulary when falling back to typo-tolerant search.

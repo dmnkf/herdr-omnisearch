@@ -140,8 +140,11 @@ class CliTests(unittest.TestCase):
         )
         config = cli.default_config()
         config["archive_enabled"] = True
+        events = []
         with patch.object(cli, "CONFIG_CACHE", config), patch.object(
-            cli, "maybe_background_archive_catalog_index"
+            cli,
+            "maybe_background_archive_catalog_index",
+            side_effect=lambda *_args: events.append("refresh"),
         ) as background, patch.object(
             cli, "archive_catalog_state", return_value=(4, 1)
         ), patch.object(
@@ -149,11 +152,14 @@ class CliTests(unittest.TestCase):
         ) as legacy_window, patch.object(
             cli, "index_archive"
         ) as legacy_index, patch.object(
-            cli.curses, "wrapper", return_value=0
+            cli.curses,
+            "wrapper",
+            side_effect=lambda _picker: events.append("picker") or 0,
         ):
             self.assertEqual(cli.archive_pick(args), 0)
 
         background.assert_called_once_with("", 300)
+        self.assertEqual(events, ["picker", "refresh"])
         legacy_window.assert_not_called()
         legacy_index.assert_not_called()
 
@@ -950,7 +956,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(metadata["session_id"], "session-id")
         self.assertEqual(metadata["title"], "Target migration")
 
-    def test_archive_search_prefers_better_global_catalog_match(self):
+    def test_archive_picker_searches_all_dates_once_for_nonempty_queries(self):
         args = Namespace(
             agents="",
             agent=None,
@@ -962,28 +968,74 @@ class CliTests(unittest.TestCase):
             window_days=14,
             window_offset=0,
         )
-        current = [{"session_key": "codex:current", "space_label": "target", "rank": -1.0}]
-        global_match = {
-            "session_key": "codex:target-session",
-            "session_id": "target-session",
-            "title": "target extension",
-            "rank": -8.0,
-        }
-        with patch.object(cli, "archive_catalog_search", return_value=[global_match]), patch.object(
-            cli, "index_archive"
-        ) as legacy_index, patch.object(cli, "archive_window_might_match") as raw_scan:
-            rows, message = cli.archive_fallback_rows(
-                args,
-                "target",
-                {},
-                fallback_rows=current,
-            )
+        with patch.object(cli, "archive_catalog_search", return_value=[]) as search:
+            cli.picker_rows(args, "target")
 
-        self.assertEqual(rows[0]["session_id"], "target-session")
-        self.assertIn("all archive dates", message)
-        self.assertEqual(args.window_offset, 0)
-        legacy_index.assert_not_called()
-        raw_scan.assert_not_called()
+        search.assert_called_once_with(
+            "target",
+            40,
+            agent=None,
+            window_days=None,
+            window_offset=None,
+        )
+
+    def test_archive_picker_keeps_window_scope_for_empty_browsing(self):
+        args = Namespace(
+            agent=None,
+            archive=True,
+            limit=40,
+            status=None,
+            window_days=14,
+            window_offset=2,
+        )
+        with patch.object(cli, "archive_catalog_search", return_value=[]) as search:
+            cli.picker_rows(args, "")
+
+        search.assert_called_once_with(
+            "",
+            40,
+            agent=None,
+            window_days=14,
+            window_offset=2,
+        )
+
+    def test_archive_catalog_short_terms_are_exact_not_prefixes(self):
+        self.assertEqual(
+            cli.archive_catalog_fts_query("a as asa archive"),
+            '"a" "as" "asa" "archive"*',
+        )
+
+    def test_archive_picker_does_not_query_short_input(self):
+        args = Namespace(
+            agent=None,
+            archive=True,
+            limit=40,
+            status=None,
+            window_days=14,
+            window_offset=0,
+        )
+        with patch.object(cli, "archive_catalog_search") as search:
+            self.assertEqual(cli.picker_rows(args, "as"), [])
+
+        search.assert_not_called()
+        self.assertEqual(cli.archive_picker_lookup_query(args, "as"), "")
+        self.assertEqual(cli.archive_picker_lookup_query(args, "asa"), "asa")
+
+    def test_archive_picker_title_marks_global_search_scope(self):
+        args = Namespace(archive=True, window_days=14, window_offset=2)
+
+        self.assertEqual(cli.picker_title(args, "asa"), "Herdr ArchiveSearch | all dates")
+        self.assertIn(" to ", cli.picker_title(args, ""))
+
+    def test_pending_keys_uses_idle_timeout_and_restores_blocking(self):
+        screen = Mock()
+        screen.get_wch.side_effect = ["s", cli.curses.error()]
+
+        self.assertEqual(list(cli.pending_keys(screen, 100)), ["s"])
+        self.assertEqual(
+            [item.args for item in screen.timeout.call_args_list],
+            [(100,), (-1,)],
+        )
 
     def test_archive_catalog_is_incremental_and_searches_all_dates(self):
         with tempfile.TemporaryDirectory() as tmp:

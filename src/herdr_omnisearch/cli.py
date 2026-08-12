@@ -36,6 +36,9 @@ ARCHIVE_MAX_RECORD_BYTES = 2 * 1024 * 1024
 ARCHIVE_MESSAGE_MAX_CHARS = 16000
 ARCHIVE_PREVIEW_MESSAGES = 3
 ARCHIVE_CATALOG_CONTENT_VERSION = 5
+ARCHIVE_PICKER_DEBOUNCE_MS = 100
+ARCHIVE_PICKER_MIN_QUERY_CHARS = 3
+ARCHIVE_PREFIX_MIN_CHARS = 4
 STATUS_WEIGHT = {
     "workspace": 0,
     "working": 0,
@@ -2514,6 +2517,10 @@ def archive_catalog_max_window_offset(agent, window_days: int, *, now=None) -> i
         offset += 1
 
 
+def archive_catalog_fts_query(query: str) -> str:
+    return fts_query(query, prefix_min_chars=ARCHIVE_PREFIX_MIN_CHARS)
+
+
 def archive_catalog_search(
     query: str,
     limit: int,
@@ -2549,8 +2556,8 @@ def archive_catalog_search(
     rows = []
     try:
         if query_terms:
-            exact = fts_query(text)
-            candidate_limit = min(1000, max(limit * 40, 400))
+            exact = archive_catalog_fts_query(text)
+            candidate_limit = min(400, max(limit * 10, 100))
 
             def run_message_search(search):
                 sql = f"""
@@ -2590,16 +2597,17 @@ def archive_catalog_search(
                     grouped[session_key] = current
                 else:
                     current["match_count"] += 1
-            rows = [
-                archive_catalog_result_row(row, conn, query_terms)
-                for row in grouped.values()
-            ]
-            rows.sort(
+            ranked = list(grouped.values())
+            ranked.sort(
                 key=lambda row: (
                     float(row.get("rank") or 0.0),
                     -int(row.get("updated_epoch") or 0),
                 )
             )
+            rows = [
+                archive_catalog_result_row(row, conn, query_terms)
+                for row in ranked[:limit]
+            ]
         else:
             clauses.append("COALESCE(s.preview, '') <> ''")
             sql = f"""
@@ -2937,14 +2945,14 @@ def parse_filters(query: str):
     return " ".join(query.split()), filters
 
 
-def fts_query(query: str) -> str:
+def fts_query(query: str, *, prefix_min_chars: int = 2) -> str:
     terms = re.findall(r"[\w./@+-]+", query.lower())
     terms = [term.strip(".+-/") for term in terms]
     terms = [term for term in terms if term]
     quoted = []
     for term in terms:
         escaped = term.replace('"', '""')
-        if len(term) >= 2:
+        if len(term) >= prefix_min_chars:
             quoted.append(f'"{escaped}"*')
         else:
             quoted.append(f'"{escaped}"')
@@ -3884,6 +3892,7 @@ def archive_pick(args) -> int:
     )
     args.window_offset = max(0, args.window_offset)
     require_archive_enabled()
+    deferred_background_refresh = False
     if args.refresh:
         changed, unchanged, removed, message_count = archive_catalog_index(args.agents)
         if args.verbose:
@@ -3893,7 +3902,11 @@ def archive_pick(args) -> int:
                 file=sys.stderr,
             )
     elif args.background_refresh:
-        maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
+        existing_count, _last = archive_catalog_state()
+        if existing_count:
+            deferred_background_refresh = True
+        else:
+            maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
     count, _last = archive_catalog_state()
     if not count:
         args.initial_message = (
@@ -3901,16 +3914,18 @@ def archive_pick(args) -> int:
             if lock_is_held(data_dir() / "archive-catalog.lock")
             else "Archive catalog is empty; refresh the archive index"
         )
-    if args.native or (not args.fzf and sys.stdin.isatty() and sys.stdout.isatty()):
-        return curses.wrapper(lambda stdscr: curses_picker(stdscr, args))
-    return fzf_picker(args)
+    try:
+        if args.native or (not args.fzf and sys.stdin.isatty() and sys.stdout.isatty()):
+            return curses.wrapper(lambda stdscr: curses_picker(stdscr, args))
+        return fzf_picker(args)
+    finally:
+        if deferred_background_refresh:
+            maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
 
 
 def fzf_picker(args) -> int:
     query = " ".join(args.query)
     rows = picker_rows(args, query)
-    if getattr(args, "archive", False) and query.strip():
-        rows, _message = archive_fallback_rows(args, query, {}, fallback_rows=rows)
     if not rows:
         print("No OmniSearch matches.", file=sys.stderr)
         return 1
@@ -3938,13 +3953,13 @@ def fzf_picker(args) -> int:
             "--border",
             "rounded",
             "--border-label",
-            f" {picker_title(args)} ",
+            f" {picker_title(args, query)} ",
             "--preview-label",
             " context ",
             "--highlight-line",
             "--track",
             "--prompt",
-            f"{picker_title(args)}> ",
+            f"{picker_title(args, query)}> ",
             "--height",
             "100%",
             "--layout",
@@ -4204,12 +4219,15 @@ def render_picker(
 
 def picker_rows(args, query, *, snippets=False):
     if getattr(args, "archive", False):
+        if query.strip() and not archive_picker_query_ready(query):
+            return []
+        searching = bool(query.strip())
         return archive_catalog_search(
             query,
             args.limit,
             agent=args.agent,
-            window_days=args.window_days,
-            window_offset=args.window_offset,
+            window_days=None if searching else args.window_days,
+            window_offset=None if searching else args.window_offset,
         )
     return grouped_search_index(
         query,
@@ -4233,8 +4251,32 @@ def picker_focus(args, result):
     return focus_result(stable_id)
 
 
-def picker_title(args):
+def archive_picker_query_ready(query: str) -> bool:
+    text, filters = parse_filters(query)
+    has_metadata_filter = any(
+        filters.get(name)
+        for name in ("agent", "workspace", "cwd")
+    )
+    return has_metadata_filter or any(
+        len(term) >= ARCHIVE_PICKER_MIN_QUERY_CHARS
+        for term in tokens(text)
+    )
+
+
+def archive_picker_lookup_query(args, query: str) -> str:
+    if (
+        getattr(args, "archive", False)
+        and query.strip()
+        and not archive_picker_query_ready(query)
+    ):
+        return ""
+    return query
+
+
+def picker_title(args, query=""):
     if getattr(args, "archive", False):
+        if query.strip() and archive_picker_query_ready(query):
+            return "Herdr ArchiveSearch | all dates"
         days = getattr(args, "window_days", None) or app_config()["archive_window_days"]
         offset = getattr(args, "window_offset", 0)
         return f"Herdr ArchiveSearch | {archive_window_label(days, offset)}"
@@ -4394,21 +4436,22 @@ def execute_action(stdscr, args, row, action):
     return None, f"unknown action: {name}", False
 
 
-def pending_keys(stdscr):
-    keys = []
-    stdscr.nodelay(True)
+def pending_keys(stdscr, idle_ms=0):
+    if idle_ms:
+        stdscr.timeout(idle_ms)
+    else:
+        stdscr.nodelay(True)
     try:
         while True:
             try:
                 key = stdscr.get_wch()
-                keys.append(key)
+                yield key
                 if key == "\x1b":
                     break
             except curses.error:
                 break
     finally:
-        stdscr.nodelay(False)
-    return keys
+        stdscr.timeout(-1)
 
 
 def apply_insert_key(query: str, key):
@@ -4446,90 +4489,6 @@ def cached_picker_rows(args, query, cache):
     return rows
 
 
-def archive_rows_metadata_match_score(rows, query: str) -> int:
-    terms = archive_query_terms(query)
-    if not terms:
-        return 0
-    best = 0
-    for row in rows:
-        fields = (
-            ("title", 100),
-            ("session_id", 90),
-            ("space_label", 50),
-            ("workspace_label", 50),
-            ("cwd", 30),
-            ("path", 20),
-            ("agent", 10),
-        )
-        metadata = "\n".join(str(row.get(field) or "") for field, _weight in fields).lower()
-        if not all(term in metadata for term in terms):
-            continue
-        score = 10
-        for field, weight in fields:
-            value = str(row.get(field) or "").lower()
-            if all(term in value for term in terms):
-                score = max(score, weight)
-        best = max(best, score)
-    return best
-
-
-def archive_rows_have_strong_match(rows, query: str) -> bool:
-    return archive_rows_metadata_match_score(rows, query) > 0
-
-
-def archive_metadata_picker_rows(matches, limit: int):
-    rows = []
-    seen = set()
-    for score, metadata in matches:
-        key = (metadata.get("agent"), metadata.get("session_id"))
-        if key in seen:
-            continue
-        seen.add(key)
-        row = dict(metadata)
-        row.update(
-            {
-                "stable_id": "archive-meta:"
-                + hashlib.sha1("\0".join(str(value or "") for value in key).encode()).hexdigest(),
-                "session_key": ":".join(str(value or "") for value in key),
-                "content": row.get("title") or row.get("cwd") or "",
-                "match_count": 1,
-                "rank": -score,
-                "_archive_metadata": True,
-            }
-        )
-        rows.append(mark_archive_row(row))
-        if len(rows) >= limit:
-            break
-    return rows
-
-
-def archive_fallback_rows(args, query, cache, progress=None, fallback_rows=None):
-    terms = archive_query_terms(query)
-    if sum(len(term) for term in terms) < 3:
-        return fallback_rows or [], ""
-    current_rows = fallback_rows or []
-    global_rows = archive_catalog_search(query, args.limit, agent=args.agent)
-    if not global_rows:
-        if lock_is_held(data_dir() / "archive-catalog.lock"):
-            return current_rows, "Archive catalog is updating; partial results are available"
-        return current_rows, "No matches across the archive catalog"
-    if not current_rows:
-        return global_rows, "Showing matches from all archive dates"
-
-    current_score = archive_rows_metadata_match_score(current_rows, query)
-    global_score = archive_rows_metadata_match_score(global_rows, query)
-    current_rank = float(current_rows[0].get("rank") or 0.0)
-    global_rank = float(global_rows[0].get("rank") or 0.0)
-    current_ids = {row.get("session_key") for row in current_rows}
-    global_best_is_current = global_rows[0].get("session_key") in current_ids
-    if (
-        not global_best_is_current
-        and (global_score > current_score or global_rank < current_rank)
-    ):
-        return global_rows, "Showing better matches from all archive dates"
-    return current_rows, ""
-
-
 def curses_picker(stdscr, args) -> int:
     init_curses_colors()
     curses.noecho()
@@ -4542,40 +4501,16 @@ def curses_picker(stdscr, args) -> int:
     query = " ".join(args.query)
     selected = 0
     row_cache = {}
-    rows = cached_picker_rows(args, query, row_cache)
+    rows = cached_picker_rows(
+        args,
+        archive_picker_lookup_query(args, query),
+        row_cache,
+    )
     mode = "insert"
     action_query = ""
     action_selected = 0
     pending = ""
     message = getattr(args, "initial_message", "")
-
-    def rows_with_archive_fallback(search_query, current_rows):
-        if not getattr(args, "archive", False) or not search_query.strip():
-            return current_rows, ""
-
-        def show_progress(stage, target, max_offset):
-            label = archive_window_label(args.window_days, target)
-            render_picker(
-                stdscr,
-                search_query,
-                [],
-                0,
-                title=picker_title(args),
-                help_text=picker_help(args),
-                mode="insert",
-                message=f"{stage} {label} ({target}/{max_offset})...",
-            )
-
-        return archive_fallback_rows(
-            args,
-            search_query,
-            row_cache,
-            progress=show_progress,
-            fallback_rows=current_rows,
-        )
-
-    rows, fallback_message = rows_with_archive_fallback(query, rows)
-    message = fallback_message or message
 
     while True:
         if selected >= len(rows):
@@ -4589,7 +4524,7 @@ def curses_picker(stdscr, args) -> int:
             query,
             rows,
             selected,
-            title=picker_title(args),
+            title=picker_title(args, query),
             help_text=picker_help(args),
             mode=mode,
             action_query=action_query,
@@ -4678,17 +4613,22 @@ def curses_picker(stdscr, args) -> int:
                     continue
                 args.window_offset = target
                 row_cache.clear()
-                rows = cached_picker_rows(args, query, row_cache)
-                rows, fallback_message = rows_with_archive_fallback(query, rows)
+                rows = cached_picker_rows(
+                    args,
+                    archive_picker_lookup_query(args, query),
+                    row_cache,
+                )
                 selected = 0
-                message = fallback_message or f"Showing {archive_window_label(args.window_days, target)}"
+                message = f"Showing {archive_window_label(args.window_days, target)}"
             elif key in (curses.KEY_BACKSPACE, curses.KEY_DC):
                 if mode == "insert":
                     query = query[:-1]
                     selected = 0
-                    rows = cached_picker_rows(args, query, row_cache)
-                    rows, fallback_message = rows_with_archive_fallback(query, rows)
-                    message = fallback_message or message
+                    rows = cached_picker_rows(
+                        args,
+                        archive_picker_lookup_query(args, query),
+                        row_cache,
+                    )
             elif key == curses.KEY_UP:
                 selected = max(0, selected - 1)
             elif key == curses.KEY_DOWN:
@@ -4750,20 +4690,60 @@ def curses_picker(stdscr, args) -> int:
 
         if mode == "insert":
             query, changed, exit_insert = apply_insert_key(query, key)
-            for queued_key in pending_keys(stdscr):
-                query, queued_changed, queued_exit_insert = apply_insert_key(query, queued_key)
-                changed = changed or queued_changed
-                if queued_exit_insert:
-                    exit_insert = True
-                    break
+            if changed:
+                render_picker(
+                    stdscr,
+                    query,
+                    rows,
+                    selected,
+                    title=picker_title(args, query),
+                    help_text=picker_help(args),
+                    mode=mode,
+                )
+            idle_ms = (
+                ARCHIVE_PICKER_DEBOUNCE_MS
+                if getattr(args, "archive", False)
+                else 0
+            )
+            interrupted = False
+            queued_keys = pending_keys(stdscr, idle_ms)
+            try:
+                for queued_key in queued_keys:
+                    if queued_key == "\x03":
+                        interrupted = True
+                        break
+                    query, queued_changed, queued_exit_insert = apply_insert_key(
+                        query,
+                        queued_key,
+                    )
+                    changed = changed or queued_changed
+                    if queued_changed:
+                        render_picker(
+                            stdscr,
+                            query,
+                            rows,
+                            selected,
+                            title=picker_title(args, query),
+                            help_text=picker_help(args),
+                            mode=mode,
+                        )
+                    if queued_exit_insert:
+                        exit_insert = True
+                        break
+            finally:
+                queued_keys.close()
+            if interrupted:
+                return 130
             if exit_insert:
                 mode = "normal"
                 pending = ""
             if changed:
                 selected = 0
-                rows = cached_picker_rows(args, query, row_cache)
-                rows, fallback_message = rows_with_archive_fallback(query, rows)
-                message = fallback_message or message
+                rows = cached_picker_rows(
+                    args,
+                    archive_picker_lookup_query(args, query),
+                    row_cache,
+                )
 
 
 def watcher_pid_path() -> Path:

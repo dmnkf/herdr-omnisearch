@@ -46,7 +46,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To pin this release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.5
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.6
 ```
 
 Herdr plugin manifests do not modify user keybindings. The portable recommended
@@ -198,19 +198,24 @@ catalog. It excludes system instructions, reasoning records, and tool payloads.
 The first build streams one history file at a time and writes messages in small
 batches; later refreshes only reread files whose size or modification time
 changed. The plugin starts refreshes in the background, and interactive typing
-never opens raw history files or rebuilds an archive window.
+never opens raw history files or rebuilds an archive window. A stale refresh
+requested by the picker starts after that picker closes, keeping index writes
+out of the interactive search path.
 
 Normal text queries search conversation content only. Session titles, paths,
 working directories, and agent names remain navigation metadata and do not
 produce text matches; use `agent:`, `workspace:`, or `cwd:` for explicit
 metadata filtering. Results show the matching turn with adjacent chat context,
 while an empty query previews each session's three latest conversational turns.
+The native picker renders input immediately, coalesces consecutive keystrokes,
+and waits for three characters before querying content. Three-character terms
+are exact; longer terms support prefix matching.
 
 The picker initially browses the newest 14 calendar days by session creation
-date. Left/right changes that date filter instantly. When a content match is
-outside the active dates, the picker searches the complete catalog and returns
-the older result directly. Exact and typo-tolerant content searches use the same
-catalog and can be resumed without a second indexing pass.
+date. Left/right changes that date filter instantly. Every nonempty content
+query searches the complete catalog once, regardless of the current browse
+window. Exact and typo-tolerant content searches use the same catalog and can
+be resumed without a second indexing pass.
 
 Check state:
 
