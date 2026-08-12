@@ -1042,13 +1042,11 @@ def workspace_metadata_text(workspace) -> str:
     return "\n".join(field for field in fields if field.strip())
 
 
-def pane_recent_text(client: HerdrClient, agent_cli: HerdrCLI, pane, lines: int) -> str:
+def pane_recent_text(client: HerdrClient, pane, lines: int) -> str:
+    # `herdr agent read` on a recent source captures an alternate-screen agent's
+    # history by wheeling the pane up and restoring it, so indexing scrolls the
+    # viewport of whoever is reading that pane.
     pane_id = pane.get("pane_id") or ""
-    if pane_id and pane_agent(pane):
-        try:
-            return agent_cli.agent_read(pane_id, lines)
-        except HerdrCLIError:
-            pass
     try:
         return client.pane_read(pane_id, lines)
     except HerdrError as exc:
@@ -1136,7 +1134,7 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
         pane_id = pane["pane_id"]
         agent_session_id = pane_agent_session_id(pane)
         meta = metadata_text(pane, workspace_label)
-        recent = pane_recent_text(client, agent_cli, pane, lines)
+        recent = pane_recent_text(client, pane, lines)
         chunks = chunk_text(recent)
         if include_empty or not chunks:
             chunks = chunks or ["[empty pane]\n" + meta]
