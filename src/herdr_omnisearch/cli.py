@@ -4053,6 +4053,25 @@ def highlight_terms(row, query: str):
     return sorted(terms, key=len, reverse=True)
 
 
+def preview_lines_for_match(content: str, terms, limit: int):
+    lines = clean_text(content or "").splitlines()
+    limit = max(0, int(limit))
+    if not lines or limit == 0:
+        return []
+    needles = [term.lower() for term in terms if term]
+    matches = [
+        index
+        for index, line in enumerate(lines)
+        if any(needle in line.lower() for needle in needles)
+    ]
+    if not matches:
+        return lines[:limit]
+    match = matches[-1]
+    start = max(0, match - (limit // 2))
+    start = min(start, max(0, len(lines) - limit))
+    return lines[start : start + limit]
+
+
 def find_highlight_spans(text: str, terms):
     spans = []
     lowered = text.lower()
@@ -4202,8 +4221,8 @@ def render_picker(
             add_highlighted(stdscr, preview_y + offset, 0, line, width - 1, attr, highlight_attr, tokens(action_query))
         stdscr.refresh()
         return
-    preview_lines = clean_text(row.get("content") or "").splitlines()
-    for offset, line in enumerate(preview_lines[:preview_height]):
+    preview_lines = preview_lines_for_match(row.get("content") or "", terms, preview_height)
+    for offset, line in enumerate(preview_lines):
         add_highlighted(stdscr, preview_y + offset, 0, line, width - 1, 0, highlight_attr, terms)
     stdscr.refresh()
 

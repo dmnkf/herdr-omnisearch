@@ -192,6 +192,41 @@ class CliTests(unittest.TestCase):
         self.assertEqual(text, "indexed live output")
         self.assertEqual(client.reads, [("w1:p1", 50)])
 
+    def test_live_search_indexes_reply_only_terminal_text(self):
+        class ReplyHerdrCLI(FakeHerdrCLI):
+            def agent_read(self, pane_id, lines):
+                self.reads.append((pane_id, lines))
+                return "user: Decode the supplied value\nassistant: reply-only-marker"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "index.sqlite3"
+            with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(db)}, clear=False):
+                with patch.object(cli, "HerdrClient", FakeHerdrClient), patch.object(
+                    cli, "HerdrCLI", ReplyHerdrCLI
+                ):
+                    cli.index_session(500, False, False)
+                rows = cli.search_index("reply-only-marker", 10, all_sessions=True)
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("assistant: reply-only-marker", rows[0]["content"])
+        self.assertNotIn("reply-only-marker", rows[0]["content"].splitlines()[0])
+
+    def test_preview_centers_the_last_match_on_agent_output(self):
+        content = "\n".join([
+            "> Say exactly: ready",
+            "prompt detail one",
+            "prompt detail two",
+            "thinking",
+            "assistant: ready",
+            "usage",
+            "input",
+        ])
+
+        lines = cli.preview_lines_for_match(content, ["ready"], 4)
+
+        self.assertIn("assistant: ready", lines)
+        self.assertNotIn("> Say exactly: ready", lines)
+
     def test_agent_focus_uses_native_cli(self):
         row = {"pane_id": "w1:p1", "agent": "codex"}
         with patch.object(cli, "HerdrCLI", FakeHerdrCLI), patch.object(

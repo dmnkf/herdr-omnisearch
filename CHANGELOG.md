@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.8 - 2026-08-22
+
+- Center live previews on the latest matching terminal line so agent replies
+  remain visible when prompts contain the same search term.
+
 ## 0.6.7 - 2026-08-12
 
 - Keep stale catalog refreshes reliable when archive panes are force-closed.

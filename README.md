@@ -40,7 +40,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To install a specific release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.7
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.8
 ```
 
 GitHub plugin installation does not change `~/.config/herdr/config.toml`. Add
