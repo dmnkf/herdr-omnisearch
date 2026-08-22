@@ -6,6 +6,14 @@ just-works search feel are inspired by
 [Omnisearch for Obsidian](https://github.com/scambier/obsidian-omnisearch) —
 this is that idea applied to a terminal session instead of a vault.
 
+## Live demo
+
+![Herdr OmniSearch live terminal recording](assets/herdr-omnisearch-live.gif)
+
+Recorded from an isolated Herdr 0.8.2 session running the managed OmniSearch
+v0.6.7 plugin against a real Codex CLI session. The prompt is public-safe
+showcase data.
+
 OmniSearch is a Herdr 0.7.5 plugin. It uses the stable `herdr agent` CLI for
 live agent identity, terminal reads, focus, and validated starts. The Herdr
 socket remains responsible for workspace topology, ordinary shell panes,
