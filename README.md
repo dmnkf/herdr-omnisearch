@@ -1,56 +1,50 @@
-# herdr-omnisearch
+# Herdr OmniSearch
 
-Fast local search and navigation for Herdr workspaces, panes, agent chats, and
-archived agent session logs. The name and the instant, typo-tolerant,
-just-works search feel are inspired by
-[Omnisearch for Obsidian](https://github.com/scambier/obsidian-omnisearch) —
-this is that idea applied to a terminal session instead of a vault.
+Search Herdr workspaces, panes, and agent conversations from a
+keyboard-driven terminal interface.
 
-OmniSearch is a Herdr 0.7.5 plugin. It uses the stable `herdr agent` CLI for
-live agent identity, terminal reads, focus, and validated starts. The Herdr
-socket remains responsible for workspace topology, ordinary shell panes,
-plugin panes, and event subscriptions. SQLite FTS5 remains local and owns both
-live search data and archived-session search.
+- Search workspace metadata and recent terminal output from live panes.
+- Group matching panes by workspace and jump directly to a result.
+- Optionally search complete local user and assistant message history.
+- Resume archived sessions from the search result.
+- Keep all indexed data in local SQLite databases.
 
-It keeps private SQLite FTS5 indexes in Herdr's plugin state directory:
+Archive indexing is disabled by default. OmniSearch does not upload indexed
+content.
 
-```text
-~/.local/state/herdr/plugins/herdr.omnisearch/index.sqlite3
-~/.local/state/herdr/plugins/herdr.omnisearch/archive-catalog.sqlite3
-```
+![Herdr OmniSearch](assets/herdr-omnisearch-live.gif)
 
-Standalone CLI installs without the plugin use
-`~/.local/share/herdr-omnisearch/index.sqlite3` instead; a legacy index at that
-path is migrated into the plugin state directory on first plugin use.
+The name and interaction model are inspired by
+[Omnisearch for Obsidian](https://github.com/scambier/obsidian-omnisearch).
 
-The CLI is installed as:
+## Requirements
 
-```bash
-herdr-omnisearch
-```
+- Herdr 0.7.5 or newer
+- Python 3.9 or newer
+- Linux or macOS
 
 ## Install
 
-Install the public plugin directly from GitHub:
+Install the plugin from GitHub:
 
 ```bash
 herdr plugin install dmnkf/herdr-omnisearch
 ```
 
-Then verify the installation:
+Verify it:
 
 ```bash
 herdr plugin action invoke doctor --plugin herdr.omnisearch
 ```
 
-To pin this release:
+To install a specific release:
 
 ```bash
 herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.7
 ```
 
-Herdr plugin manifests do not modify user keybindings. The portable recommended
-bindings are:
+GitHub plugin installation does not change `~/.config/herdr/config.toml`. Add
+the recommended bindings:
 
 ```toml
 [[keys.command]]
@@ -66,79 +60,57 @@ command = "herdr.omnisearch.open-archive"
 description = "ArchiveSearch"
 ```
 
-Add that block to `~/.config/herdr/config.toml`, then run
-`herdr server reload-config`. On macOS, `cmd+o` and `cmd+shift+o` can be used
-instead when the terminal forwards those chords to Herdr.
-
-For a local checkout:
+Reload the Herdr configuration:
 
 ```bash
-./install.sh
+herdr server reload-config
 ```
 
-The default install is offline-friendly. It links this checkout as
-`herdr.omnisearch`, creates a `~/.local/bin/herdr-omnisearch` wrapper, atomically
-moves the existing local index into Herdr's plugin state directory on first use,
-starts the event watcher, and installs plugin-action bindings for the live and
-archive pickers. The local installer defaults to `prefix+o` and
-`prefix+shift+o`.
+On macOS, use `cmd+o` and `cmd+shift+o` instead if the terminal forwards those
+keys to Herdr.
 
-See [INSTALL.md](INSTALL.md) for the full second-VM flow and available flags.
+For local, editable, offline, and second-VM installations, see
+[INSTALL.md](INSTALL.md).
 
-For a traditional editable Python install from this checkout:
+## Usage
 
-```bash
-python3 -m pip install --user -e .
+With the recommended bindings:
+
+```text
+prefix+o        search live workspaces and panes
+prefix+shift+o  search archived conversations
 ```
 
-This checkout intentionally uses `setup.cfg` plus `setup.py` so editable installs work in offline environments with older system setuptools.
-
-Equivalent direct setuptools install:
-
-```bash
-python3 setup.py develop --user
-```
-
-With uv:
-
-```bash
-uv pip install --system -e .
-```
-
-After installing, check the target VM:
-
-```bash
-herdr-omnisearch doctor
-```
-
-## Commands
-
-Open managed plugin panes:
+You can also open either picker from the command line:
 
 ```bash
 herdr plugin pane open --plugin herdr.omnisearch --entrypoint live
 herdr plugin pane open --plugin herdr.omnisearch --entrypoint archive
 ```
 
-Index live Herdr panes:
+### Live search
+
+The watcher keeps the live index current. To rebuild it manually:
 
 ```bash
 herdr-omnisearch index --lines 350
 ```
 
-Search live workspaces and chats:
+Search without opening the picker:
 
 ```bash
 herdr-omnisearch search deploy notes
 ```
 
-Open the live picker:
+Run the standalone live picker:
 
 ```bash
 herdr-omnisearch pick --no-refresh --background-refresh --stale-seconds 10 --lines 350
 ```
 
-Native picker controls are Vim-style:
+### Picker controls
+
+Both pickers use the same Vim-style controls:
 
 ```text
 insert mode:
@@ -165,49 +137,47 @@ action mode:
   Esc           normal mode
 ```
 
-Current actions include exact focus, rename workspace, rename pane, and yanking cwd/session/pane/workspace ids.
+The action palette supports exact focus, workspace and pane renaming, and
+copying cwd, session, pane, or workspace IDs.
 
-Archive indexing is private and disabled by default. Enable it in the plugin's
-`config.ini` first:
+### Archive search
+
+Archive indexing is disabled by default. Enable it in the plugin's `config.ini`:
 
 ```ini
 [archive]
 enabled = true
 ```
 
-Build or incrementally refresh the archive catalog:
+Build the catalog:
 
 ```bash
 herdr-omnisearch archive-catalog-index
 ```
 
-Search archived sessions:
+Search without opening the picker:
 
 ```bash
 herdr-omnisearch archive-search migration notes
 ```
 
-Open the archive picker:
+Run the standalone archive picker:
 
 ```bash
 herdr-omnisearch archive-pick --no-refresh --background-refresh --stale-seconds 300
 ```
 
-ArchiveSearch stores bounded user and assistant messages in a disk-backed FTS5
-catalog. It excludes system instructions, reasoning records, and tool payloads.
-The first build streams one history file at a time and writes messages in small
-batches; later refreshes only reread files whose size or modification time
-changed. The plugin starts refreshes in the background, and interactive typing
-never opens raw history files or rebuilds an archive window.
+The archive catalog contains user and assistant messages. It excludes system
+instructions, reasoning records, and tool payloads. The first build streams
+one history file at a time; later refreshes only reread changed files.
 
 Normal text queries search conversation content only. Session titles, paths,
 working directories, and agent names remain navigation metadata and do not
 produce text matches; use `agent:`, `workspace:`, or `cwd:` for explicit
 metadata filtering. Results show the matching turn with adjacent chat context,
 while an empty query previews each session's three latest conversational turns.
-The native picker renders input immediately, coalesces consecutive keystrokes,
-and waits for three characters before querying content. Three-character terms
-are exact; longer terms support prefix matching.
+The picker waits for three characters before querying conversation content.
+Three-character terms are exact; longer terms support prefix matching.
 
 The picker initially browses the newest 14 calendar days by session creation
 date. Left/right changes that date filter instantly. Every nonempty content
@@ -215,13 +185,15 @@ query searches the complete catalog once, regardless of the current browse
 window. Exact and typo-tolerant content searches use the same catalog and can
 be resumed without a second indexing pass.
 
-Check state:
+### Maintenance
+
+Check the index and watcher state:
 
 ```bash
 herdr-omnisearch doctor
 ```
 
-Manage the event-driven live index watcher:
+Manage the live watcher:
 
 ```bash
 herdr-omnisearch watch-status
@@ -229,7 +201,18 @@ herdr-omnisearch watch-start
 herdr-omnisearch watch-stop
 ```
 
-## Environment
+## Storage and environment
+
+Plugin installations store their SQLite indexes here:
+
+```text
+~/.local/state/herdr/plugins/herdr.omnisearch/index.sqlite3
+~/.local/state/herdr/plugins/herdr.omnisearch/archive-catalog.sqlite3
+```
+
+Standalone CLI installations use
+`~/.local/share/herdr-omnisearch/index.sqlite3`. Existing standalone indexes
+are migrated into the plugin state directory on first plugin use.
 
 Plugin invocations use the Herdr-provided `HERDR_PLUGIN_CONFIG_DIR` and
 `HERDR_PLUGIN_STATE_DIR`. Direct CLI invocations remain backward compatible
@@ -241,20 +224,13 @@ therefore report the same database and watcher:
 ~/.config/herdr-omnisearch/config.ini
 ```
 
-Use `config.example.ini` as a starting point.
+Use `config.example.ini` as a starting point. Runtime overrides:
 
-`HERDR_OMNISEARCH_CONFIG` overrides the config file path.
-
-`HERDR_BIN` overrides the Herdr binary path. The portable default is `herdr` from `PATH`.
-
-`HERDR_OMNISEARCH_DB` overrides the SQLite database path.
-
-`HERDR_OMNISEARCH_CATALOG_DB` overrides the archive catalog database path.
-
-`HERDR_OMNISEARCH_COMMAND` overrides the command used for background indexing and fzf previews. Normally this is discovered automatically from the installed `herdr-omnisearch` command.
-
-`HERDR_SOCKET_PATH` selects the Herdr socket. Named sessions can instead use
-`HERDR_SESSION`.
+- `HERDR_OMNISEARCH_CONFIG`: config file path
+- `HERDR_BIN`: Herdr executable; defaults to `herdr` from `PATH`
+- `HERDR_OMNISEARCH_DB` and `HERDR_OMNISEARCH_CATALOG_DB`: index paths
+- `HERDR_OMNISEARCH_COMMAND`: command used for background indexing and previews
+- `HERDR_SOCKET_PATH`: Herdr socket; named sessions can use `HERDR_SESSION`
 
 ## Multiple sessions
 
