@@ -166,8 +166,8 @@ class CliTests(unittest.TestCase):
                 ):
                     count = cli.index_session(123, False, False)
             self.assertEqual(count, 2)
-            self.assertEqual(FakeHerdrClient.instances[0].reads, [])
-            self.assertEqual(FakeHerdrCLI.instances[0].reads, [("w1:p1", 123)])
+            self.assertEqual(FakeHerdrClient.instances[0].reads, [("w1:p1", 123)])
+            self.assertEqual(FakeHerdrCLI.instances[0].reads, [])
             conn = sqlite3.connect(db)
             try:
                 content = "\n".join(row[0] for row in conn.execute("SELECT content FROM docs"))
@@ -176,21 +176,34 @@ class CliTests(unittest.TestCase):
                 ).fetchone()
             finally:
                 conn.close()
-            self.assertIn("indexed agent output", content)
+            self.assertIn("indexed live output", content)
             self.assertEqual((agent, session_id, status), ("claude", "session-123", "working"))
 
-    def test_agent_read_failure_falls_back_to_raw_pane_read(self):
-        class FailingAgentCLI:
-            def agent_read(self, _pane_id, _lines):
-                raise cli.HerdrCLIError("agent disappeared")
-
+    def test_pane_text_comes_from_the_socket_read(self):
         client = FakeHerdrClient()
         pane = {"pane_id": "w1:p1", "agent": "codex"}
 
-        text = cli.pane_recent_text(client, FailingAgentCLI(), pane, 50)
+        text = cli.pane_recent_text(client, pane, 50)
 
         self.assertEqual(text, "indexed live output")
         self.assertEqual(client.reads, [("w1:p1", 50)])
+
+    def test_socket_pane_read_asks_for_a_format_that_does_not_scroll(self):
+        captured = {}
+
+        class RecordingClient(cli.HerdrClient):
+            def __init__(self):
+                pass
+
+            def request(self, method, params):
+                captured["method"] = method
+                captured["params"] = params
+                return {"read": {"text": "indexed live output"}}
+
+        self.assertEqual(RecordingClient().pane_read("w1:p1", 500), "indexed live output")
+        self.assertEqual(captured["method"], "pane.read")
+        self.assertEqual(captured["params"]["format"], "ansi")
+        self.assertEqual(captured["params"]["source"], "recent_unwrapped")
 
     def test_agent_focus_uses_native_cli(self):
         row = {"pane_id": "w1:p1", "agent": "codex"}

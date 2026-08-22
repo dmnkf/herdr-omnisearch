@@ -189,13 +189,19 @@ class HerdrClient:
         return self.request("session.snapshot")["snapshot"]
 
     def pane_read(self, pane_id, lines):
+        # A text read of a recent source makes herdr capture an alternate-screen
+        # pane's history by wheeling its viewport up and restoring it. The
+        # request cannot decline: `intent` is skipped during deserialization and
+        # defaults to interactive. Asking for `ansi` keeps the read on the plain
+        # path; `strip_ansi` does not apply to that format, so the escapes come
+        # back in the payload and `clean_text` removes them before indexing.
         result = self.request(
             "pane.read",
             {
                 "pane_id": pane_id,
                 "source": "recent_unwrapped",
                 "lines": lines,
-                "format": "text",
+                "format": "ansi",
                 "strip_ansi": True,
             },
         )
