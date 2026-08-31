@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.9 - 2026-08-31
+
+- Search persisted Herdr workspace names with normal archive queries and rank
+  workspace matches ahead of conversation-only matches.
+- Refresh workspace renames without reparsing unchanged session histories.
+
 ## 0.6.8 - 2026-08-22
 
 - Center live previews on the latest matching terminal line so agent replies

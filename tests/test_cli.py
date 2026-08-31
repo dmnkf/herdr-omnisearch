@@ -1283,6 +1283,96 @@ class CliTests(unittest.TestCase):
                     "conversation-session",
                 )
 
+    def test_archive_catalog_searches_and_refreshes_workspace_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_dir = root / "sessions"
+            archive_dir.mkdir()
+
+            def write_session(path, session_id, content):
+                records = [
+                    {
+                        "timestamp": "2026-08-04T12:00:00Z",
+                        "type": "session_meta",
+                        "payload": {
+                            "id": session_id,
+                            "cwd": f"/projects/{session_id}",
+                        },
+                    },
+                    {
+                        "timestamp": "2026-08-04T12:00:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": content}],
+                        },
+                    },
+                ]
+                path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records),
+                    encoding="utf-8",
+                )
+
+            write_session(
+                archive_dir / "workspace.jsonl",
+                "workspace-session",
+                "Completed an unrelated task.",
+            )
+            write_session(
+                archive_dir / "message.jsonl",
+                "message-session",
+                "A Booking Room phrase appeared in this conversation.",
+            )
+            config = cli.default_config()
+            config["archive_enabled"] = True
+            config["archive_agents"] = ["codex"]
+            config["archive"]["codex"]["sessions"] = [str(archive_dir / "*.jsonl")]
+            config["archive"]["codex"]["thread_names"] = str(root / "missing.jsonl")
+            environment = {
+                "HERDR_PLUGIN_STATE_DIR": str(root / "state"),
+                "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
+            }
+            spaces = {("codex", "workspace-session"): "Booking Room"}
+            with patch.dict(os.environ, environment, clear=False), patch.object(
+                cli, "CONFIG_CACHE", config
+            ), patch.object(
+                cli, "live_space_labels_by_session", return_value=spaces
+            ) as session_spaces, patch.object(
+                cli, "live_space_labels_by_cwd", return_value={}
+            ):
+                self.assertEqual(cli.archive_catalog_index()[:3], (2, 0, 0))
+                results = cli.archive_catalog_search("booking room", 10)
+                self.assertEqual(
+                    [row["session_id"] for row in results],
+                    ["workspace-session", "message-session"],
+                )
+                self.assertEqual(results[0]["workspace_label"], "Booking Room")
+                self.assertEqual(
+                    cli.archive_catalog_search("booking roon", 10)[0]["session_id"],
+                    "workspace-session",
+                )
+
+                session_spaces.return_value = {
+                    ("codex", "workspace-session"): "Reservations API"
+                }
+                self.assertEqual(cli.archive_catalog_index()[:3], (0, 2, 0))
+                self.assertEqual(
+                    cli.archive_catalog_search("reservations api", 10)[0]["session_id"],
+                    "workspace-session",
+                )
+                self.assertNotIn(
+                    "workspace-session",
+                    [row["session_id"] for row in cli.archive_catalog_search("booking room", 10)],
+                )
+
+                session_spaces.return_value = {}
+                self.assertEqual(cli.archive_catalog_index()[:3], (0, 2, 0))
+                self.assertEqual(
+                    cli.archive_catalog_search("reservations api", 10)[0]["session_id"],
+                    "workspace-session",
+                )
+
     def test_archive_catalog_fuzzy_search_ignores_stale_exact_vocabulary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

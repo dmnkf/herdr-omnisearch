@@ -40,7 +40,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To install a specific release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.8
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.9
 ```
 
 GitHub plugin installation does not change `~/.config/herdr/config.toml`. Add
@@ -171,12 +171,13 @@ The archive catalog contains user and assistant messages. It excludes system
 instructions, reasoning records, and tool payloads. The first build streams
 one history file at a time; later refreshes only reread changed files.
 
-Normal text queries search conversation content only. Session titles, paths,
-working directories, and agent names remain navigation metadata and do not
-produce text matches; use `agent:`, `workspace:`, or `cwd:` for explicit
-metadata filtering. Results show the matching turn with adjacent chat context,
-while an empty query previews each session's three latest conversational turns.
-The picker waits for three characters before querying conversation content.
+Normal text queries search conversation content and Herdr workspace names.
+Workspace-name matches appear before sessions that only match conversation
+content. Session titles, paths, working directories, and agent names remain
+navigation metadata and do not produce text matches; use `agent:`, `workspace:`,
+or `cwd:` for explicit metadata filtering. Results show the matching turn with
+adjacent chat context, while an empty query previews each session's three latest
+conversational turns. The picker waits for three characters before querying.
 Three-character terms are exact; longer terms support prefix matching.
 
 The picker initially browses the newest 14 calendar days by session creation

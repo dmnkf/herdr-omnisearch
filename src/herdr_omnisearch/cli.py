@@ -594,6 +594,7 @@ def init_schema(conn):
             agent TEXT NOT NULL,
             session_id TEXT NOT NULL,
             space_label TEXT,
+            space_label_source TEXT NOT NULL DEFAULT 'derived',
             title TEXT,
             cwd TEXT,
             path TEXT NOT NULL,
@@ -736,6 +737,12 @@ def archive_catalog_connect():
         """
     )
     ensure_column(conn, "catalog_sessions", "space_label", "TEXT")
+    ensure_column(
+        conn,
+        "catalog_sessions",
+        "space_label_source",
+        "TEXT NOT NULL DEFAULT 'derived'",
+    )
     ensure_column(conn, "catalog_sessions", "started_epoch", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "catalog_sessions", "updated_epoch", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "catalog_sessions", "message_generation", "INTEGER NOT NULL DEFAULT 0")
@@ -2107,12 +2114,26 @@ def _archive_catalog_index_unlocked(agents: str = ""):
         key=lambda item: archive_path_timestamp(item[0], item[1]),
         reverse=True,
     )
+    live_session_spaces = {}
+    live_spaces = {}
+    live_conn = None
+    try:
+        live_conn = connect()
+        live_session_spaces = live_space_labels_by_session(live_conn)
+        live_spaces = live_space_labels_by_cwd(live_conn)
+    except (sqlite3.Error, OSError):
+        pass
+    finally:
+        if live_conn is not None:
+            live_conn.close()
+
     conn = archive_catalog_connect()
     existing = {
-        row["path"]: row
+        row["path"]: dict(row)
         for row in conn.execute(
             """
-            SELECT session_key, agent, path, source_size, source_mtime_ns, started_epoch,
+            SELECT session_key, agent, session_id, space_label, space_label_source, cwd,
+                   path, source_size, source_mtime_ns, started_epoch,
                    message_index_version, is_present
             FROM catalog_sessions
             """
@@ -2146,6 +2167,26 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                         (old["session_key"],),
                     )
                     removed += 1
+
+            for old in existing.values():
+                mapped_label = (
+                    live_session_spaces.get((old["agent"], old["session_id"]))
+                    or live_spaces.get(clean_text(old.get("cwd") or ""))
+                )
+                if mapped_label and (
+                    mapped_label != old.get("space_label")
+                    or old.get("space_label_source") != "herdr"
+                ):
+                    conn.execute(
+                        """
+                        UPDATE catalog_sessions
+                        SET space_label = ?, space_label_source = 'herdr'
+                        WHERE session_key = ?
+                        """,
+                        (mapped_label, old["session_key"]),
+                    )
+                    old["space_label"] = mapped_label
+                    old["space_label_source"] = "herdr"
 
         for agent, path in sources:
             try:
@@ -2201,6 +2242,21 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                 message_batch,
             )
             metadata, indexed_messages = document
+            mapped_label = (
+                live_session_spaces.get((agent, metadata["session_id"]))
+                or live_spaces.get(clean_text(metadata.get("cwd") or ""))
+            )
+            old_label = old.get("space_label") if old else ""
+            metadata["space_label"] = (
+                mapped_label
+                or (old_label if old and old.get("space_label_source") == "herdr" else "")
+                or metadata["space_label"]
+            )
+            metadata["space_label_source"] = (
+                "herdr"
+                if mapped_label or (old and old.get("space_label_source") == "herdr")
+                else "derived"
+            )
             row = {
                 **metadata,
                 "session_key": session_key,
@@ -2214,12 +2270,12 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             conn.execute(
                 """
                 INSERT INTO catalog_sessions (
-                    session_key, agent, session_id, space_label, title, cwd, path,
+                    session_key, agent, session_id, space_label, space_label_source, title, cwd, path,
                     started_at, updated_at, started_epoch, updated_epoch, preview, is_wrapper,
                     source_size, source_mtime_ns, indexed_at, message_generation,
                     message_count, message_index_version, is_present
                 ) VALUES (
-                    :session_key, :agent, :session_id, :space_label, :title, :cwd, :path,
+                    :session_key, :agent, :session_id, :space_label, :space_label_source, :title, :cwd, :path,
                     :started_at, :updated_at, :started_epoch, :updated_epoch, :preview, :is_wrapper,
                     :source_size, :source_mtime_ns, :indexed_at, :message_generation,
                     :message_count, :message_index_version, :is_present
@@ -2228,6 +2284,7 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                     agent = excluded.agent,
                     session_id = excluded.session_id,
                     space_label = excluded.space_label,
+                    space_label_source = excluded.space_label_source,
                     title = excluded.title,
                     cwd = excluded.cwd,
                     path = excluded.path,
@@ -2521,6 +2578,79 @@ def archive_catalog_fts_query(query: str) -> str:
     return fts_query(query, prefix_min_chars=ARCHIVE_PREFIX_MIN_CHARS)
 
 
+def archive_catalog_workspace_matches(conn, clauses, params, query_terms, limit):
+    if not query_terms:
+        return []
+    rows = conn.execute(
+        f"""
+        SELECT s.session_key, s.space_label, s.updated_epoch, s.title
+        FROM catalog_sessions s
+        WHERE {' AND '.join(clauses)}
+          AND s.space_label_source = 'herdr'
+        """,
+        params,
+    ).fetchall()
+    query_label = " ".join(query_terms)
+    matches = []
+    for row in rows:
+        label = row["space_label"] or ""
+        label_terms = list(dict.fromkeys(tokens(label)))
+        matched_tokens = []
+        quality = 0.0
+        for query_term in query_terms:
+            candidates = [
+                (score_token_candidate(query_term, label_term), label_term)
+                for label_term in label_terms
+            ]
+            if not candidates:
+                break
+            score, matched_token = max(candidates)
+            if score < fuzzy_score_threshold(query_term):
+                break
+            quality += score
+            matched_tokens.append(matched_token)
+        else:
+            normalized_label = " ".join(label_terms)
+            if normalized_label == query_label:
+                quality += 2.0
+            elif query_label in normalized_label:
+                quality += 1.0
+            matches.append(
+                {
+                    "session_key": row["session_key"],
+                    "matched_tokens": list(dict.fromkeys(matched_tokens)),
+                    "_space_match_score": len(query_terms),
+                    "_workspace_match_quality": quality,
+                    "updated_epoch": row["updated_epoch"],
+                    "title": row["title"],
+                }
+            )
+    matches.sort(
+        key=lambda row: (
+            -float(row.get("_workspace_match_quality") or 0.0),
+            -int(row.get("updated_epoch") or 0),
+            row.get("title") or "",
+        )
+    )
+    matches = matches[:limit]
+    hydrated = []
+    for match in matches:
+        row = conn.execute(
+            "SELECT *, 0.0 AS rank FROM catalog_sessions WHERE session_key = ?",
+            (match["session_key"],),
+        ).fetchone()
+        result = archive_catalog_result_row(row)
+        result.update(
+            {
+                "matched_tokens": match["matched_tokens"],
+                "_space_match_score": match["_space_match_score"],
+                "_workspace_match_quality": match["_workspace_match_quality"],
+            }
+        )
+        hydrated.append(result)
+    return hydrated
+
+
 def archive_catalog_search(
     query: str,
     limit: int,
@@ -2556,6 +2686,13 @@ def archive_catalog_search(
     rows = []
     try:
         if query_terms:
+            workspace_rows = archive_catalog_workspace_matches(
+                conn,
+                clauses,
+                params,
+                query_terms,
+                limit,
+            )
             exact = archive_catalog_fts_query(text)
             candidate_limit = min(400, max(limit * 10, 100))
 
@@ -2604,10 +2741,18 @@ def archive_catalog_search(
                     -int(row.get("updated_epoch") or 0),
                 )
             )
-            rows = [
+            message_rows = [
                 archive_catalog_result_row(row, conn, query_terms)
                 for row in ranked[:limit]
             ]
+            rows = list(workspace_rows)
+            seen_sessions = {row["session_key"] for row in rows}
+            rows.extend(
+                row
+                for row in message_rows
+                if row["session_key"] not in seen_sessions
+            )
+            rows = rows[:limit]
         else:
             clauses.append("COALESCE(s.preview, '') <> ''")
             sql = f"""
