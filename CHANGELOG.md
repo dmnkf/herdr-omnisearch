@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.11 - 2026-09-20
+
+- Read live panes in `ansi` format over the socket and drop `herdr agent read`,
+  so indexing no longer scrolls idle agent panes to harvest alternate-screen
+  history. Full index sweeps drop from ~20s to well under a second; live text
+  from full-screen agents shrinks to the retained rows. (#2 by @mkpoli, fixes
+  #1 and #3)
+
 ## 0.6.10 - 2026-09-20
 
 - Hide Codex subagent sessions, such as guardian approval reviews, from

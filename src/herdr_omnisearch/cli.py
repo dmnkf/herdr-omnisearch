@@ -1050,9 +1050,7 @@ def workspace_metadata_text(workspace) -> str:
 
 
 def pane_recent_text(client: HerdrClient, pane, lines: int) -> str:
-    # `herdr agent read` on a recent source captures an alternate-screen agent's
-    # history by wheeling the pane up and restoring it, so indexing scrolls the
-    # viewport of whoever is reading that pane.
+    # Not `herdr agent read`: it harvests history by scrolling the user's pane.
     pane_id = pane.get("pane_id") or ""
     try:
         return client.pane_read(pane_id, lines)

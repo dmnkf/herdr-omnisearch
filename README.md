@@ -40,7 +40,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To install a specific release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.10
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.11
 ```
 
 GitHub plugin installation does not change `~/.config/herdr/config.toml`. Add
@@ -354,6 +354,11 @@ those directories manually.
 ## Notes
 
 The live index intentionally skips unmapped `unknown` panes by default. Use `--include-wrappers` when debugging Herdr pane metadata.
+
+The live index reads only the terminal rows Herdr already retains for a pane
+and never scrolls it. Full-screen agents such as Claude Code therefore
+contribute roughly one screen of text to live search; their complete
+conversation history is what archive search covers.
 
 Selecting an archived session is an explicit focus operation. When a new space
 is needed, OmniSearch creates one workspace and starts the resume command in its
