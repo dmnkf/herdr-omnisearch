@@ -261,7 +261,6 @@ fallback_cwd = ~
 
 [archive]
 enabled = false
-max_files = 500
 window_days = 14
 agents = codex, claude
 
@@ -294,12 +293,10 @@ remove_words =
 # /path/to/project = Friendly Space Name
 ```
 
-Set `enabled = true` to opt in. `window_days` bounds the active archive by
-date, while `max_files` optionally caps files inside that window. Indexing
-streams sessions, chunks, and token metadata into SQLite instead of retaining
-the complete window in process memory. Oversized individual JSONL records are
-discarded before decoding to keep malformed or unusually large tool output
-from causing an indexing memory spike.
+Set `enabled = true` to opt in. `window_days` sets how many calendar days the
+picker browses at a time. Cataloging streams one history file at a time into
+SQLite. Oversized individual JSONL records are discarded before decoding to
+keep malformed or unusually large tool output from causing a memory spike.
 
 `launcher = agent` validates resumed sessions through `herdr agent start` and
 is the portable default. Use `launcher = shell` when the configured resume

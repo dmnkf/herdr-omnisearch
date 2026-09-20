@@ -125,7 +125,7 @@ class CliTests(unittest.TestCase):
         wrapper.assert_called_once()
         fzf_picker.assert_not_called()
 
-    def test_managed_archive_picker_never_builds_a_legacy_window(self):
+    def test_managed_archive_picker_refreshes_the_catalog_in_the_background(self):
         args = Namespace(
             refresh=False,
             background_refresh=True,
@@ -134,7 +134,6 @@ class CliTests(unittest.TestCase):
             agents="",
             stale_seconds=300,
             window_days=None,
-            since_days=None,
             window_offset=0,
             verbose=False,
         )
@@ -145,17 +144,11 @@ class CliTests(unittest.TestCase):
         ) as background, patch.object(
             cli, "archive_catalog_state", return_value=(4, 1)
         ), patch.object(
-            cli, "ensure_archive_window"
-        ) as legacy_window, patch.object(
-            cli, "index_archive"
-        ) as legacy_index, patch.object(
             cli.curses, "wrapper", return_value=0
         ):
             self.assertEqual(cli.archive_pick(args), 0)
 
         background.assert_called_once_with("", 300)
-        legacy_window.assert_not_called()
-        legacy_index.assert_not_called()
 
     def test_index_uses_native_agent_identity_and_read(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -293,11 +286,10 @@ class CliTests(unittest.TestCase):
             with conn:
                 conn.execute(
                     """
-                    INSERT INTO archive_sessions (
-                        session_key, agent, session_id, space_label, title, cwd, path,
-                        started_at, updated_at, indexed_at
+                    INSERT INTO docs (
+                        stable_id, workspace_id, tab_id, pane_id, chunk_index, content, indexed_at
                     )
-                    VALUES ('codex:s1', 'codex', 's1', '', 'seed', '', '/tmp/s1', '', '', 0)
+                    VALUES ('seed:w1:p1:0', 'w1', 'w1:t1', 'w1:p1', 0, 'seed', 0)
                     """
                 )
             conn.close()
@@ -769,8 +761,6 @@ class CliTests(unittest.TestCase):
     def test_archive_indexing_is_private_and_bounded_by_default(self):
         config = cli.default_config()
         self.assertFalse(config["archive_enabled"])
-        self.assertEqual(config["archive_max_files"], 500)
-        self.assertEqual(config["archive_since_days"], 90)
         self.assertEqual(config["archive_window_days"], 14)
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.ini"
@@ -780,13 +770,13 @@ class CliTests(unittest.TestCase):
             ):
                 cli.CONFIG_CACHE = None
                 with self.assertRaisesRegex(RuntimeError, "archive indexing is disabled"):
-                    cli.index_archive()
+                    cli.archive_catalog_index()
 
     def test_archive_config_can_explicitly_enable_indexing(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.ini"
             config.write_text(
-                "[archive]\nenabled = true\nmax_files = 25\nsince_days = 14\nwindow_days = 21\n",
+                "[archive]\nenabled = true\nwindow_days = 21\n",
                 encoding="utf-8",
             )
             with patch.dict(
@@ -795,8 +785,6 @@ class CliTests(unittest.TestCase):
                 cli.CONFIG_CACHE = None
                 parsed = cli.app_config()
             self.assertTrue(parsed["archive_enabled"])
-            self.assertEqual(parsed["archive_max_files"], 25)
-            self.assertEqual(parsed["archive_since_days"], 14)
             self.assertEqual(parsed["archive_window_days"], 21)
 
     def test_archive_windows_are_calendar_aligned_and_chronological(self):
@@ -808,136 +796,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(datetime.fromtimestamp(newest_end), datetime(2026, 7, 31))
         self.assertEqual(older_end, newest_start)
         self.assertEqual(older_end - older_start, 14 * 86400)
-
-    def test_archive_index_replaces_the_loaded_window(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            db = root / "index.sqlite3"
-            config = root / "config.ini"
-            sessions = root / "sessions"
-            sessions.mkdir()
-            config.write_text(
-                "\n".join(
-                    [
-                        "[archive]",
-                        "enabled = true",
-                        "agents = codex",
-                        "max_files = 0",
-                        "window_days = 14",
-                        "",
-                        "[archive.codex]",
-                        f"sessions = {sessions}/*.jsonl",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            now_dt = datetime(2026, 7, 30, 12, 0, 0)
-
-            def write_session(name, session_id, modified, text):
-                path = sessions / f"{name}.jsonl"
-                timestamp = modified.isoformat()
-                records = [
-                    {
-                        "timestamp": timestamp,
-                        "type": "session_meta",
-                        "payload": {"id": session_id, "cwd": str(root), "timestamp": timestamp},
-                    },
-                    {
-                        "timestamp": timestamp,
-                        "type": "response_item",
-                        "payload": {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": text}],
-                        },
-                    },
-                ]
-                path.write_text(
-                    "\n".join(json.dumps(record) for record in records) + "\n",
-                    encoding="utf-8",
-                )
-                os.utime(path, (modified.timestamp(), modified.timestamp()))
-
-            write_session("new", "new-session", now_dt - timedelta(days=2), "new window")
-            write_session("old", "old-session", now_dt - timedelta(days=16), "old window")
-
-            with patch.dict(
-                os.environ,
-                {
-                    "HERDR_OMNISEARCH_CONFIG": str(config),
-                    "HERDR_OMNISEARCH_DB": str(db),
-                },
-                clear=False,
-            ):
-                cli.CONFIG_CACHE = None
-                sessions_count, chunks = cli.index_archive(window_days=14, window_offset=0, now=now_dt.timestamp())
-                self.assertEqual(sessions_count, 1)
-                self.assertGreater(chunks, 0)
-                conn = cli.connect()
-                self.assertEqual(
-                    conn.execute("SELECT session_id FROM archive_sessions").fetchone()[0],
-                    "new-session",
-                )
-                self.assertTrue(cli.archive_window_is_indexed(conn, 14, 0, now=now_dt.timestamp()))
-                conn.close()
-
-                sessions_count, chunks = cli.index_archive(window_days=14, window_offset=1, now=now_dt.timestamp())
-                self.assertEqual(sessions_count, 1)
-                self.assertGreater(chunks, 0)
-                conn = cli.connect()
-                self.assertEqual(
-                    conn.execute("SELECT session_id FROM archive_sessions").fetchone()[0],
-                    "old-session",
-                )
-                self.assertEqual(conn.execute("SELECT COUNT(*) FROM archive_sessions").fetchone()[0], 1)
-                self.assertTrue(cli.archive_window_is_indexed(conn, 14, 1, now=now_dt.timestamp()))
-                conn.close()
-
-    def test_archive_window_discovery_and_query_preflight_are_bounded(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            now_dt = datetime(2026, 7, 30, 12, 0, 0)
-            newest = root / "newest.jsonl"
-            older = root / "older.jsonl"
-            newest.write_text('{"text":"current work"}\n', encoding="utf-8")
-            older.write_text('{"text":"completed target extension"}\n', encoding="utf-8")
-            os.utime(newest, ((now_dt - timedelta(days=2)).timestamp(),) * 2)
-            os.utime(older, ((now_dt - timedelta(days=16)).timestamp(),) * 2)
-
-            def parse_archive(path, _thread_names):
-                return {
-                    "session_id": path.stem,
-                    "title": path.stem,
-                    "cwd": str(root),
-                    "path": str(path),
-                    "content": "completed target extension" if path == older else "current work",
-                }
-
-            with patch.object(cli, "archive_paths", return_value=[newest, older]), patch.object(
-                cli.time, "time", return_value=now_dt.timestamp()
-            ), patch.object(cli, "parse_codex_archive", side_effect=parse_archive):
-                self.assertEqual(
-                    cli.archive_max_window_offset({"codex"}, 14, now=now_dt.timestamp()),
-                    1,
-                )
-                self.assertFalse(
-                    cli.archive_window_might_match(
-                        "target",
-                        {"codex"},
-                        14,
-                        0,
-                        0,
-                    )
-                )
-                self.assertTrue(
-                    cli.archive_window_might_match(
-                        "target",
-                        {"codex"},
-                        14,
-                        1,
-                        0,
-                    )
-                )
 
     def test_archive_record_reader_discards_oversized_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -953,24 +811,6 @@ class CliTests(unittest.TestCase):
             records = list(cli.iter_archive_records(path, max_record_bytes=64))
 
         self.assertEqual([record["id"] for record in records], ["first", "last"])
-
-    def test_archive_window_uses_session_date_instead_of_file_mtime(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "rollout-2026-05-04T02-43-03-session.jsonl"
-            path.write_text('{}\n', encoding="utf-8")
-            now_dt = datetime(2026, 7, 30, 12, 0, 0)
-            os.utime(path, (now_dt.timestamp(), now_dt.timestamp()))
-
-            with patch.object(cli, "archive_paths", return_value=[path]):
-                selected = cli.archive_source_paths(
-                    {"codex"},
-                    14,
-                    6,
-                    0,
-                    now=now_dt.timestamp(),
-                )
-
-        self.assertEqual(selected, [("codex", path)])
 
     def test_archive_metadata_derives_missing_title_from_first_message(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1003,8 +843,6 @@ class CliTests(unittest.TestCase):
             agent=None,
             archive=True,
             limit=40,
-            max_files=0,
-            since_days=None,
             status=None,
             window_days=14,
             window_offset=0,
@@ -1744,24 +1582,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(active_agents, {"claude"})
         self.assertEqual(retained_agents, {"codex", "claude"})
 
-    def test_archive_metadata_picker_result_resumes_without_database_lookup(self):
-        args = Namespace(archive=True)
-        row = {
-            "stable_id": "archive-meta:target",
-            "_archive_metadata": True,
-            "agent": "codex",
-            "session_id": "target-session",
-        }
-        with patch.object(cli, "focus_archive_row", return_value=0) as focus_row, patch.object(
-            cli, "focus_archive_result", return_value=2
-        ) as focus_result:
-            result = cli.picker_focus(args, row)
-
-        self.assertEqual(result, 0)
-        focus_row.assert_called_once_with(row)
-        focus_result.assert_not_called()
-
-    def test_archive_catalog_picker_result_resumes_without_legacy_lookup(self):
+    def test_archive_catalog_picker_result_resumes_the_catalog_row(self):
         args = Namespace(archive=True)
         row = {
             "stable_id": "archive-catalog:target",
@@ -1769,14 +1590,11 @@ class CliTests(unittest.TestCase):
             "agent": "codex",
             "session_id": "target-session",
         }
-        with patch.object(cli, "focus_archive_row", return_value=0) as focus_row, patch.object(
-            cli, "focus_archive_result", return_value=2
-        ) as focus_result:
+        with patch.object(cli, "focus_archive_row", return_value=0) as focus_row:
             result = cli.picker_focus(args, row)
 
         self.assertEqual(result, 0)
         focus_row.assert_called_once_with(row)
-        focus_result.assert_not_called()
 
     def test_purge_requires_confirmation_and_removes_index_files(self):
         with tempfile.TemporaryDirectory() as tmp:

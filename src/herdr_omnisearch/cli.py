@@ -48,10 +48,6 @@ STATUS_WEIGHT = {
     "unknown": 4,
 }
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]*")
-TOKEN_TABLES = {
-    "live": ("terms", "token_trigrams"),
-    "archive": ("archive_terms", "archive_token_trigrams"),
-}
 CONFIG_CACHE = None
 ARCHIVE_CATALOG_SCHEMA_READY = set()
 
@@ -96,8 +92,6 @@ def default_config():
         "herdr_bin": "herdr",
         "fallback_cwd": str(Path.home()),
         "archive_enabled": False,
-        "archive_max_files": 500,
-        "archive_since_days": 90,
         "archive_window_days": 14,
         "archive_agents": ["codex", "claude"],
         "archive": {
@@ -154,12 +148,6 @@ def app_config():
     if parser.has_section("archive"):
         cfg["archive_enabled"] = parser.getboolean(
             "archive", "enabled", fallback=cfg["archive_enabled"]
-        )
-        cfg["archive_max_files"] = max(
-            0, parser.getint("archive", "max_files", fallback=cfg["archive_max_files"])
-        )
-        cfg["archive_since_days"] = max(
-            0, parser.getint("archive", "since_days", fallback=cfg["archive_since_days"])
         )
         cfg["archive_window_days"] = max(
             1, parser.getint("archive", "window_days", fallback=cfg["archive_window_days"])
@@ -417,9 +405,8 @@ def database_has_index_data(path: Path) -> bool:
                 row[0]
                 for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
-            for table in ("docs", "archive_sessions"):
-                if table in tables and conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
-                    return True
+            if "docs" in tables and conn.execute("SELECT 1 FROM docs LIMIT 1").fetchone():
+                return True
         finally:
             conn.close()
     except sqlite3.Error:
@@ -588,76 +575,15 @@ def init_schema(conn):
 
         CREATE INDEX IF NOT EXISTS idx_token_docs_stable_id ON token_docs(stable_id);
         CREATE INDEX IF NOT EXISTS idx_token_trigrams_token ON token_trigrams(token);
-
-        CREATE TABLE IF NOT EXISTS archive_sessions (
-            session_key TEXT PRIMARY KEY,
-            agent TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            space_label TEXT,
-            space_label_source TEXT NOT NULL DEFAULT 'derived',
-            title TEXT,
-            cwd TEXT,
-            path TEXT NOT NULL,
-            started_at TEXT,
-            updated_at TEXT,
-            indexed_at INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS archive_docs (
-            stable_id TEXT PRIMARY KEY,
-            session_key TEXT NOT NULL,
-            agent TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            space_label TEXT,
-            title TEXT,
-            cwd TEXT,
-            path TEXT NOT NULL,
-            started_at TEXT,
-            updated_at TEXT,
-            chunk_index INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            indexed_at INTEGER NOT NULL
-        );
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS archive_docs_fts USING fts5(
-            stable_id UNINDEXED,
-            body,
-            tokenize = 'porter unicode61'
-        );
-
-        CREATE TABLE IF NOT EXISTS archive_terms (
-            token TEXT PRIMARY KEY
-        );
-
-        CREATE TABLE IF NOT EXISTS archive_token_docs (
-            token TEXT NOT NULL,
-            stable_id TEXT NOT NULL,
-            PRIMARY KEY (token, stable_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS archive_token_trigrams (
-            trigram TEXT NOT NULL,
-            token TEXT NOT NULL,
-            PRIMARY KEY (trigram, token)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_archive_docs_session_key ON archive_docs(session_key);
-        CREATE INDEX IF NOT EXISTS idx_archive_docs_agent ON archive_docs(agent);
-        CREATE INDEX IF NOT EXISTS idx_archive_token_docs_stable_id ON archive_token_docs(stable_id);
-        CREATE INDEX IF NOT EXISTS idx_archive_token_trigrams_token ON archive_token_trigrams(token);
         """
     )
     ensure_column(conn, "docs", "agent_session_id", "TEXT")
     ensure_column(conn, "docs", "herdr_session", "TEXT")
     ensure_column(conn, "docs", "socket_path", "TEXT")
-    ensure_column(conn, "archive_sessions", "space_label", "TEXT")
-    ensure_column(conn, "archive_docs", "space_label", "TEXT")
     conn.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_docs_agent_session_id ON docs(agent_session_id);
         CREATE INDEX IF NOT EXISTS idx_docs_herdr_session ON docs(herdr_session);
-        CREATE INDEX IF NOT EXISTS idx_archive_sessions_space_label ON archive_sessions(space_label);
-        CREATE INDEX IF NOT EXISTS idx_archive_docs_space_label ON archive_docs(space_label);
         """
     )
 
@@ -862,17 +788,10 @@ def score_token_candidate(term: str, token: str) -> float:
     return max(0.0, 1.0 - (distance / (max(len(term), len(token)) + 1)))
 
 
-def token_tables(scope: str):
-    try:
-        return TOKEN_TABLES[scope]
-    except KeyError as exc:
-        raise ValueError(f"unknown token scope: {scope}") from exc
-
-
-def candidate_tokens_for_term(conn, term: str, *, limit: int = 180, scope: str = "live"):
+def candidate_tokens_for_term(conn, term: str, *, limit: int = 180):
     term = term.lower()
     candidates = set()
-    terms_table, trigrams_table = token_tables(scope)
+    terms_table, trigrams_table = "terms", "token_trigrams"
 
     upper = prefix_upper_bound(term)
     if upper:
@@ -917,11 +836,11 @@ def candidate_tokens_for_term(conn, term: str, *, limit: int = 180, scope: str =
     return scored[:limit]
 
 
-def has_prefix_token(conn, term: str, *, scope: str = "live") -> bool:
+def has_prefix_token(conn, term: str) -> bool:
     upper = prefix_upper_bound(term)
     if not upper:
         return False
-    terms_table, _trigrams_table = token_tables(scope)
+    terms_table = "terms"
     return (
         conn.execute(
             f"""
@@ -1476,12 +1395,6 @@ def extract_message_text(content) -> str:
     return "\n".join(piece for piece in pieces if piece)
 
 
-def append_archive_part(parts, role: str, text: str):
-    if is_archive_noise(text):
-        return
-    parts.append(f"{role}: {clip_text(text)}")
-
-
 def title_from_text(text: str, fallback: str) -> str:
     text = " ".join(clean_text(text).split())
     if not text:
@@ -1521,25 +1434,6 @@ def archive_bounds_label(start: int, end: int) -> str:
     return f"{first} to {last}"
 
 
-def archive_window_is_indexed(conn, window_days: int, window_offset: int = 0, *, now=None) -> bool:
-    start, end = archive_window_bounds(window_days, window_offset, now=now)
-    expected = {
-        "archive_window_days": str(max(1, int(window_days))),
-        "archive_window_offset": str(max(0, int(window_offset))),
-        "archive_window_start": str(start),
-        "archive_window_end": str(end),
-    }
-    placeholders = ",".join("?" for _ in expected)
-    values = {
-        row["key"]: row["value"]
-        for row in conn.execute(
-            f"SELECT key, value FROM meta WHERE key IN ({placeholders})",
-            tuple(expected),
-        )
-    }
-    return values == expected
-
-
 def load_codex_thread_names():
     path = Path(app_config()["archive"].get("codex", {}).get("thread_names", "")).expanduser()
     names = {}
@@ -1576,92 +1470,6 @@ def iter_archive_records(path: Path, max_record_bytes: int = ARCHIVE_MAX_RECORD_
                 yield item
 
 
-def parse_codex_archive(path: Path, thread_names):
-    session_id = ""
-    cwd = ""
-    started_at = ""
-    updated_at = ""
-    title = ""
-    parts = []
-
-    for item in iter_archive_records(path):
-        timestamp = item.get("timestamp") or ""
-        if timestamp:
-            updated_at = timestamp
-            started_at = started_at or timestamp
-        item_type = item.get("type")
-        payload = item.get("payload") or {}
-        if item_type == "session_meta":
-            session_id = payload.get("id") or session_id
-            cwd = payload.get("cwd") or cwd
-            started_at = payload.get("timestamp") or started_at
-            updated_at = payload.get("timestamp") or updated_at
-            continue
-        if item_type == "turn_context":
-            cwd = payload.get("cwd") or cwd
-            continue
-        if item_type == "event_msg":
-            continue
-        if item_type == "response_item" and payload.get("type") == "message":
-            role = payload.get("role") or "agent"
-            append_archive_part(parts, role, extract_message_text(payload.get("content")))
-
-    if not session_id:
-        match = re.search(r"([0-9a-f]{8}-[0-9a-f-]{27,})", path.name)
-        session_id = match.group(1) if match else hashlib.sha1(str(path).encode()).hexdigest()
-    first_text = parts[0].split(":", 1)[1] if parts else ""
-    title = thread_names.get(session_id) or title_from_text(first_text, session_id[:8])
-    return {
-        "agent": "codex",
-        "session_id": session_id,
-        "title": title,
-        "cwd": cwd,
-        "path": str(path),
-        "started_at": started_at,
-        "updated_at": updated_at or started_at,
-        "content": "\n".join(parts),
-    }
-
-
-def parse_claude_archive(path: Path):
-    session_id = ""
-    cwd = ""
-    started_at = ""
-    updated_at = ""
-    slug = ""
-    parts = []
-
-    for item in iter_archive_records(path):
-        timestamp = item.get("timestamp") or ""
-        if timestamp:
-            updated_at = timestamp
-            started_at = started_at or timestamp
-        session_id = item.get("sessionId") or session_id
-        cwd = item.get("cwd") or cwd
-        slug = item.get("slug") or slug
-        item_type = item.get("type")
-        if item_type not in ("user", "assistant"):
-            continue
-        message = item.get("message") or {}
-        role = message.get("role") or item_type
-        append_archive_part(parts, role, extract_message_text(message.get("content")))
-
-    if not session_id:
-        session_id = path.stem
-    first_text = parts[0].split(":", 1)[1] if parts else ""
-    title = slug.replace("-", " ") if slug else title_from_text(first_text, session_id[:8])
-    return {
-        "agent": "claude",
-        "session_id": session_id,
-        "title": title,
-        "cwd": cwd,
-        "path": str(path),
-        "started_at": started_at,
-        "updated_at": updated_at or started_at,
-        "content": "\n".join(parts),
-    }
-
-
 def archive_paths(agent: str):
     globs = app_config()["archive"].get(agent, {}).get("sessions", [])
     paths = []
@@ -1691,44 +1499,6 @@ def archive_path_timestamp(agent: str, path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return 0.0
-
-
-def archive_source_paths(selected, window_days: int, window_offset: int, max_files, *, now=None):
-    start, end = archive_window_bounds(window_days, window_offset, now=now)
-    paths = []
-    for agent in selected:
-        for path in archive_paths(agent):
-            timestamp = archive_path_timestamp(agent, path)
-            if start <= timestamp < end:
-                paths.append((timestamp, agent, path))
-    paths.sort(key=lambda item: item[0], reverse=True)
-    if max_files:
-        paths = paths[:max_files]
-    return [(agent, path) for _modified, agent, path in paths]
-
-
-def archive_max_window_offset(selected, window_days: int, *, now=None) -> int:
-    oldest = None
-    for agent in selected:
-        for path in archive_paths(agent):
-            timestamp = archive_path_timestamp(agent, path)
-            if not timestamp:
-                continue
-            oldest = timestamp if oldest is None else min(oldest, timestamp)
-    if oldest is None:
-        return 0
-    offset = 0
-    while True:
-        start, _end = archive_window_bounds(window_days, offset, now=now)
-        if oldest >= start:
-            return offset
-        offset += 1
-
-
-def archive_query_terms(query: str):
-    text, filters = parse_filters(query)
-    values = " ".join(str(value) for value in filters.values())
-    return list(dict.fromkeys(tokens(f"{text} {values}")))
 
 
 def codex_session_is_subagent(payload) -> bool:
@@ -1796,131 +1566,6 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
         "updated_at": started_at,
         "is_subagent": is_subagent,
     }
-
-
-def archive_metadata_match_score(metadata, terms) -> int:
-    searchable = "\n".join(str(value) for value in metadata.values()).lower()
-    if not all(term in searchable for term in terms):
-        return 0
-    score = 10
-    for field, weight in (
-        ("title", 100),
-        ("session_id", 90),
-        ("cwd", 30),
-        ("path", 20),
-        ("agent", 10),
-    ):
-        value = str(metadata.get(field) or "").lower()
-        if all(term in value for term in terms):
-            score = max(score, weight)
-    return score
-
-
-def archive_window_metadata_matches(
-    query: str,
-    selected,
-    window_days: int,
-    window_offset: int,
-    max_files,
-):
-    terms = archive_query_terms(query)
-    if not terms:
-        return []
-    thread_names = load_codex_thread_names() if "codex" in selected else {}
-    matches = []
-    for agent, path in archive_source_paths(
-        selected,
-        window_days,
-        window_offset,
-        max_files,
-    ):
-        metadata = archive_file_metadata(agent, path, thread_names)
-        if not metadata:
-            continue
-        score = archive_metadata_match_score(metadata, terms)
-        if score:
-            matches.append((score, metadata))
-    return sorted(
-        matches,
-        key=lambda item: (
-            -item[0],
-            -iso_to_epoch(item[1].get("started_at") or ""),
-            item[1].get("title") or "",
-        ),
-    )
-
-
-def archive_window_metadata_match_score(
-    query: str,
-    selected,
-    window_days: int,
-    window_offset: int,
-    max_files,
-) -> int:
-    matches = archive_window_metadata_matches(
-        query,
-        selected,
-        window_days,
-        window_offset,
-        max_files,
-    )
-    return matches[0][0] if matches else 0
-
-
-def archive_window_has_metadata_match(
-    query: str,
-    selected,
-    window_days: int,
-    window_offset: int,
-    max_files,
-) -> bool:
-    return archive_window_metadata_match_score(
-        query,
-        selected,
-        window_days,
-        window_offset,
-        max_files,
-    ) > 0
-
-
-def archive_window_might_match(
-    query: str,
-    selected,
-    window_days: int,
-    window_offset: int,
-    max_files,
-) -> bool:
-    terms = archive_query_terms(query)
-    if not terms:
-        return False
-    thread_names = load_codex_thread_names() if "codex" in selected else {}
-    for agent, path in archive_source_paths(
-        selected,
-        window_days,
-        window_offset,
-        max_files,
-    ):
-        try:
-            if agent == "codex":
-                session = parse_codex_archive(path, thread_names)
-            elif agent == "claude":
-                session = parse_claude_archive(path)
-            else:
-                continue
-        except OSError:
-            continue
-        searchable = "\n".join(
-            [
-                session.get("session_id") or "",
-                session.get("title") or "",
-                session.get("cwd") or "",
-                session.get("path") or "",
-                session.get("content") or "",
-            ]
-        ).lower()
-        if all(term in searchable for term in terms):
-            return True
-    return False
 
 
 def selected_archive_sources(agents: str):
@@ -2785,303 +2430,6 @@ def require_archive_enabled() -> None:
         )
 
 
-def index_archive(
-    agents: str = "",
-    max_files=None,
-    since_days=None,
-    *,
-    window_days=None,
-    window_offset=0,
-    now=None,
-) -> tuple[int, int]:
-    inherited_lock = os.environ.get("HERDR_OMNISEARCH_ARCHIVE_LOCK_FD")
-    lock_fd = None
-    if not inherited_lock:
-        lock_fd = exclusive_lock(db_path().parent / "archive-index.lock")
-    try:
-        return _index_archive_unlocked(
-            agents,
-            max_files,
-            since_days,
-            window_days=window_days,
-            window_offset=window_offset,
-            now=now,
-        )
-    finally:
-        if lock_fd is not None:
-            os.close(lock_fd)
-
-
-def _index_archive_unlocked(
-    agents: str = "",
-    max_files=None,
-    since_days=None,
-    *,
-    window_days=None,
-    window_offset=0,
-    now=None,
-) -> tuple[int, int]:
-    require_archive_enabled()
-    cfg = app_config()
-    if max_files is None:
-        max_files = cfg["archive_max_files"]
-    if window_days is None:
-        # Keep the old CLI flag as an explicit compatibility alias while the
-        # configured default moves to chronological windows.
-        window_days = since_days if since_days else cfg["archive_window_days"]
-    window_days = max(1, int(window_days))
-    window_offset = max(0, int(window_offset))
-    selected = selected_archive_sources(agents)
-    thread_names = load_codex_thread_names() if "codex" in selected else {}
-    source_paths = archive_source_paths(
-        selected,
-        window_days,
-        window_offset,
-        max_files,
-        now=now,
-    )
-    indexed_at = int(time.time() if now is None else now)
-    window_start, window_end = archive_window_bounds(window_days, window_offset, now=now)
-    conn = connect()
-    session_count = 0
-    chunk_count = 0
-    try:
-        live_session_spaces = live_space_labels_by_session(conn)
-        live_spaces = live_space_labels_by_cwd(conn)
-        with conn:
-            conn.execute("DELETE FROM archive_sessions")
-            conn.execute("DELETE FROM archive_docs")
-            conn.execute("DELETE FROM archive_docs_fts")
-            conn.execute("DELETE FROM archive_terms")
-            conn.execute("DELETE FROM archive_token_docs")
-            conn.execute("DELETE FROM archive_token_trigrams")
-
-            for agent, path in source_paths:
-                try:
-                    if agent == "codex":
-                        session = parse_codex_archive(path, thread_names)
-                    elif agent == "claude":
-                        session = parse_claude_archive(path)
-                    else:
-                        continue
-                except OSError:
-                    continue
-                if not session.get("content"):
-                    continue
-
-                session_key = f"{session['agent']}:{session['session_id']}"
-                cwd = session.get("cwd") or ""
-                live_session_key = (session["agent"], session["session_id"])
-                space_label = (
-                    live_session_spaces.get(live_session_key)
-                    or live_spaces.get(clean_text(cwd))
-                    or derive_space_label_from_cwd(cwd)
-                )
-                session_row = {
-                    "session_key": session_key,
-                    "agent": session["agent"],
-                    "session_id": session["session_id"],
-                    "space_label": space_label,
-                    "title": session.get("title") or session["session_id"],
-                    "cwd": cwd,
-                    "path": session.get("path") or "",
-                    "started_at": session.get("started_at") or "",
-                    "updated_at": session.get("updated_at") or "",
-                    "indexed_at": indexed_at,
-                }
-                inserted = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO archive_sessions (
-                        session_key, agent, session_id, space_label, title, cwd, path,
-                        started_at, updated_at, indexed_at
-                    )
-                    VALUES (
-                        :session_key, :agent, :session_id, :space_label, :title, :cwd, :path,
-                        :started_at, :updated_at, :indexed_at
-                    )
-                    """,
-                    session_row,
-                ).rowcount
-                if not inserted:
-                    continue
-                session_count += 1
-
-                meta = "\n".join(
-                    [
-                        f"archive {session['agent']}",
-                        f"space {space_label}",
-                        f"workspace {space_label}",
-                        f"session_id {session['session_id']}",
-                        f"title {session.get('title') or ''}",
-                        f"cwd {cwd}",
-                        f"path {session.get('path') or ''}",
-                        f"started_at {session.get('started_at') or ''}",
-                        f"updated_at {session.get('updated_at') or ''}",
-                    ]
-                )
-                chunks = iter_text_chunks(session["content"], max_lines=80, overlap=10)
-                wrote_chunk = False
-                for idx, chunk in enumerate(chunks):
-                    wrote_chunk = True
-                    body = f"{meta}\n\n{chunk}"
-                    stable_id = "archive:" + hashlib.sha1(
-                        f"{session_key}\0{idx}\0{body}".encode("utf-8", "replace")
-                    ).hexdigest()
-                    row = {
-                        **session_row,
-                        "stable_id": stable_id,
-                        "chunk_index": idx,
-                        "content": chunk,
-                        "body": body,
-                    }
-                    conn.execute(
-                        """
-                        INSERT INTO archive_docs (
-                            stable_id, session_key, agent, session_id, space_label, title, cwd, path,
-                            started_at, updated_at, chunk_index, content, indexed_at
-                        )
-                        VALUES (
-                            :stable_id, :session_key, :agent, :session_id, :space_label, :title, :cwd, :path,
-                            :started_at, :updated_at, :chunk_index, :content, :indexed_at
-                        )
-                        """,
-                        row,
-                    )
-                    conn.execute(
-                        "INSERT INTO archive_docs_fts (stable_id, body) VALUES (:stable_id, :body)",
-                        row,
-                    )
-                    unique_terms = sorted(set(tokens(body)))
-                    conn.executemany(
-                        "INSERT OR IGNORE INTO archive_terms (token) VALUES (?)",
-                        ((token,) for token in unique_terms),
-                    )
-                    conn.executemany(
-                        "INSERT OR IGNORE INTO archive_token_docs (token, stable_id) VALUES (?, ?)",
-                        ((token, stable_id) for token in unique_terms),
-                    )
-                    conn.executemany(
-                        "INSERT OR IGNORE INTO archive_token_trigrams (trigram, token) VALUES (?, ?)",
-                        (
-                            (trigram, token)
-                            for token in unique_terms
-                            for trigram in token_trigrams(token)
-                        ),
-                    )
-                    chunk_count += 1
-
-                if not wrote_chunk:
-                    # Content is normally non-empty here, but preserve the old
-                    # fallback for unusual control-character-only histories.
-                    chunk = session["content"][:1200]
-                    if chunk:
-                        body = f"{meta}\n\n{chunk}"
-                        stable_id = "archive:" + hashlib.sha1(
-                            f"{session_key}\0fallback\0{body}".encode("utf-8", "replace")
-                        ).hexdigest()
-                        row = {
-                            **session_row,
-                            "stable_id": stable_id,
-                            "chunk_index": 0,
-                            "content": chunk,
-                            "body": body,
-                        }
-                        conn.execute(
-                            """
-                            INSERT INTO archive_docs (
-                                stable_id, session_key, agent, session_id, space_label, title, cwd, path,
-                                started_at, updated_at, chunk_index, content, indexed_at
-                            )
-                            VALUES (
-                                :stable_id, :session_key, :agent, :session_id, :space_label, :title, :cwd, :path,
-                                :started_at, :updated_at, :chunk_index, :content, :indexed_at
-                            )
-                            """,
-                            row,
-                        )
-                        conn.execute(
-                            "INSERT INTO archive_docs_fts (stable_id, body) VALUES (:stable_id, :body)",
-                            row,
-                        )
-                        chunk_count += 1
-
-            metadata = {
-                "last_archive_indexed_at": str(indexed_at),
-                "archive_window_days": str(window_days),
-                "archive_window_offset": str(window_offset),
-                "archive_window_start": str(window_start),
-                "archive_window_end": str(window_end),
-            }
-            conn.executemany(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                metadata.items(),
-            )
-    finally:
-        conn.close()
-    return session_count, chunk_count
-
-
-def archive_window_state(window_days: int, window_offset: int):
-    conn = connect()
-    try:
-        indexed = archive_window_is_indexed(conn, window_days, window_offset)
-        doc_count = conn.execute("SELECT COUNT(*) FROM archive_docs").fetchone()[0]
-        last = conn.execute(
-            "SELECT value FROM meta WHERE key = 'last_archive_indexed_at'"
-        ).fetchone()
-    finally:
-        conn.close()
-    return indexed, doc_count, int(last[0]) if last else 0
-
-
-def maybe_background_archive_index(
-    agents: str,
-    max_files,
-    since_days,
-    stale_seconds: int,
-    *,
-    window_days=None,
-    window_offset=0,
-):
-    require_archive_enabled()
-    if window_days is None:
-        window_days = since_days if since_days else app_config()["archive_window_days"]
-    indexed, doc_count, last_indexed = archive_window_state(window_days, window_offset)
-    if indexed and doc_count and int(time.time()) - last_indexed < stale_seconds:
-        return
-
-    lock_fd = try_exclusive_lock(db_path().parent / "archive-index.lock")
-    if lock_fd is None:
-        return
-
-    cmd = [*cli_command(), "archive-index", "--agents", agents]
-    if max_files is not None:
-        cmd.extend(["--max-files", str(max_files)])
-    cmd.extend(["--window-days", str(window_days), "--window-offset", str(window_offset)])
-    spawn_locked_background(
-        cmd,
-        lock_fd,
-        lock_env="HERDR_OMNISEARCH_ARCHIVE_LOCK_FD",
-    )
-
-
-def ensure_archive_window(args, *, force=False):
-    window_days = getattr(args, "window_days", None) or app_config()["archive_window_days"]
-    window_offset = max(0, int(getattr(args, "window_offset", 0)))
-    args.window_days = window_days
-    args.window_offset = window_offset
-    indexed, _doc_count, _last_indexed = archive_window_state(window_days, window_offset)
-    if force or not indexed:
-        return index_archive(
-            args.agents,
-            args.max_files,
-            getattr(args, "since_days", None),
-            window_days=window_days,
-            window_offset=window_offset,
-        )
-    return None
-
-
 def parse_filters(query: str):
     filters = {}
 
@@ -3552,181 +2900,6 @@ def archive_space_label(row, conn=None, cache=None) -> str:
     return derive_space_label_from_cwd(row.get("cwd") or "")
 
 
-def archive_search_index(query: str, limit: int, *, agent=None, snippets=True):
-    query, filters = parse_filters(query)
-    if agent:
-        filters["agent"] = agent
-    query_terms = tokens(query)
-
-    clauses = []
-    params = {}
-    if filters.get("agent"):
-        clauses.append("COALESCE(d.agent, '') = :agent")
-        params["agent"] = filters["agent"]
-    if filters.get("cwd"):
-        clauses.append("COALESCE(d.cwd, '') LIKE :cwd")
-        params["cwd"] = f"%{filters['cwd']}%"
-    if filters.get("workspace"):
-        clauses.append(
-            "(COALESCE(d.space_label, '') LIKE :workspace OR COALESCE(d.title, '') LIKE :workspace OR COALESCE(d.cwd, '') LIKE :workspace)"
-        )
-        params["workspace"] = f"%{filters['workspace']}%"
-
-    conn = connect()
-    space_cache = {}
-    fts = fts_query(query)
-    rows = []
-    if fts:
-        try:
-            where = ["archive_docs_fts MATCH :fts"]
-            where.extend(clauses)
-            fts_params = dict(params)
-            fts_params["fts"] = fts
-            fts_params["limit"] = limit
-            sql = f"""
-                SELECT d.*, bm25(archive_docs_fts) AS rank,
-                       substr(d.content, 1, 320) AS snippet
-                FROM archive_docs_fts
-                JOIN archive_docs d ON d.stable_id = archive_docs_fts.stable_id
-                WHERE {' AND '.join(where)}
-                ORDER BY rank ASC
-                LIMIT :limit
-            """
-            rows = [mark_archive_row(dict(row), conn=conn, space_cache=space_cache) for row in conn.execute(sql, fts_params).fetchall()]
-            if snippets:
-                for row in rows:
-                    row["snippet"] = fuzzy_snippet(row.get("content") or "", query_terms)
-        except sqlite3.OperationalError:
-            rows = []
-
-    needs_typo_fuzzy = any(
-        len(term) >= 4 and not has_prefix_token(conn, term, scope="archive")
-        for term in query_terms
-    )
-    needs_more_results = bool(query_terms) and len(rows) < min(limit, 40)
-    use_fuzzy = (not fts) or (not rows) or needs_typo_fuzzy or needs_more_results
-    if use_fuzzy:
-        fuzzy_rows = archive_fuzzy_search(conn, query, clauses, params, min(limit, 80), snippets=snippets)
-        seen = {row["stable_id"]: row for row in rows}
-        for row in fuzzy_rows:
-            existing = seen.get(row["stable_id"])
-            if existing:
-                if row.get("matched_tokens"):
-                    existing["matched_tokens"] = row["matched_tokens"]
-                continue
-            rows.append(row)
-            seen[row["stable_id"]] = row
-    mark_space_matches(rows, query)
-    rows.sort(key=lambda row: (space_sort_weight(row), float(row.get("rank") or 0), -iso_to_epoch(row.get("updated_at") or "")))
-    conn.close()
-    return rows[:limit]
-
-
-def archive_fuzzy_search(conn, query: str, clauses, params, limit: int, *, snippets=True):
-    query_terms = list(dict.fromkeys(tokens(query)))
-    space_cache = {}
-    if not query_terms:
-        where = clauses or ["1 = 1"]
-        sql = f"""
-            SELECT d.*, 0.0 AS rank, substr(d.content, 1, 320) AS snippet
-            FROM archive_docs d
-            WHERE {' AND '.join(where)}
-            ORDER BY d.updated_at DESC, d.title ASC, d.chunk_index ASC
-            LIMIT :limit
-        """
-        fuzzy_params = dict(params)
-        fuzzy_params["limit"] = limit
-        return [mark_archive_row(dict(row), conn=conn, space_cache=space_cache) for row in conn.execute(sql, fuzzy_params).fetchall()]
-
-    per_term_matches = []
-    for term in query_terms:
-        token_scores = dict(candidate_tokens_for_term(conn, term, scope="archive"))
-        if not token_scores:
-            return []
-        placeholders = ",".join("?" for _ in token_scores)
-        rows = conn.execute(
-            f"""
-            SELECT token, stable_id
-            FROM archive_token_docs
-            WHERE token IN ({placeholders})
-            """,
-            tuple(token_scores),
-        ).fetchall()
-        stable_matches = {}
-        for token, stable_id in rows:
-            score = token_scores[token]
-            current = stable_matches.get(stable_id)
-            if current is None or score > current[0]:
-                stable_matches[stable_id] = (score, token)
-        if not stable_matches:
-            return []
-        per_term_matches.append(stable_matches)
-
-    common_ids = set(per_term_matches[0])
-    for matches in per_term_matches[1:]:
-        common_ids.intersection_update(matches)
-        if not common_ids:
-            return []
-
-    scored_ids = []
-    for stable_id in common_ids:
-        scores = [matches[stable_id][0] for matches in per_term_matches]
-        matched_tokens = [matches[stable_id][1] for matches in per_term_matches]
-        min_score = min(scores)
-        avg_score = sum(scores) / len(scores)
-        scored_ids.append((stable_id, -((avg_score + min_score) / 2), matched_tokens))
-    scored_ids.sort(key=lambda item: item[1])
-
-    selected = scored_ids[: min(len(scored_ids), max(limit * 4, 300), 1200)]
-    if not selected:
-        return []
-
-    id_params = {f"id{idx}": stable_id for idx, (stable_id, _rank, _tokens) in enumerate(selected)}
-    id_lookup = {stable_id: (rank, matched_tokens) for stable_id, rank, matched_tokens in selected}
-    id_clause = ", ".join(f":{key}" for key in id_params)
-    where = [f"d.stable_id IN ({id_clause})"]
-    where.extend(clauses)
-    sql = f"""
-        SELECT d.*
-        FROM archive_docs d
-        WHERE {' AND '.join(where)}
-    """
-    fetched = [dict(row) for row in conn.execute(sql, {**params, **id_params}).fetchall()]
-    for row in fetched:
-        rank, matched_tokens = id_lookup[row["stable_id"]]
-        row["rank"] = rank
-        row["matched_tokens"] = matched_tokens
-        row["snippet"] = fuzzy_snippet(row.get("content") or "", matched_tokens) if snippets else ""
-        mark_archive_row(row, conn=conn, space_cache=space_cache)
-    return sorted(fetched, key=lambda row: (row["rank"], -iso_to_epoch(row.get("updated_at") or "")))[:limit]
-
-
-def grouped_archive_search_index(query: str, limit: int, *, agent=None, snippets=True):
-    rows = archive_search_index(query, max(limit * 2, 50), agent=agent, snippets=snippets)
-    grouped = {}
-    for row in rows:
-        session_key = row["session_key"]
-        current = grouped.get(session_key)
-        if current is None:
-            row["match_count"] = 1
-            grouped[session_key] = row
-            continue
-        current["match_count"] += 1
-        if float(row.get("rank") or 0) < float(current.get("rank") or 0):
-            row["match_count"] = current["match_count"]
-            grouped[session_key] = row
-
-    def sort_key(row):
-        return (
-            space_sort_weight(row),
-            float(row.get("rank") or 0),
-            -iso_to_epoch(row.get("updated_at") or ""),
-            row.get("title") or "",
-        )
-
-    return sorted(grouped.values(), key=sort_key)[:limit]
-
-
 def shorten(value: str, width: int) -> str:
     value = " ".join(clean_text(value or "").split())
     if len(value) <= width:
@@ -3970,24 +3143,6 @@ def find_existing_archive_pane(row):
     return None
 
 
-def focus_archive_result(stable_id: str) -> int:
-    conn = connect()
-    row = conn.execute(
-        """
-        SELECT s.*
-        FROM archive_docs d
-        JOIN archive_sessions s ON s.session_key = d.session_key
-        WHERE d.stable_id = ?
-        """,
-        (stable_id,),
-    ).fetchone()
-    conn.close()
-    if not row:
-        print(f"unknown archive result id: {stable_id}", file=sys.stderr)
-        return 2
-    return focus_archive_row(dict(row))
-
-
 def focus_archive_catalog_result(stable_id: str) -> int:
     row = archive_catalog_result(stable_id)
     if not row:
@@ -4037,11 +3192,7 @@ def pick(args) -> int:
 
 def archive_pick(args) -> int:
     args.archive = True
-    args.window_days = (
-        args.window_days
-        or args.since_days
-        or app_config()["archive_window_days"]
-    )
+    args.window_days = args.window_days or app_config()["archive_window_days"]
     args.window_offset = max(0, args.window_offset)
     require_archive_enabled()
     if args.refresh:
@@ -4405,11 +3556,9 @@ def picker_focus(args, result):
     row = result if isinstance(result, dict) else None
     stable_id = row.get("stable_id") if row is not None else result
     if getattr(args, "archive", False):
-        if row is not None and (row.get("_archive_metadata") or row.get("_archive_catalog")):
+        if row is not None and row.get("_archive_catalog"):
             return focus_archive_row(row)
-        if stable_id.startswith("archive-catalog:"):
-            return focus_archive_catalog_result(stable_id)
-        return focus_archive_result(stable_id)
+        return focus_archive_catalog_result(stable_id)
     return focus_result(stable_id)
 
 
@@ -4924,18 +4073,6 @@ def read_watcher_pid() -> int:
         return 0
 
 
-def process_is_running(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 def watcher_subscriptions(snapshot):
     subscriptions = [
         {"type": event}
@@ -5135,21 +4272,6 @@ def cmd_search(args) -> int:
     return 0
 
 
-def cmd_archive_index(args) -> int:
-    try:
-        sessions, chunks = index_archive(
-            args.agents,
-            args.max_files,
-            args.since_days,
-            window_days=args.window_days,
-            window_offset=args.window_offset,
-        )
-        print(f"indexed {sessions} archived sessions / {chunks} chunks into {db_path()}")
-        return 0
-    finally:
-        release_index_lock()
-
-
 def cmd_archive_catalog_index(args) -> int:
     changed, unchanged, removed, message_count = archive_catalog_index(args.agents)
     print(
@@ -5199,9 +4321,7 @@ def cmd_focus(args) -> int:
 
 
 def cmd_archive_resume(args) -> int:
-    if args.stable_id.startswith("archive-catalog:"):
-        return focus_archive_catalog_result(args.stable_id)
-    return focus_archive_result(args.stable_id)
+    return focus_archive_catalog_result(args.stable_id)
 
 
 def cmd_preview(args) -> int:
@@ -5210,8 +4330,6 @@ def cmd_preview(args) -> int:
     else:
         conn = connect()
         row = conn.execute("SELECT * FROM docs WHERE stable_id = ?", (args.stable_id,)).fetchone()
-        if not row:
-            row = conn.execute("SELECT * FROM archive_docs WHERE stable_id = ?", (args.stable_id,)).fetchone()
         conn.close()
     if not row:
         return 1
@@ -5266,36 +4384,11 @@ def cmd_doctor(_args) -> int:
     print(f"fzf: {shutil.which('fzf') or 'missing'}")
     conn = connect()
     docs = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
-    archive_sessions = conn.execute("SELECT COUNT(*) FROM archive_sessions").fetchone()[0]
-    archive_docs = conn.execute("SELECT COUNT(*) FROM archive_docs").fetchone()[0]
     last = conn.execute("SELECT value FROM meta WHERE key = 'last_indexed_at'").fetchone()
-    archive_last = conn.execute("SELECT value FROM meta WHERE key = 'last_archive_indexed_at'").fetchone()
-    archive_window_days = conn.execute(
-        "SELECT value FROM meta WHERE key = 'archive_window_days'"
-    ).fetchone()
-    archive_window_offset = conn.execute(
-        "SELECT value FROM meta WHERE key = 'archive_window_offset'"
-    ).fetchone()
-    archive_window_start = conn.execute(
-        "SELECT value FROM meta WHERE key = 'archive_window_start'"
-    ).fetchone()
-    archive_window_end = conn.execute(
-        "SELECT value FROM meta WHERE key = 'archive_window_end'"
-    ).fetchone()
     conn.close()
     print(f"indexed_chunks: {docs}")
     if last:
         print(f"last_indexed_at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(last[0])))}")
-    print(f"archive_sessions: {archive_sessions}")
-    print(f"archive_chunks: {archive_docs}")
-    if archive_window_days and archive_window_offset and archive_window_start and archive_window_end:
-        print(
-            "archive_window: "
-            + archive_bounds_label(int(archive_window_start[0]), int(archive_window_end[0]))
-            + f" ({archive_window_days[0]} days, offset {archive_window_offset[0]})"
-        )
-    if archive_last:
-        print(f"last_archive_indexed_at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(archive_last[0])))}")
     catalog_count, catalog_last = archive_catalog_state()
     print(f"archive_catalog_sessions: {catalog_count}")
     print(f"archive_catalog: {archive_catalog_state_name(catalog_count, catalog_last)}")
@@ -5365,14 +4458,6 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_search)
 
-    p = sub.add_parser("archive-index", help="index persisted agent session logs")
-    p.add_argument("--agents", default="", help="comma-separated agents to index")
-    p.add_argument("--max-files", type=int)
-    p.add_argument("--since-days", type=int, help="deprecated alias for --window-days")
-    p.add_argument("--window-days", type=int, help="days held in the active archive window")
-    p.add_argument("--window-offset", type=int, default=0, help="14-day windows before the newest window")
-    p.set_defaults(func=cmd_archive_index)
-
     p = sub.add_parser(
         "archive-catalog-index",
         help="incrementally catalog all persisted agent sessions",
@@ -5419,8 +4504,6 @@ def main(argv=None) -> int:
     p.add_argument("--limit", type=int, default=40)
     p.add_argument("--agent")
     p.add_argument("--agents", default="")
-    p.add_argument("--max-files", type=int)
-    p.add_argument("--since-days", type=int)
     p.add_argument("--window-days", type=int, help="days held in the active archive window")
     p.add_argument("--window-offset", type=int, default=0, help="windows before the newest window")
     p.add_argument("--refresh", dest="refresh", action="store_true", default=False)
