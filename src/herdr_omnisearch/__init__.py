@@ -1,3 +1,3 @@
 """Fast local search and navigation for Herdr workspaces."""
 
-__version__ = "0.6.11"
+__version__ = "0.7.0"

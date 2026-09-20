@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0 - 2026-09-20
+
+- Remove the legacy `archive-index` window path: its command, SQLite tables,
+  `max_files`/`since_days` config keys and doctor fields. Archive search is
+  the catalog only. Existing databases keep their old tables untouched.
+- Split the single `cli.py` into layered modules (settings, storage,
+  textmatch, live_index, archive_catalog, render, navigate, picker, watcher,
+  cli). No command or flag changed apart from the removed legacy ones.
+- Tests default `HERDR_PLUGIN_STATE_DIR` to a temporary directory so a plain
+  test run can no longer purge the real plugin state.
+
 ## 0.6.11 - 2026-09-20
 
 - Read live panes in `ansi` format over the socket and drop `herdr agent read`,

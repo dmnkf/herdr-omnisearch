@@ -40,7 +40,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To install a specific release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.6.11
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.7.0
 ```
 
 GitHub plugin installation does not change `~/.config/herdr/config.toml`. Add
@@ -303,6 +303,29 @@ is the portable default. Use `launcher = shell` when the configured resume
 command must pass through an interactive shell function or wrapper. Shell mode
 preserves the complete `resume` command; all later identity, reads, and focus
 operations still use Herdr's agent automation interface after detection.
+
+## Code layout
+
+The package is split by responsibility, lower layers never import higher ones:
+
+- `settings.py` config parsing, plugin directories, Herdr session identity
+- `storage.py` SQLite paths, schema, repair and migration, lock files
+- `textmatch.py` tokenizing, fuzzy matching, FTS query building
+- `live_index.py` live pane indexing and search
+- `archive_catalog.py` archived session catalog, indexing and search
+- `render.py` result row formatting
+- `navigate.py` focus and resume operations against Herdr
+- `picker.py` the native curses picker and the fzf fallback
+- `watcher.py` the background live index watcher
+- `cli.py` argparse commands only
+
+Run the tests with:
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests
+```
+
+The suite redirects plugin state to a temporary directory on its own.
 
 ## Privacy and local data
 
