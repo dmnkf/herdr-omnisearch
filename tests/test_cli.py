@@ -14,8 +14,20 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
+# Tests purge and rewrite index state; never let that hit the real plugin state dir.
+os.environ.setdefault("HERDR_PLUGIN_STATE_DIR", tempfile.mkdtemp(prefix="herdr-omnisearch-tests-"))
 
-from herdr_omnisearch import cli  # noqa: E402
+from herdr_omnisearch import (  # noqa: E402
+    archive_catalog,
+    cli,
+    live_index,
+    navigate,
+    picker,
+    settings,
+    storage,
+    textmatch,
+    watcher,
+)
 
 
 class FakeHerdrClient:
@@ -93,7 +105,7 @@ class CliTests(unittest.TestCase):
     def setUp(self):
         FakeHerdrClient.instances.clear()
         FakeHerdrCLI.instances.clear()
-        cli.CONFIG_CACHE = None
+        settings.CONFIG_CACHE = None
 
     def test_manifest_declares_plugin_actions_panes_and_events(self):
         manifest = (ROOT / "herdr-plugin.toml").read_text(encoding="utf-8")
@@ -115,12 +127,12 @@ class CliTests(unittest.TestCase):
             native=True,
             fzf=False,
         )
-        with patch.object(cli.sys.stdin, "isatty", return_value=False), patch.object(
-            cli.sys.stdout, "isatty", return_value=False
-        ), patch.object(cli.curses, "wrapper", return_value=0) as wrapper, patch.object(
-            cli, "fzf_picker"
+        with patch.object(picker.sys.stdin, "isatty", return_value=False), patch.object(
+            picker.sys.stdout, "isatty", return_value=False
+        ), patch.object(picker.curses, "wrapper", return_value=0) as wrapper, patch.object(
+            picker, "fzf_picker"
         ) as fzf_picker:
-            self.assertEqual(cli.pick(args), 0)
+            self.assertEqual(picker.pick(args), 0)
 
         wrapper.assert_called_once()
         fzf_picker.assert_not_called()
@@ -137,16 +149,16 @@ class CliTests(unittest.TestCase):
             window_offset=0,
             verbose=False,
         )
-        config = cli.default_config()
+        config = settings.default_config()
         config["archive_enabled"] = True
-        with patch.object(cli, "CONFIG_CACHE", config), patch.object(
-            cli, "maybe_background_archive_catalog_index"
+        with patch.object(settings, "CONFIG_CACHE", config), patch.object(
+            picker, "maybe_background_archive_catalog_index"
         ) as background, patch.object(
-            cli, "archive_catalog_state", return_value=(4, 1)
+            picker, "archive_catalog_state", return_value=(4, 1)
         ), patch.object(
-            cli.curses, "wrapper", return_value=0
+            picker.curses, "wrapper", return_value=0
         ):
-            self.assertEqual(cli.archive_pick(args), 0)
+            self.assertEqual(picker.archive_pick(args), 0)
 
         background.assert_called_once_with("", 300)
 
@@ -154,10 +166,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "index.sqlite3"
             with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(db)}, clear=False):
-                with patch.object(cli, "HerdrClient", FakeHerdrClient), patch.object(
-                    cli, "HerdrCLI", FakeHerdrCLI
+                with patch.object(live_index, "HerdrClient", FakeHerdrClient), patch.object(
+                    live_index, "HerdrCLI", FakeHerdrCLI
                 ):
-                    count = cli.index_session(123, False, False)
+                    count = live_index.index_session(123, False, False)
             self.assertEqual(count, 2)
             self.assertEqual(FakeHerdrClient.instances[0].reads, [("w1:p1", 123)])
             self.assertEqual(FakeHerdrCLI.instances[0].reads, [])
@@ -176,7 +188,7 @@ class CliTests(unittest.TestCase):
         client = FakeHerdrClient()
         pane = {"pane_id": "w1:p1", "agent": "codex"}
 
-        text = cli.pane_recent_text(client, pane, 50)
+        text = live_index.pane_recent_text(client, pane, 50)
 
         self.assertEqual(text, "indexed live output")
         self.assertEqual(client.reads, [("w1:p1", 50)])
@@ -190,11 +202,11 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "index.sqlite3"
             with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(db)}, clear=False):
-                with patch.object(cli, "HerdrClient", ReplyHerdrClient), patch.object(
-                    cli, "HerdrCLI", FakeHerdrCLI
+                with patch.object(live_index, "HerdrClient", ReplyHerdrClient), patch.object(
+                    live_index, "HerdrCLI", FakeHerdrCLI
                 ):
-                    cli.index_session(500, False, False)
-                rows = cli.search_index("reply-only-marker", 10, all_sessions=True)
+                    live_index.index_session(500, False, False)
+                rows = live_index.search_index("reply-only-marker", 10, all_sessions=True)
 
         self.assertEqual(len(rows), 1)
         self.assertIn("assistant: reply-only-marker", rows[0]["content"])
@@ -211,7 +223,7 @@ class CliTests(unittest.TestCase):
             "input",
         ])
 
-        lines = cli.preview_lines_for_match(content, ["ready"], 4)
+        lines = picker.preview_lines_for_match(content, ["ready"], 4)
 
         self.assertIn("assistant: ready", lines)
         self.assertNotIn("> Say exactly: ready", lines)
@@ -234,19 +246,19 @@ class CliTests(unittest.TestCase):
 
     def test_agent_focus_uses_native_cli(self):
         row = {"pane_id": "w1:p1", "agent": "codex"}
-        with patch.object(cli, "HerdrCLI", FakeHerdrCLI), patch.object(
-            cli, "focused_pane_id", return_value="w1:p1"
+        with patch.object(navigate, "HerdrCLI", FakeHerdrCLI), patch.object(
+            navigate, "focused_pane_id", return_value="w1:p1"
         ):
-            self.assertTrue(cli.focus_exact_pane(row))
+            self.assertTrue(navigate.focus_exact_pane(row))
         self.assertEqual(FakeHerdrCLI.instances[0].focuses, ["w1:p1"])
 
     def test_native_archive_start_strips_executable_and_uses_valid_name(self):
         row = {"agent": "codex", "session_id": "019abc1234567890"}
-        config = cli.default_config()
-        with patch.object(cli, "app_config", return_value=config), patch.object(
-            cli, "HerdrCLI", FakeHerdrCLI
+        config = settings.default_config()
+        with patch.object(settings, "CONFIG_CACHE", config), patch.object(
+            navigate, "HerdrCLI", FakeHerdrCLI
         ):
-            cli.archive_agent_start(
+            navigate.archive_agent_start(
                 row,
                 "w1:p1",
                 ["codex", "resume", "-C", "/tmp/project", row["session_id"]],
@@ -264,25 +276,25 @@ class CliTests(unittest.TestCase):
             cwd = Path(tmp) / "space dir; rm -rf ~"
             cwd.mkdir()
             row = {"agent": "codex", "session_id": "019abc", "cwd": str(cwd)}
-            config = cli.default_config()
+            config = settings.default_config()
             config["archive"]["codex"]["resume"] = 'codex resume -C "{cwd}" {session_id}'
-            with patch.object(cli, "app_config", return_value=config):
-                resolved_cwd, command = cli.archive_resume_command(row)
+            with patch.object(settings, "CONFIG_CACHE", config):
+                resolved_cwd, command = navigate.archive_resume_command(row)
 
         self.assertEqual(resolved_cwd, str(cwd))
         self.assertEqual(command, ["codex", "resume", "-C", str(cwd), "019abc"])
 
     def test_native_archive_start_rejects_wrapper_command(self):
         row = {"agent": "codex", "session_id": "019abc1234567890"}
-        config = cli.default_config()
-        with patch.object(cli, "app_config", return_value=config):
+        config = settings.default_config()
+        with patch.object(settings, "CONFIG_CACHE", config):
             with self.assertRaisesRegex(RuntimeError, "launcher = shell"):
-                cli.archive_agent_start(row, "w1:p1", ["hapi", "codex", "resume"])
+                navigate.archive_agent_start(row, "w1:p1", ["hapi", "codex", "resume"])
 
     def _seed_database(self, path):
         path.parent.mkdir(parents=True, exist_ok=True)
         with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(path)}, clear=False):
-            conn = cli.connect()
+            conn = storage.connect()
             with conn:
                 conn.execute(
                     """
@@ -307,7 +319,7 @@ class CliTests(unittest.TestCase):
                 clear=False,
             ):
                 os.environ.pop("HERDR_OMNISEARCH_DB", None)
-                conn = cli.connect()
+                conn = storage.connect()
                 conn.close()
             self.assertTrue(db.is_file())
             self.assertFalse(db.is_symlink())
@@ -326,9 +338,9 @@ class CliTests(unittest.TestCase):
                 clear=False,
             ):
                 os.environ.pop("HERDR_OMNISEARCH_DB", None)
-                path = cli.db_path()
+                path = storage.db_path()
             self.assertTrue(path.is_file())
-            self.assertTrue(cli.database_has_index_data(path))
+            self.assertTrue(storage.database_has_index_data(path))
             self.assertFalse(backup.exists())
 
     def test_concurrent_first_start_migration_is_safe(self):
@@ -341,7 +353,7 @@ class CliTests(unittest.TestCase):
             legacy = share / "herdr-omnisearch" / "index.sqlite3"
             legacy.parent.mkdir(parents=True, exist_ok=True)
             with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(legacy)}, clear=False):
-                cli.connect().close()
+                storage.connect().close()
             child_env = {
                 key: value
                 for key, value in os.environ.items()
@@ -351,7 +363,7 @@ class CliTests(unittest.TestCase):
             child_env["XDG_DATA_HOME"] = str(share)
             code = (
                 "import sys; sys.path.insert(0, sys.argv[1]); "
-                "from herdr_omnisearch import cli; cli.connect().close()"
+                "from herdr_omnisearch import storage; storage.connect().close()"
             )
             workers = [
                 subprocess.Popen(
@@ -413,15 +425,15 @@ class CliTests(unittest.TestCase):
             self._start_socket_server(sock_a)
             self._start_socket_server(sock_b)
             with patch.dict(os.environ, {"HERDR_OMNISEARCH_DB": str(db)}, clear=False):
-                with patch.object(cli, "HerdrClient", FakeHerdrClient), patch.object(
-                    cli, "HerdrCLI", FakeHerdrCLI
+                with patch.object(live_index, "HerdrClient", FakeHerdrClient), patch.object(
+                    live_index, "HerdrCLI", FakeHerdrCLI
                 ):
                     with patch.dict(os.environ, {"HERDR_SOCKET_PATH": sock_a}, clear=False):
-                        count_a = cli.index_session(50, False, False)
+                        count_a = live_index.index_session(50, False, False)
                     with patch.dict(os.environ, {"HERDR_SOCKET_PATH": sock_b}, clear=False):
-                        cli.index_session(50, False, False)
+                        live_index.index_session(50, False, False)
                         # Re-indexing one session replaces its own rows only.
-                        cli.index_session(50, False, False)
+                        live_index.index_session(50, False, False)
 
                 conn = sqlite3.connect(db)
                 try:
@@ -443,8 +455,8 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(total, distinct_ids)
 
                 with patch.dict(os.environ, {"HERDR_SOCKET_PATH": sock_a}, clear=False):
-                    mine = cli.search_index("indexed", 20)
-                    everything = cli.search_index("indexed", 20, all_sessions=True)
+                    mine = live_index.search_index("indexed", 20)
+                    everything = live_index.search_index("indexed", 20, all_sessions=True)
                 self.assertTrue(mine)
                 self.assertTrue(all(row["socket_path"] == sock_a for row in mine))
                 self.assertEqual(len(everything), len(mine) * 2)
@@ -481,14 +493,14 @@ class CliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                cli.connect().close()
+                storage.connect().close()
                 self._seed_session_doc(db, "dead-11111111", str(Path(tmp) / "gone.sock"))
                 self._seed_session_doc(db, "live-22222222", str(live_sock))
                 (state / "watch-dead-11111111.log").write_text("old\n", encoding="utf-8")
-                with patch.object(cli, "HerdrClient", FakeHerdrClient), patch.object(
-                    cli, "HerdrCLI", FakeHerdrCLI
+                with patch.object(live_index, "HerdrClient", FakeHerdrClient), patch.object(
+                    live_index, "HerdrCLI", FakeHerdrCLI
                 ):
-                    cli.index_session(50, False, False)
+                    live_index.index_session(50, False, False)
                 conn = sqlite3.connect(db)
                 try:
                     sessions = {
@@ -499,7 +511,7 @@ class CliTests(unittest.TestCase):
                     conn.close()
                 self.assertNotIn("dead-11111111", sessions)
                 self.assertIn("live-22222222", sessions)
-                self.assertIn(cli.herdr_session_key(), sessions)
+                self.assertIn(settings.herdr_session_key(), sessions)
                 self.assertFalse((state / "watch-dead-11111111.log").exists())
 
     def test_watcher_and_index_locks_are_per_session(self):
@@ -510,18 +522,18 @@ class CliTests(unittest.TestCase):
             sock_b = str(Path(tmp) / "b" / "herdr.sock")
             with patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": str(state)}, clear=False):
                 with patch.dict(os.environ, {"HERDR_SOCKET_PATH": sock_a}, clear=False):
-                    pid_a = cli.watcher_pid_path()
+                    pid_a = storage.watcher_pid_path()
                 with patch.dict(os.environ, {"HERDR_SOCKET_PATH": sock_b}, clear=False):
-                    pid_b = cli.watcher_pid_path()
+                    pid_b = storage.watcher_pid_path()
             self.assertNotEqual(pid_a, pid_b)
 
     def test_exclusive_lock_is_single_owner_and_follows_child_lifetime(self):
         with tempfile.TemporaryDirectory() as tmp:
             lock = Path(tmp) / "index.lock"
-            fd = cli.try_exclusive_lock(lock)
+            fd = storage.try_exclusive_lock(lock)
             self.assertIsNotNone(fd)
-            self.assertTrue(cli.lock_is_held(lock))
-            self.assertIsNone(cli.try_exclusive_lock(lock))
+            self.assertTrue(storage.lock_is_held(lock))
+            self.assertIsNone(storage.try_exclusive_lock(lock))
 
             child = subprocess.Popen(
                 [sys.executable, "-c", "import time; time.sleep(30)"],
@@ -531,13 +543,13 @@ class CliTests(unittest.TestCase):
                 os.close(fd)
                 # The child inherited the descriptor, so the lock survives the
                 # parent closing its copy.
-                self.assertTrue(cli.lock_is_held(lock))
-                self.assertIsNone(cli.try_exclusive_lock(lock))
+                self.assertTrue(storage.lock_is_held(lock))
+                self.assertIsNone(storage.try_exclusive_lock(lock))
             finally:
                 child.terminate()
                 child.wait()
-            self.assertFalse(cli.lock_is_held(lock))
-            fd = cli.try_exclusive_lock(lock)
+            self.assertFalse(storage.lock_is_held(lock))
+            fd = storage.try_exclusive_lock(lock)
             self.assertIsNotNone(fd)
             os.close(fd)
 
@@ -549,15 +561,15 @@ class CliTests(unittest.TestCase):
                 os.environ, {"HERDR_PLUGIN_STATE_DIR": str(state)}, clear=False
             ):
                 # A stale pid file without a lock holder must read as stopped.
-                cli.watcher_pid_path().write_text("999999999\n", encoding="utf-8")
-                self.assertFalse(cli.watcher_is_running())
-                fd = cli.try_exclusive_lock(cli.watcher_pid_path())
+                storage.watcher_pid_path().write_text("999999999\n", encoding="utf-8")
+                self.assertFalse(watcher.watcher_is_running())
+                fd = storage.try_exclusive_lock(storage.watcher_pid_path())
                 try:
-                    self.assertTrue(cli.watcher_is_running())
-                    self.assertEqual(cli.read_watcher_pid(), os.getpid())
+                    self.assertTrue(watcher.watcher_is_running())
+                    self.assertEqual(storage.read_watcher_pid(), os.getpid())
                 finally:
                     os.close(fd)
-                self.assertFalse(cli.watcher_is_running())
+                self.assertFalse(watcher.watcher_is_running())
 
     def test_archive_launcher_can_be_configured_for_shell_wrappers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -569,8 +581,8 @@ class CliTests(unittest.TestCase):
             with patch.dict(
                 os.environ, {"HERDR_OMNISEARCH_CONFIG": str(config)}, clear=False
             ):
-                cli.CONFIG_CACHE = None
-                parsed = cli.app_config()["archive"]["codex"]
+                settings.CONFIG_CACHE = None
+                parsed = settings.app_config()["archive"]["codex"]
         self.assertEqual(parsed["launcher"], "shell")
         self.assertEqual(parsed["kind"], "codex")
         self.assertEqual(parsed["start_timeout_ms"], 45000)
@@ -578,19 +590,19 @@ class CliTests(unittest.TestCase):
     def test_shell_archive_launcher_sends_the_full_wrapper_command(self):
         client = Mock()
         row = {"agent": "codex", "session_id": "019abc"}
-        config = cli.default_config()
+        config = settings.default_config()
         config["archive"]["codex"]["launcher"] = "shell"
         command = ["hapi", "codex", "resume", "019abc"]
 
-        with patch.object(cli, "app_config", return_value=config):
-            cli.launch_archive_in_pane(client, row, "w1:p1", command)
+        with patch.object(settings, "CONFIG_CACHE", config):
+            navigate.launch_archive_in_pane(client, row, "w1:p1", command)
 
         client.send_input.assert_called_once_with(
             "w1:p1", "hapi codex resume 019abc"
         )
 
     def test_watcher_subscribes_to_output_and_status_per_pane(self):
-        subscriptions = cli.watcher_subscriptions({"panes": [{"pane_id": "w1:p1"}]})
+        subscriptions = watcher.watcher_subscriptions({"panes": [{"pane_id": "w1:p1"}]})
         self.assertIn(
             {"type": "pane.scroll_changed", "pane_id": "w1:p1"},
             subscriptions,
@@ -610,8 +622,8 @@ class CliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                self.assertEqual(cli.config_dir(), Path(config))
-                self.assertEqual(cli.data_dir(), Path(state))
+                self.assertEqual(settings.config_dir(), Path(config))
+                self.assertEqual(settings.data_dir(), Path(state))
 
     def test_installer_uses_prefix_defaults_and_accepts_command_key_overrides(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -667,7 +679,7 @@ class CliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                conn = cli.connect()
+                conn = storage.connect()
                 conn.close()
 
             self.assertTrue(db.is_file())
@@ -695,8 +707,8 @@ class CliTests(unittest.TestCase):
                     "HERDR_OMNISEARCH_DB": "",
                 },
                 clear=False,
-            ), patch.object(cli.sqlite3, "connect", side_effect=connect_after_repair):
-                conn = cli.connect()
+            ), patch.object(storage.sqlite3, "connect", side_effect=connect_after_repair):
+                conn = storage.connect()
                 conn.close()
 
             self.assertEqual(db.parent.stat().st_mode & 0o777, 0o700)
@@ -711,7 +723,7 @@ class CliTests(unittest.TestCase):
                     sqlite3.OperationalError,
                     "database path is not a regular file",
                 ):
-                    cli.connect()
+                    storage.connect()
 
     def test_direct_cli_reuses_installed_plugin_config_and_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -734,9 +746,9 @@ class CliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                self.assertEqual(cli.config_dir(), plugin_config)
-                self.assertEqual(cli.data_dir(), plugin_state)
-                self.assertEqual(cli.db_path(), plugin_state / "index.sqlite3")
+                self.assertEqual(settings.config_dir(), plugin_config)
+                self.assertEqual(settings.data_dir(), plugin_state)
+                self.assertEqual(storage.db_path(), plugin_state / "index.sqlite3")
 
     def test_plugin_background_commands_prefer_the_managed_plugin_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -745,21 +757,21 @@ class CliTests(unittest.TestCase):
             command.write_text("#!/bin/sh\n", encoding="utf-8")
             command.chmod(0o755)
             with patch.dict(os.environ, {"HERDR_PLUGIN_ROOT": tmp}, clear=False), patch.object(
-                cli.shutil, "which", return_value="/root/.local/bin/herdr-omnisearch"
+                settings.shutil, "which", return_value="/root/.local/bin/herdr-omnisearch"
             ):
-                self.assertEqual(cli.cli_command(), [str(command)])
+                self.assertEqual(settings.cli_command(), [str(command)])
 
     def test_background_command_has_a_package_safe_module_fallback(self):
         with patch.dict(os.environ, {"HERDR_PLUGIN_ROOT": ""}, clear=False), patch.object(
-            cli.shutil, "which", return_value=None
-        ), patch.object(cli.sys, "argv", ["/missing/herdr-omnisearch"]):
+            settings.shutil, "which", return_value=None
+        ), patch.object(settings.sys, "argv", ["/missing/herdr-omnisearch"]):
             self.assertEqual(
-                cli.cli_command(),
+                settings.cli_command(),
                 [sys.executable, "-m", "herdr_omnisearch"],
             )
 
     def test_archive_indexing_is_private_and_bounded_by_default(self):
-        config = cli.default_config()
+        config = settings.default_config()
         self.assertFalse(config["archive_enabled"])
         self.assertEqual(config["archive_window_days"], 14)
         with tempfile.TemporaryDirectory() as tmp:
@@ -768,9 +780,9 @@ class CliTests(unittest.TestCase):
             with patch.dict(
                 os.environ, {"HERDR_OMNISEARCH_CONFIG": str(config_path)}, clear=False
             ):
-                cli.CONFIG_CACHE = None
+                settings.CONFIG_CACHE = None
                 with self.assertRaisesRegex(RuntimeError, "archive indexing is disabled"):
-                    cli.archive_catalog_index()
+                    archive_catalog.archive_catalog_index()
 
     def test_archive_config_can_explicitly_enable_indexing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -782,15 +794,15 @@ class CliTests(unittest.TestCase):
             with patch.dict(
                 os.environ, {"HERDR_OMNISEARCH_CONFIG": str(config)}, clear=False
             ):
-                cli.CONFIG_CACHE = None
-                parsed = cli.app_config()
+                settings.CONFIG_CACHE = None
+                parsed = settings.app_config()
             self.assertTrue(parsed["archive_enabled"])
             self.assertEqual(parsed["archive_window_days"], 21)
 
     def test_archive_windows_are_calendar_aligned_and_chronological(self):
         now = datetime(2026, 7, 30, 12, 0, 0).timestamp()
-        newest_start, newest_end = cli.archive_window_bounds(14, 0, now=now)
-        older_start, older_end = cli.archive_window_bounds(14, 1, now=now)
+        newest_start, newest_end = archive_catalog.archive_window_bounds(14, 0, now=now)
+        older_start, older_end = archive_catalog.archive_window_bounds(14, 1, now=now)
 
         self.assertEqual(datetime.fromtimestamp(newest_start), datetime(2026, 7, 17))
         self.assertEqual(datetime.fromtimestamp(newest_end), datetime(2026, 7, 31))
@@ -808,7 +820,7 @@ class CliTests(unittest.TestCase):
                 + b'{"id":"last"}\n'
             )
 
-            records = list(cli.iter_archive_records(path, max_record_bytes=64))
+            records = list(archive_catalog.iter_archive_records(path, max_record_bytes=64))
 
         self.assertEqual([record["id"] for record in records], ["first", "last"])
 
@@ -832,7 +844,7 @@ class CliTests(unittest.TestCase):
             ]
             path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
 
-            metadata = cli.archive_file_metadata("codex", path, {})
+            metadata = archive_catalog.archive_file_metadata("codex", path, {})
 
         self.assertEqual(metadata["session_id"], "session-id")
         self.assertEqual(metadata["title"], "Target migration")
@@ -847,8 +859,8 @@ class CliTests(unittest.TestCase):
             window_days=14,
             window_offset=0,
         )
-        with patch.object(cli, "archive_catalog_search", return_value=[]) as search:
-            cli.picker_rows(args, "target")
+        with patch.object(picker, "archive_catalog_search", return_value=[]) as search:
+            picker.picker_rows(args, "target")
 
         search.assert_called_once_with(
             "target",
@@ -867,8 +879,8 @@ class CliTests(unittest.TestCase):
             window_days=14,
             window_offset=2,
         )
-        with patch.object(cli, "archive_catalog_search", return_value=[]) as search:
-            cli.picker_rows(args, "")
+        with patch.object(picker, "archive_catalog_search", return_value=[]) as search:
+            picker.picker_rows(args, "")
 
         search.assert_called_once_with(
             "",
@@ -880,7 +892,7 @@ class CliTests(unittest.TestCase):
 
     def test_archive_catalog_short_terms_are_exact_not_prefixes(self):
         self.assertEqual(
-            cli.archive_catalog_fts_query("a as asa archive"),
+            archive_catalog.archive_catalog_fts_query("a as asa archive"),
             '"a" "as" "asa" "archive"*',
         )
 
@@ -893,24 +905,24 @@ class CliTests(unittest.TestCase):
             window_days=14,
             window_offset=0,
         )
-        with patch.object(cli, "archive_catalog_search") as search:
-            self.assertEqual(cli.picker_rows(args, "as"), [])
+        with patch.object(picker, "archive_catalog_search") as search:
+            self.assertEqual(picker.picker_rows(args, "as"), [])
 
         search.assert_not_called()
-        self.assertEqual(cli.archive_picker_lookup_query(args, "as"), "")
-        self.assertEqual(cli.archive_picker_lookup_query(args, "asa"), "asa")
+        self.assertEqual(picker.archive_picker_lookup_query(args, "as"), "")
+        self.assertEqual(picker.archive_picker_lookup_query(args, "asa"), "asa")
 
     def test_archive_picker_title_marks_global_search_scope(self):
         args = Namespace(archive=True, window_days=14, window_offset=2)
 
-        self.assertEqual(cli.picker_title(args, "asa"), "Herdr ArchiveSearch | all dates")
-        self.assertIn(" to ", cli.picker_title(args, ""))
+        self.assertEqual(picker.picker_title(args, "asa"), "Herdr ArchiveSearch | all dates")
+        self.assertIn(" to ", picker.picker_title(args, ""))
 
     def test_pending_keys_uses_idle_timeout_and_restores_blocking(self):
         screen = Mock()
-        screen.get_wch.side_effect = ["s", cli.curses.error()]
+        screen.get_wch.side_effect = ["s", picker.curses.error()]
 
-        self.assertEqual(list(cli.pending_keys(screen, 100)), ["s"])
+        self.assertEqual(list(picker.pending_keys(screen, 100)), ["s"])
         self.assertEqual(
             [item.args for item in screen.timeout.call_args_list],
             [(100,), (-1,)],
@@ -974,7 +986,7 @@ class CliTests(unittest.TestCase):
                 "Routine maintenance",
                 "Updated an unrelated component that references the target once.",
             )
-            config = cli.default_config()
+            config = settings.default_config()
             config["archive_enabled"] = True
             config["archive_agents"] = ["codex"]
             config["archive"]["codex"]["sessions"] = [str(archive_dir / "*.jsonl")]
@@ -984,28 +996,28 @@ class CliTests(unittest.TestCase):
                 "HERDR_OMNISEARCH_CATALOG_DB": str(catalog),
             }
             with patch.dict(os.environ, environment, clear=False), patch.object(
-                cli, "CONFIG_CACHE", config
+                settings, "CONFIG_CACHE", config
             ):
-                changed, unchanged, removed, _terms = cli.archive_catalog_index()
+                changed, unchanged, removed, _terms = archive_catalog.archive_catalog_index()
                 self.assertEqual((changed, unchanged, removed), (2, 0, 0))
-                self.assertEqual(cli.archive_catalog_search("routine", 10)[0]["session_id"], "recent-session")
-                exact = cli.archive_catalog_search("ExampleMappingKey", 10)[0]
+                self.assertEqual(archive_catalog.archive_catalog_search("routine", 10)[0]["session_id"], "recent-session")
+                exact = archive_catalog.archive_catalog_search("ExampleMappingKey", 10)[0]
                 self.assertEqual(exact["session_id"], "older-session")
                 self.assertIn("assistant: Implemented the ExampleMappingKey mapping.", exact["content"])
-                self.assertIn("assistant: Implemented the ExampleMappingKey", cli.row_title(exact))
+                self.assertIn("assistant: Implemented the ExampleMappingKey", picker.row_title(exact))
                 self.assertEqual(
-                    cli.archive_catalog_search("ExampleMappingKez", 10)[0]["session_id"],
+                    archive_catalog.archive_catalog_search("ExampleMappingKez", 10)[0]["session_id"],
                     "older-session",
                 )
-                self.assertEqual(cli.archive_catalog_search("older-session", 10), [])
-                filtered = cli.archive_catalog_search("cwd:older-session", 10)
+                self.assertEqual(archive_catalog.archive_catalog_search("older-session", 10), [])
+                filtered = archive_catalog.archive_catalog_search("cwd:older-session", 10)
                 self.assertEqual(filtered[0]["session_id"], "older-session")
-                recent_preview = cli.archive_catalog_search("", 10)[0]
+                recent_preview = archive_catalog.archive_catalog_search("", 10)[0]
                 self.assertEqual(recent_preview["session_id"], "recent-session")
                 self.assertIn("user: Routine maintenance", recent_preview["content"])
                 self.assertIn("assistant: Updated an unrelated component", recent_preview["content"])
                 self.assertEqual(
-                    cli.archive_catalog_search(
+                    archive_catalog.archive_catalog_search(
                         "ExampleMappingKey",
                         10,
                         window_days=14,
@@ -1013,7 +1025,7 @@ class CliTests(unittest.TestCase):
                     ),
                     [],
                 )
-                changed, unchanged, removed, _terms = cli.archive_catalog_index()
+                changed, unchanged, removed, _terms = archive_catalog.archive_catalog_index()
                 self.assertEqual((changed, unchanged, removed), (0, 2, 0))
 
                 write_session(
@@ -1023,12 +1035,12 @@ class CliTests(unittest.TestCase):
                     "Target migration",
                     "Implemented the ExampleMappingKey mapping and final validation.",
                 )
-                changed, unchanged, removed, _terms = cli.archive_catalog_index()
+                changed, unchanged, removed, _terms = archive_catalog.archive_catalog_index()
                 self.assertEqual((changed, unchanged, removed), (1, 1, 0))
-                refreshed = cli.archive_catalog_search("final validation", 10)[0]
+                refreshed = archive_catalog.archive_catalog_search("final validation", 10)[0]
                 self.assertIn("assistant: Implemented the ExampleMappingKey", refreshed["content"])
 
-                conn = cli.archive_catalog_connect()
+                conn = storage.archive_catalog_connect()
                 try:
                     self.assertEqual(
                         conn.execute(
@@ -1107,7 +1119,7 @@ class CliTests(unittest.TestCase):
                 "".join(json.dumps(record) + "\n" for record in records),
                 encoding="utf-8",
             )
-            config = cli.default_config()
+            config = settings.default_config()
             config["archive_enabled"] = True
             config["archive_agents"] = ["codex"]
             config["archive"]["codex"]["sessions"] = [str(path)]
@@ -1117,19 +1129,19 @@ class CliTests(unittest.TestCase):
                 "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
             }
             with patch.dict(os.environ, environment, clear=False), patch.object(
-                cli, "CONFIG_CACHE", config
+                settings, "CONFIG_CACHE", config
             ):
-                cli.archive_catalog_index()
-                result = cli.archive_catalog_search("searchable-answer", 10)[0]
+                archive_catalog.archive_catalog_index()
+                result = archive_catalog.archive_catalog_search("searchable-answer", 10)[0]
                 self.assertIn("assistant: The searchable-answer is here.", result["content"])
-                latest = cli.archive_catalog_search("", 10)[0]
+                latest = archive_catalog.archive_catalog_search("", 10)[0]
                 self.assertNotIn("opening-turn-marker", latest["content"])
                 self.assertIn("assistant: Intermediate reply", latest["content"])
                 self.assertIn("user: Find the conversation marker", latest["content"])
-                self.assertEqual(cli.archive_catalog_search("private-system-marker", 10), [])
-                self.assertEqual(cli.archive_catalog_search("metadata-only-marker", 10), [])
+                self.assertEqual(archive_catalog.archive_catalog_search("private-system-marker", 10), [])
+                self.assertEqual(archive_catalog.archive_catalog_search("metadata-only-marker", 10), [])
                 self.assertEqual(
-                    cli.archive_catalog_search("cwd:metadata-only-marker", 10)[0]["session_id"],
+                    archive_catalog.archive_catalog_search("cwd:metadata-only-marker", 10)[0]["session_id"],
                     "conversation-session",
                 )
 
@@ -1174,7 +1186,7 @@ class CliTests(unittest.TestCase):
                 "message-session",
                 "A Booking Room phrase appeared in this conversation.",
             )
-            config = cli.default_config()
+            config = settings.default_config()
             config["archive_enabled"] = True
             config["archive_agents"] = ["codex"]
             config["archive"]["codex"]["sessions"] = [str(archive_dir / "*.jsonl")]
@@ -1185,41 +1197,41 @@ class CliTests(unittest.TestCase):
             }
             spaces = {("codex", "workspace-session"): "Booking Room"}
             with patch.dict(os.environ, environment, clear=False), patch.object(
-                cli, "CONFIG_CACHE", config
+                settings, "CONFIG_CACHE", config
             ), patch.object(
-                cli, "live_space_labels_by_session", return_value=spaces
+                archive_catalog, "live_space_labels_by_session", return_value=spaces
             ) as session_spaces, patch.object(
-                cli, "live_space_labels_by_cwd", return_value={}
+                archive_catalog, "live_space_labels_by_cwd", return_value={}
             ):
-                self.assertEqual(cli.archive_catalog_index()[:3], (2, 0, 0))
-                results = cli.archive_catalog_search("booking room", 10)
+                self.assertEqual(archive_catalog.archive_catalog_index()[:3], (2, 0, 0))
+                results = archive_catalog.archive_catalog_search("booking room", 10)
                 self.assertEqual(
                     [row["session_id"] for row in results],
                     ["workspace-session", "message-session"],
                 )
                 self.assertEqual(results[0]["workspace_label"], "Booking Room")
                 self.assertEqual(
-                    cli.archive_catalog_search("booking roon", 10)[0]["session_id"],
+                    archive_catalog.archive_catalog_search("booking roon", 10)[0]["session_id"],
                     "workspace-session",
                 )
 
                 session_spaces.return_value = {
                     ("codex", "workspace-session"): "Reservations API"
                 }
-                self.assertEqual(cli.archive_catalog_index()[:3], (0, 2, 0))
+                self.assertEqual(archive_catalog.archive_catalog_index()[:3], (0, 2, 0))
                 self.assertEqual(
-                    cli.archive_catalog_search("reservations api", 10)[0]["session_id"],
+                    archive_catalog.archive_catalog_search("reservations api", 10)[0]["session_id"],
                     "workspace-session",
                 )
                 self.assertNotIn(
                     "workspace-session",
-                    [row["session_id"] for row in cli.archive_catalog_search("booking room", 10)],
+                    [row["session_id"] for row in archive_catalog.archive_catalog_search("booking room", 10)],
                 )
 
                 session_spaces.return_value = {}
-                self.assertEqual(cli.archive_catalog_index()[:3], (0, 2, 0))
+                self.assertEqual(archive_catalog.archive_catalog_index()[:3], (0, 2, 0))
                 self.assertEqual(
-                    cli.archive_catalog_search("reservations api", 10)[0]["session_id"],
+                    archive_catalog.archive_catalog_search("reservations api", 10)[0]["session_id"],
                     "workspace-session",
                 )
 
@@ -1250,7 +1262,7 @@ class CliTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-            config = cli.default_config()
+            config = settings.default_config()
             config["archive_enabled"] = True
             config["archive_agents"] = ["codex"]
             config["archive"]["codex"]["sessions"] = [str(path)]
@@ -1260,14 +1272,14 @@ class CliTests(unittest.TestCase):
                 "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
             }
             with patch.dict(os.environ, environment, clear=False), patch.object(
-                cli, "CONFIG_CACHE", config
+                settings, "CONFIG_CACHE", config
             ):
                 write_answer("asaa")
-                cli.archive_catalog_index()
+                archive_catalog.archive_catalog_index()
                 write_answer("asa")
-                cli.archive_catalog_index()
+                archive_catalog.archive_catalog_index()
 
-                result = cli.archive_catalog_search("asaa", 10)[0]
+                result = archive_catalog.archive_catalog_search("asaa", 10)[0]
                 self.assertEqual(result["session_id"], "fuzzy-session")
                 self.assertEqual(result["matched_tokens"], ["asa"])
 
@@ -1297,7 +1309,7 @@ class CliTests(unittest.TestCase):
                 },
             ]
             path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
-            config = cli.default_config()
+            config = settings.default_config()
             config["archive_enabled"] = True
             config["archive_agents"] = ["codex"]
             config["archive"]["codex"]["sessions"] = [str(path)]
@@ -1309,9 +1321,9 @@ class CliTests(unittest.TestCase):
                     "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
                 },
                 clear=False,
-            ), patch.object(cli, "CONFIG_CACHE", config):
-                cli.archive_catalog_index()
-                self.assertEqual(cli.archive_catalog_search("hidden-marker", 10), [])
+            ), patch.object(settings, "CONFIG_CACHE", config):
+                archive_catalog.archive_catalog_index()
+                self.assertEqual(archive_catalog.archive_catalog_search("hidden-marker", 10), [])
 
     def test_archive_catalog_hides_codex_subagent_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1351,7 +1363,7 @@ class CliTests(unittest.TestCase):
                 },
             ]
             path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
-            config = cli.default_config()
+            config = settings.default_config()
             config["archive_enabled"] = True
             config["archive_agents"] = ["codex"]
             config["archive"]["codex"]["sessions"] = [str(path)]
@@ -1363,11 +1375,11 @@ class CliTests(unittest.TestCase):
                     "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
                 },
                 clear=False,
-            ), patch.object(cli, "CONFIG_CACHE", config):
-                cli.archive_catalog_index()
-                self.assertEqual(cli.archive_catalog_search("subagent-marker", 10), [])
-                self.assertEqual(cli.archive_catalog_search("", 10), [])
-                conn = cli.archive_catalog_connect()
+            ), patch.object(settings, "CONFIG_CACHE", config):
+                archive_catalog.archive_catalog_index()
+                self.assertEqual(archive_catalog.archive_catalog_search("subagent-marker", 10), [])
+                self.assertEqual(archive_catalog.archive_catalog_search("", 10), [])
+                conn = storage.archive_catalog_connect()
                 try:
                     row = conn.execute(
                         "SELECT is_wrapper, message_count FROM catalog_sessions WHERE session_id = 'guardian-session'"
@@ -1488,7 +1500,7 @@ class CliTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            config = cli.default_config()
+            config = settings.default_config()
             config["archive_enabled"] = True
             config["archive_agents"] = ["claude"]
             config["archive"]["claude"]["sessions"] = [str(root / "*.jsonl")]
@@ -1497,28 +1509,28 @@ class CliTests(unittest.TestCase):
                 "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
             }
             with patch.dict(os.environ, environment, clear=False), patch.object(
-                cli, "CONFIG_CACHE", config
+                settings, "CONFIG_CACHE", config
             ):
-                cli.archive_catalog_index()
-                result = cli.archive_catalog_search("visible-response-marker", 10)[0]
+                archive_catalog.archive_catalog_index()
+                result = archive_catalog.archive_catalog_search("visible-response-marker", 10)[0]
                 self.assertIn("assistant: The visible-response-marker is indexed.", result["content"])
-                latest = cli.archive_catalog_search("", 10)[0]
-                self.assertEqual(len(cli.archive_catalog_search("", 10)), 1)
+                latest = archive_catalog.archive_catalog_search("", 10)[0]
+                self.assertEqual(len(archive_catalog.archive_catalog_search("", 10)), 1)
                 self.assertEqual(latest["session_id"], "secondary-session")
                 self.assertIn("assistant: The visible-response-marker is indexed.", latest["content"])
                 self.assertNotIn("Request interrupted", latest["content"])
                 self.assertNotIn("user: hello", latest["content"])
                 self.assertEqual(
-                    {row["session_id"] for row in cli.archive_catalog_search("hello", 10)},
+                    {row["session_id"] for row in archive_catalog.archive_catalog_search("hello", 10)},
                     {"secondary-session", "trivial-session"},
                 )
-                self.assertEqual(cli.archive_catalog_search("private-reasoning-marker", 10), [])
-                self.assertEqual(cli.archive_catalog_search("private-tool-marker", 10), [])
-                self.assertEqual(cli.archive_catalog_search("control-marker", 10), [])
-                self.assertEqual(cli.archive_catalog_search("legacy-artifact-marker", 10), [])
-                self.assertEqual(cli.archive_catalog_search("shell-artifact-marker", 10), [])
-                self.assertEqual(cli.archive_catalog_search("approval-artifact-marker", 10), [])
-                self.assertTrue(cli.is_archive_noise('{"outcome":"allow"}'))
+                self.assertEqual(archive_catalog.archive_catalog_search("private-reasoning-marker", 10), [])
+                self.assertEqual(archive_catalog.archive_catalog_search("private-tool-marker", 10), [])
+                self.assertEqual(archive_catalog.archive_catalog_search("control-marker", 10), [])
+                self.assertEqual(archive_catalog.archive_catalog_search("legacy-artifact-marker", 10), [])
+                self.assertEqual(archive_catalog.archive_catalog_search("shell-artifact-marker", 10), [])
+                self.assertEqual(archive_catalog.archive_catalog_search("approval-artifact-marker", 10), [])
+                self.assertTrue(archive_catalog.is_archive_noise('{"outcome":"allow"}'))
                 for prefix in (
                     "<turn_aborted>",
                     "<task-notification>",
@@ -1533,13 +1545,13 @@ class CliTests(unittest.TestCase):
                     "<system-reminder>",
                     "<subagent_notification>",
                 ):
-                    self.assertTrue(cli.is_archive_noise(prefix + "control payload"))
-                self.assertFalse(cli.is_archive_noise("<proposed_plan>Keep this useful plan"))
+                    self.assertTrue(archive_catalog.is_archive_noise(prefix + "control payload"))
+                self.assertFalse(archive_catalog.is_archive_noise("<proposed_plan>Keep this useful plan"))
 
     def test_scoped_archive_catalog_refresh_preserves_other_agents(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = cli.default_config()
+            config = settings.default_config()
             config["archive_enabled"] = True
             config["archive_agents"] = ["codex", "claude"]
             environment = {
@@ -1547,9 +1559,9 @@ class CliTests(unittest.TestCase):
                 "HERDR_OMNISEARCH_CATALOG_DB": str(root / "catalog.sqlite3"),
             }
             with patch.dict(os.environ, environment, clear=False), patch.object(
-                cli, "CONFIG_CACHE", config
+                settings, "CONFIG_CACHE", config
             ):
-                conn = cli.archive_catalog_connect()
+                conn = storage.archive_catalog_connect()
                 with conn:
                     for agent in ("codex", "claude"):
                         conn.execute(
@@ -1562,9 +1574,9 @@ class CliTests(unittest.TestCase):
                             (f"{agent}:session", agent, "session", f"/{agent}.jsonl"),
                         )
                 conn.close()
-                with patch.object(cli, "archive_paths", return_value=[]):
-                    cli.archive_catalog_index("codex")
-                conn = cli.archive_catalog_connect()
+                with patch.object(archive_catalog, "archive_paths", return_value=[]):
+                    archive_catalog.archive_catalog_index("codex")
+                conn = storage.archive_catalog_connect()
                 try:
                     active_agents = {
                         row[0]
@@ -1590,8 +1602,8 @@ class CliTests(unittest.TestCase):
             "agent": "codex",
             "session_id": "target-session",
         }
-        with patch.object(cli, "focus_archive_row", return_value=0) as focus_row:
-            result = cli.picker_focus(args, row)
+        with patch.object(picker, "focus_archive_row", return_value=0) as focus_row:
+            result = picker.picker_focus(args, row)
 
         self.assertEqual(result, 0)
         focus_row.assert_called_once_with(row)
@@ -1639,7 +1651,7 @@ class CliTests(unittest.TestCase):
                 clear=False,
             ):
                 os.environ.pop("HERDR_OMNISEARCH_DB", None)
-                migrated = cli.db_path()
+                migrated = storage.db_path()
             self.assertEqual(migrated, state / "index.sqlite3")
             self.assertTrue(legacy.is_symlink())
             # Resolve both sides: on macOS the temp dir sits behind the
