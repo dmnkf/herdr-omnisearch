@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.10 - 2026-09-20
+
+- Hide Codex subagent sessions, such as guardian approval reviews, from
+  archive search using the session metadata instead of prompt text.
+
 ## 0.6.9 - 2026-08-31
 
 - Search persisted Herdr workspace names with normal archive queries and rank

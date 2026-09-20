@@ -1463,6 +1463,69 @@ class CliTests(unittest.TestCase):
                 cli.archive_catalog_index()
                 self.assertEqual(cli.archive_catalog_search("hidden-marker", 10), [])
 
+    def test_archive_catalog_hides_codex_subagent_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_dir = root / "sessions"
+            archive_dir.mkdir()
+            path = archive_dir / "guardian.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-09-14T14:17:19Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "guardian-session",
+                        "cwd": "/projects/review",
+                        "parent_thread_id": "parent-session",
+                        "source": {"subagent": {"other": "guardian"}},
+                        "thread_source": "guardian_review",
+                    },
+                },
+                {
+                    "timestamp": "2026-09-14T14:17:20Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Judge this subagent-marker action"}],
+                    },
+                },
+                {
+                    "timestamp": "2026-09-14T14:17:21Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "subagent-marker looks safe"}],
+                    },
+                },
+            ]
+            path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
+            config = cli.default_config()
+            config["archive_enabled"] = True
+            config["archive_agents"] = ["codex"]
+            config["archive"]["codex"]["sessions"] = [str(path)]
+            config["archive"]["codex"]["thread_names"] = str(root / "missing.jsonl")
+            with patch.dict(
+                os.environ,
+                {
+                    "HERDR_PLUGIN_STATE_DIR": str(root / "state"),
+                    "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "catalog.sqlite3"),
+                },
+                clear=False,
+            ), patch.object(cli, "CONFIG_CACHE", config):
+                cli.archive_catalog_index()
+                self.assertEqual(cli.archive_catalog_search("subagent-marker", 10), [])
+                self.assertEqual(cli.archive_catalog_search("", 10), [])
+                conn = cli.archive_catalog_connect()
+                try:
+                    row = conn.execute(
+                        "SELECT is_wrapper, message_count FROM catalog_sessions WHERE session_id = 'guardian-session'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+                self.assertEqual((row["is_wrapper"], row["message_count"]), (1, 2))
+
     def test_archive_catalog_ignores_reasoning_and_tool_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -35,7 +35,7 @@ DEFAULT_LIMIT = 30
 ARCHIVE_MAX_RECORD_BYTES = 2 * 1024 * 1024
 ARCHIVE_MESSAGE_MAX_CHARS = 16000
 ARCHIVE_PREVIEW_MESSAGES = 3
-ARCHIVE_CATALOG_CONTENT_VERSION = 5
+ARCHIVE_CATALOG_CONTENT_VERSION = 6
 ARCHIVE_PICKER_DEBOUNCE_MS = 100
 ARCHIVE_PICKER_MIN_QUERY_CHARS = 3
 ARCHIVE_PREFIX_MIN_CHARS = 4
@@ -1735,11 +1735,19 @@ def archive_query_terms(query: str):
     return list(dict.fromkeys(tokens(f"{text} {values}")))
 
 
+def codex_session_is_subagent(payload) -> bool:
+    source = payload.get("source")
+    if isinstance(source, dict) and "subagent" in source:
+        return True
+    return bool(payload.get("parent_thread_id"))
+
+
 def archive_file_metadata(agent: str, path: Path, thread_names):
     session_id = path.stem
     title = ""
     cwd = ""
     slug = ""
+    is_subagent = False
     try:
         for item in iter_archive_records(path):
             if agent == "codex":
@@ -1748,6 +1756,7 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
                 if item_type == "session_meta":
                     session_id = payload.get("id") or session_id
                     cwd = payload.get("cwd") or cwd
+                    is_subagent = codex_session_is_subagent(payload)
                     title = thread_names.get(session_id) or title
                     if title:
                         break
@@ -1789,6 +1798,7 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
         "path": str(path),
         "started_at": started_at,
         "updated_at": started_at,
+        "is_subagent": is_subagent,
     }
 
 
@@ -2014,7 +2024,8 @@ def archive_catalog_document(
         iso_to_epoch(metadata.get("updated_at") or "") or metadata["started_epoch"]
     )
     metadata["is_wrapper"] = int(
-        archive_catalog_is_wrapper(
+        bool(metadata.pop("is_subagent", False))
+        or archive_catalog_is_wrapper(
             metadata.get("title") or "",
             archive_catalog_preview(first_turns),
         )
