@@ -420,6 +420,62 @@ class MachineTests(unittest.TestCase):
         self.assertEqual(live_index.machine_name(rows[0]), "gpubox")
         self.assertEqual(live_index.describe_query("deploy gpu", machines=False), "")
 
+    def test_vocabulary_forgets_words_no_pane_contains(self):
+        outputs = iter(["alpha beta gamma-delta", "epsilon zeta"])
+        with patch.object(LocalHerdrClient, "pane_read", lambda self, pane_id, lines: next(outputs)):
+            live_index.index_session(50, False, False)
+            live_index.index_session(50, False, False)
+        conn = sqlite3.connect(os.environ["HERDR_OMNISEARCH_DB"])
+        try:
+            terms = {row[0] for row in conn.execute("SELECT token FROM terms")}
+            referenced = {row[0] for row in conn.execute("SELECT DISTINCT token FROM token_docs")}
+            orphans = conn.execute(
+                "SELECT COUNT(*) FROM token_trigrams WHERE token NOT IN (SELECT token FROM terms)"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(terms, referenced)
+        self.assertNotIn("alpha", terms)
+        self.assertIn("epsilon", terms)
+        self.assertEqual(orphans, 0)
+
+    def test_compaction_reclaims_free_pages(self):
+        live_index.index_session(50, False, False)
+        path = os.environ["HERDR_OMNISEARCH_DB"]
+        conn = sqlite3.connect(path)
+        with conn:
+            conn.execute("CREATE TABLE scratch (blob TEXT)")
+            conn.executemany("INSERT INTO scratch VALUES (?)", (("y" * 500,) for _ in range(4000)))
+            conn.execute("DROP TABLE scratch")
+        def on_disk():
+            return sum(os.path.getsize(path + suffix) for suffix in ("", "-wal") if os.path.exists(path + suffix))
+
+        before = on_disk()
+        with patch.object(storage, "COMPACT_MIN_FREE_BYTES", 1024):
+            storage.compact_index(conn)
+        conn.close()
+        self.assertLess(on_disk(), before / 2)
+        self.assertTrue(live_index.search_index("deploy", 10))
+
+    def test_a_bloated_index_is_rebuilt_instead_of_cleaned_in_place(self):
+        live_index.index_session(50, False, False)
+        path = os.environ["HERDR_OMNISEARCH_DB"]
+        conn = sqlite3.connect(path)
+        with conn:
+            conn.execute("CREATE TABLE archive_token_docs (token TEXT, stable_id TEXT)")
+            conn.executemany("INSERT INTO terms (token) VALUES (?)", ((f"stale{i}",) for i in range(20000)))
+        conn.close()
+        live_index.index_session(50, False, False)
+        conn = sqlite3.connect(path)
+        try:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            terms = conn.execute("SELECT COUNT(*) FROM terms").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertNotIn("archive_token_docs", tables)
+        self.assertLess(terms, 100)
+        self.assertTrue(live_index.search_index("deploy", 10))
+
     def test_busy_machine_cannot_crowd_out_the_others(self):
         self.sync({
             "workbox": export_payload("Billing", "busy output", panes=30),

@@ -15,8 +15,11 @@ from .settings import (
     herdr_session_key,
 )
 from .storage import (
+    compact_index,
     connect,
     db_path,
+    index_is_bloated,
+    reset_index_file,
     lock_is_held,
     spawn_locked_background,
     stop_watcher_at,
@@ -234,6 +237,12 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
                 doc_tokens.append((token, digest))
 
     conn = connect()
+    if index_is_bloated(conn):
+        # The live index is a cache of what panes show; rebuilding it takes a
+        # second, while cleaning up a bloated file in place can take minutes.
+        conn.close()
+        reset_index_file()
+        conn = connect()
     with conn:
         # Replace only this session's rows so concurrent Herdr sessions on the
         # same machine never clobber each other. Rows without a session are
@@ -254,8 +263,20 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
             (f"last_indexed_at:{session_key}", str(now)),
         )
         reap_dead_sessions(conn, session_key)
+        prune_vocabulary(conn)
+    compact_index(conn)
     conn.close()
     return len(docs)
+
+
+def prune_vocabulary(conn) -> None:
+    """Forget words no indexed pane contains any more, so fuzzy lookups stay small."""
+    conn.execute(
+        "DELETE FROM terms WHERE NOT EXISTS (SELECT 1 FROM token_docs WHERE token_docs.token = terms.token)"
+    )
+    conn.execute(
+        "DELETE FROM token_trigrams WHERE NOT EXISTS (SELECT 1 FROM terms WHERE terms.token = token_trigrams.token)"
+    )
 
 
 DOC_COLUMNS = (

@@ -13,9 +13,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .herdr_cli import HerdrCLI, HerdrCLIError
-from .live_index import replace_docs
+from .live_index import prune_vocabulary, replace_docs
 from .settings import app_config, cli_command, data_dir, herdr_bin
-from .storage import connect, spawn_locked_background, try_exclusive_lock
+from .storage import compact_index, connect, spawn_locked_background, try_exclusive_lock
 from .textmatch import index_tokens
 
 EXPORT_FORMAT = 1
@@ -298,6 +298,8 @@ def sync_machines():
                 )
             else:
                 conn.execute("DELETE FROM meta WHERE key = 'machines_synced_at'")
+            prune_vocabulary(conn)
+        compact_index(conn)
     finally:
         conn.close()
     return summary

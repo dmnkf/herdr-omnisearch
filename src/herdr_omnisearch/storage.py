@@ -274,6 +274,41 @@ def init_schema(conn):
     )
 
 
+COMPACT_MIN_FREE_BYTES = 16 * 1024 * 1024
+
+
+def index_is_bloated(conn) -> bool:
+    """Tables left by the archive index removed in 0.7.0, or a mostly stale vocabulary."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'archive_token_docs'").fetchone():
+        return True
+    total = conn.execute("SELECT COUNT(*) FROM terms").fetchone()[0]
+    referenced = conn.execute("SELECT COUNT(DISTINCT token) FROM token_docs").fetchone()[0]
+    return total > 4 * referenced + 5000
+
+
+def reset_index_file() -> None:
+    path = db_path()
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            Path(str(path) + suffix).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def compact_index(conn) -> None:
+    """Reclaim free pages once they pile up; a busy database is left for next time."""
+    try:
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        pages = conn.execute("PRAGMA page_count").fetchone()[0]
+        free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        if free * page_size >= COMPACT_MIN_FREE_BYTES and free * 4 >= pages:
+            conn.execute("VACUUM")
+            # In WAL mode the smaller file only lands once the log is checkpointed.
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.OperationalError:
+        pass
+
+
 def archive_catalog_connect():
     requested_path = archive_catalog_db_path().expanduser()
     existed = requested_path.exists()
