@@ -239,18 +239,18 @@ When Herdr has saved SSH machines, OmniSearch searches all of them from one
 picker:
 
 ```bash
-herdr machine add d-intranet01 --label intranet
+herdr machine add workbox.lan --label workbox
 herdr-omnisearch sync-machines
 herdr-omnisearch machines
 ```
 
 ```text
-★ [idle] intranet › Billing / claude / w4:p1        top hits across machines
-★ [idle] personal › rsi-game / codex / w5:p8
+★ [idle] workbox › Billing / claude / w4:p1        top hits across machines
+★ [idle] gpubox › trainer / codex / w5:p8
 [machine] Local · 1 space
   [workspace] Laptop
     [idle] Laptop / codex / w1:p1
-[machine] intranet · 9 spaces
+[machine] workbox · 9 spaces
   [workspace] Billing
     [idle] Billing / claude / w4:p1
 ```
@@ -273,7 +273,7 @@ How it works:
 - The watcher checks for newly saved machines every five minutes. Run
   `sync-machines` to include a new machine right away.
 - A query pins the best five hits across all machines above the tree. Each
-  machine gets its own result limit. Narrow a query with `machine:intranet`,
+  machine gets its own result limit. Narrow a query with `machine:workbox`,
   or use `--local-only`.
 
 Selecting a result on another machine focuses that exact pane on its server.

@@ -22,8 +22,8 @@ from herdr_omnisearch import cli, live_index, machines, picker, settings, storag
 from herdr_omnisearch.herdr_cli import HerdrCLIError  # noqa: E402
 
 
-INTRANET = {"id": "a" * 32, "label": "intranet", "target": "d-intranet01", "session": "default", "selected": False}
-PERSONAL = {"id": "b" * 32, "label": "personal", "target": "d-personal01", "session": "default", "selected": False}
+WORKBOX = {"id": "a" * 32, "label": "workbox", "target": "workbox.lan", "session": "default", "selected": False}
+GPUBOX = {"id": "b" * 32, "label": "gpubox", "target": "gpubox.lan", "session": "default", "selected": False}
 
 
 def export_payload(workspace_label, text, *, panes=1):
@@ -31,7 +31,7 @@ def export_payload(workspace_label, text, *, panes=1):
     # Herdr as root with default sockets really do.
     docs = [{
         "stable_id": "ws-w1",
-        "herdr_session": "default-2cd4ce75",
+        "herdr_session": "default-00000000",
         "socket_path": "/root/.config/herdr/herdr.sock",
         "workspace_id": "w1",
         "workspace_label": workspace_label,
@@ -48,7 +48,7 @@ def export_payload(workspace_label, text, *, panes=1):
     for index in range(panes):
         docs.append({
             "stable_id": f"pane-{index}",
-            "herdr_session": "default-2cd4ce75",
+            "herdr_session": "default-00000000",
             "socket_path": "/root/.config/herdr/herdr.sock",
             "workspace_id": "w1",
             "workspace_label": workspace_label,
@@ -113,7 +113,7 @@ class MachineTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def sync(self, results, saved=(INTRANET, PERSONAL)):
+    def sync(self, results, saved=(WORKBOX, GPUBOX)):
         def fetch(machine):
             result = results[machine["label"]]
             if isinstance(result, Exception):
@@ -154,8 +154,8 @@ class MachineTests(unittest.TestCase):
 
     def test_failed_machine_listing_keeps_synced_rows(self):
         self.sync({
-            "intranet": export_payload("Billing", "remote text"),
-            "personal": export_payload("Game", "remote text"),
+            "workbox": export_payload("Billing", "remote text"),
+            "gpubox": export_payload("Game", "remote text"),
         })
         with patch.object(machines.HerdrCLI, "machine_list", side_effect=HerdrCLIError("protocol mismatch")):
             with self.assertRaises(machines.MachineError):
@@ -165,8 +165,8 @@ class MachineTests(unittest.TestCase):
 
     def test_bad_export_only_fails_its_own_machine(self):
         self.sync({
-            "intranet": export_payload("Billing", "remote text"),
-            "personal": export_payload("Game", "remote text"),
+            "workbox": export_payload("Billing", "remote text"),
+            "gpubox": export_payload("Game", "remote text"),
         })
         broken = export_payload("Broken", "remote text")
         broken["docs"][1]["body"] = ["not", "text"]
@@ -175,48 +175,48 @@ class MachineTests(unittest.TestCase):
         summary = dict(
             (machine["label"], status)
             for machine, status in self.sync({
-                "intranet": export_payload("Billing2", "fresh text"),
-                "personal": broken,
+                "workbox": export_payload("Billing2", "fresh text"),
+                "gpubox": broken,
             })
         )
-        self.assertTrue(summary["intranet"]["ok"])
-        self.assertTrue(live_index.search_index("machine:intranet fresh", 20, machines=True))
-        self.assertTrue(summary["personal"]["ok"])
-        self.assertEqual(summary["personal"]["docs"], 2)
+        self.assertTrue(summary["workbox"]["ok"])
+        self.assertTrue(live_index.search_index("machine:workbox fresh", 20, machines=True))
+        self.assertTrue(summary["gpubox"]["ok"])
+        self.assertEqual(summary["gpubox"]["docs"], 2)
 
         with patch.object(machines, "ingest_export", side_effect=[3, sqlite3.ProgrammingError("boom")]):
             summary = dict(
                 (machine["label"], status)
                 for machine, status in self.sync({
-                    "intranet": export_payload("Billing3", "newest text"),
-                    "personal": export_payload("Game", "remote text"),
+                    "workbox": export_payload("Billing3", "newest text"),
+                    "gpubox": export_payload("Game", "remote text"),
                 })
             )
-        self.assertTrue(summary["intranet"]["ok"])
-        self.assertFalse(summary["personal"]["ok"])
-        self.assertIn("bad export", summary["personal"]["error"])
-        self.assertTrue(live_index.search_index("machine:personal remote", 20, machines=True))
+        self.assertTrue(summary["workbox"]["ok"])
+        self.assertFalse(summary["gpubox"]["ok"])
+        self.assertIn("bad export", summary["gpubox"]["error"])
+        self.assertTrue(live_index.search_index("machine:gpubox remote", 20, machines=True))
 
     def test_remote_index_failure_marks_the_machine_stale(self):
         payload = export_payload("Billing", "remote text")
         payload["error"] = "cannot connect to Herdr socket"
         summary = dict((machine["label"], status) for machine, status in self.sync({
-            "intranet": payload,
-            "personal": export_payload("Game", "remote text"),
+            "workbox": payload,
+            "gpubox": export_payload("Game", "remote text"),
         }))
-        self.assertTrue(summary["intranet"]["ok"])
-        self.assertEqual(summary["intranet"]["error"], "cannot connect to Herdr socket")
-        self.assertEqual(cli.machine_state(summary["intranet"]), "stale")
+        self.assertTrue(summary["workbox"]["ok"])
+        self.assertEqual(summary["workbox"]["error"], "cannot connect to Herdr socket")
+        self.assertEqual(cli.machine_state(summary["workbox"]), "stale")
         args = Namespace(limit=20, agent=None, status=None, all_sessions=False, local_only=False)
         headers = [row for row in picker.picker_rows(args, "") if live_index.is_machine_row(row)]
-        intranet = next(row for row in headers if row["machine_label"] == "intranet")
-        self.assertIn("stale", picker.row_title(intranet))
+        workbox = next(row for row in headers if row["machine_label"] == "workbox")
+        self.assertIn("stale", picker.row_title(workbox))
 
     def test_disabling_machines_hides_synced_rows(self):
         live_index.index_session(50, False, False)
         self.sync({
-            "intranet": export_payload("Billing", "remote text"),
-            "personal": export_payload("Game", "remote text"),
+            "workbox": export_payload("Billing", "remote text"),
+            "gpubox": export_payload("Game", "remote text"),
         })
         config = settings.default_config()
         config["machines"]["enabled"] = False
@@ -227,8 +227,8 @@ class MachineTests(unittest.TestCase):
 
     def test_fzf_input_leaves_out_machine_headers(self):
         self.sync({
-            "intranet": export_payload("Billing", "remote text"),
-            "personal": export_payload("Game", "remote text"),
+            "workbox": export_payload("Billing", "remote text"),
+            "gpubox": export_payload("Game", "remote text"),
         })
         args = Namespace(query=[], limit=20, agent=None, status=None, all_sessions=False, local_only=False)
         with patch.object(picker.shutil, "which", return_value="/usr/bin/fzf"), patch.object(
@@ -241,14 +241,14 @@ class MachineTests(unittest.TestCase):
 
     def test_remote_focus_targets_ids_not_stable_ids(self):
         row = {
-            "machine_id": INTRANET["id"],
-            "machine_label": "intranet",
+            "machine_id": WORKBOX["id"],
+            "machine_label": "workbox",
             "workspace_id": "w4",
             "tab_id": "w4:t1",
             "pane_id": "w4:p2",
             "agent": "claude",
         }
-        with patch.object(machines, "saved_machines", return_value=[INTRANET]), patch.object(
+        with patch.object(machines, "saved_machines", return_value=[WORKBOX]), patch.object(
             machines, "run_remote"
         ) as run:
             machines.focus_remote_row(row)
@@ -265,15 +265,15 @@ class MachineTests(unittest.TestCase):
     def test_machines_merge_without_id_collisions(self):
         live_index.index_session(50, False, False)
         self.sync({
-            "intranet": export_payload("Billing", "deploy pipeline for billing"),
-            "personal": export_payload("Game", "deploy the game server"),
+            "workbox": export_payload("Billing", "deploy pipeline for billing"),
+            "gpubox": export_payload("Game", "deploy the game server"),
         })
 
         rows = live_index.grouped_search_index("", 20, machines=True)
         headers = [row for row in rows if live_index.is_machine_row(row)]
-        self.assertEqual([live_index.machine_name(row) for row in headers], ["Local", "intranet", "personal"])
+        self.assertEqual([live_index.machine_name(row) for row in headers], ["Local", "gpubox", "workbox"])
         workspaces = [row["workspace_label"] for row in rows if live_index.is_workspace_row(row)]
-        self.assertEqual(workspaces, ["Laptop", "Billing", "Game"])
+        self.assertEqual(workspaces, ["Laptop", "Game", "Billing"])
         self.assertEqual({row["_tree_depth"] for row in rows if live_index.is_workspace_row(row)}, {1})
 
         conn = sqlite3.connect(os.environ["HERDR_OMNISEARCH_DB"])
@@ -286,76 +286,76 @@ class MachineTests(unittest.TestCase):
     def test_query_pins_top_matches_across_machines_above_the_tree(self):
         live_index.index_session(50, False, False)
         self.sync({
-            "intranet": export_payload("Billing", "deploy pipeline for billing"),
-            "personal": export_payload("Game", "deploy the game server"),
+            "workbox": export_payload("Billing", "deploy pipeline for billing"),
+            "gpubox": export_payload("Game", "deploy the game server"),
         })
         rows = live_index.grouped_search_index("deploy", 20, machines=True)
         top = [row for row in rows if row.get("_top_match")]
         self.assertEqual(rows[: len(top)], top)
         self.assertEqual(
             {live_index.machine_name(row) for row in top},
-            {"Local", "intranet", "personal"},
+            {"Local", "workbox", "gpubox"},
         )
-        self.assertIn("intranet › Billing", picker.row_title(top[[live_index.machine_name(r) for r in top].index("intranet")]))
+        self.assertIn("workbox › Billing", picker.row_title(top[[live_index.machine_name(r) for r in top].index("workbox")]))
 
     def test_hits_on_one_machine_are_not_pinned_twice(self):
         self.sync({
-            "intranet": export_payload("Billing", "deploy pipeline for billing"),
-            "personal": export_payload("Game", "quiet output"),
+            "workbox": export_payload("Billing", "deploy pipeline for billing"),
+            "gpubox": export_payload("Game", "quiet output"),
         })
         rows = live_index.grouped_search_index("pipeline", 20, machines=True)
         self.assertFalse(any(row.get("_top_match") for row in rows))
-        self.assertEqual([live_index.machine_name(r) for r in rows if live_index.is_machine_row(r)], ["intranet"])
+        self.assertEqual([live_index.machine_name(r) for r in rows if live_index.is_machine_row(r)], ["workbox"])
 
     def test_path_column_keeps_the_distinguishing_tail(self):
-        path = "/home/intranet/intranet/intranet-worktrees/20260902-dfi-expedia-recapture-precheck"
+        path = "/srv/app/app-worktrees/20260902-feature-login-rate-limit"
         fitted = picker.shorten_start(path, 40)
         self.assertEqual(len(fitted), 40)
-        self.assertTrue(fitted.startswith("…") and fitted.endswith("expedia-recapture-precheck"))
+        self.assertTrue(fitted.startswith("…") and fitted.endswith("feature-login-rate-limit"))
 
     def test_busy_machine_cannot_crowd_out_the_others(self):
         self.sync({
-            "intranet": export_payload("Billing", "busy output", panes=30),
-            "personal": export_payload("Game", "quiet output"),
+            "workbox": export_payload("Billing", "busy output", panes=30),
+            "gpubox": export_payload("Game", "quiet output"),
         })
         rows = live_index.grouped_search_index("", 5, machines=True)
-        self.assertIn("personal", [live_index.machine_name(row) for row in rows if live_index.is_machine_row(row)])
+        self.assertIn("gpubox", [live_index.machine_name(row) for row in rows if live_index.is_machine_row(row)])
 
     def test_local_indexing_and_reaping_keep_synced_rows(self):
         self.sync({
-            "intranet": export_payload("Billing", "remote text"),
-            "personal": export_payload("Game", "remote text"),
+            "workbox": export_payload("Billing", "remote text"),
+            "gpubox": export_payload("Game", "remote text"),
         })
         # Synced socket paths do not exist here; the dead-session reaper must not treat them as local.
         live_index.index_session(50, False, False)
         live_index.index_session(50, False, False)
         rows = live_index.search_index("remote", 20, machines=True)
-        self.assertEqual({row["machine_label"] for row in rows}, {"intranet", "personal"})
+        self.assertEqual({row["machine_label"] for row in rows}, {"workbox", "gpubox"})
         self.assertFalse(live_index.search_index("remote", 20))
 
     def test_failed_sync_keeps_last_rows_and_forgotten_machines_are_dropped(self):
         self.sync({
-            "intranet": export_payload("Billing", "remote text"),
-            "personal": export_payload("Game", "remote text"),
+            "workbox": export_payload("Billing", "remote text"),
+            "gpubox": export_payload("Game", "remote text"),
         })
         summary = self.sync({
-            "intranet": machines.MachineError("intranet: timed out after 20s"),
-            "personal": export_payload("Game", "remote text"),
+            "workbox": machines.MachineError("workbox: timed out after 20s"),
+            "gpubox": export_payload("Game", "remote text"),
         })
         status = dict((machine["label"], state) for machine, state in summary)
-        self.assertFalse(status["intranet"]["ok"])
-        self.assertEqual(status["intranet"]["docs"], 2)
-        self.assertTrue(live_index.search_index("machine:intranet remote", 20, machines=True))
+        self.assertFalse(status["workbox"]["ok"])
+        self.assertEqual(status["workbox"]["docs"], 2)
+        self.assertTrue(live_index.search_index("machine:workbox remote", 20, machines=True))
 
-        self.sync({"personal": export_payload("Game", "remote text")}, saved=(PERSONAL,))
-        self.assertFalse(live_index.search_index("machine:intranet remote", 20, machines=True))
-        self.assertNotIn(INTRANET["id"], machines.machine_statuses())
+        self.sync({"gpubox": export_payload("Game", "remote text")}, saved=(GPUBOX,))
+        self.assertFalse(live_index.search_index("machine:workbox remote", 20, machines=True))
+        self.assertNotIn(WORKBOX["id"], machines.machine_statuses())
 
     def test_export_only_contains_this_sessions_own_rows(self):
         live_index.index_session(50, False, False)
         self.sync({
-            "intranet": export_payload("Billing", "remote text"),
-            "personal": export_payload("Game", "remote text"),
+            "workbox": export_payload("Billing", "remote text"),
+            "gpubox": export_payload("Game", "remote text"),
         })
         out = io.StringIO()
         with patch.object(cli, "watcher_is_running", return_value=True), patch.object(
@@ -380,16 +380,16 @@ class MachineTests(unittest.TestCase):
 
     def test_saved_machines_come_from_herdr_and_respect_config(self):
         profiles = [
-            {**INTRANET, "enabled": True},
-            {**PERSONAL, "enabled": True},
+            {**WORKBOX, "enabled": True},
+            {**GPUBOX, "enabled": True},
             {"id": "c" * 32, "label": "old", "target": "old-box", "session": "default", "enabled": False},
         ]
         config = settings.default_config()
-        config["machines"]["exclude"] = ["personal"]
+        config["machines"]["exclude"] = ["gpubox"]
         with patch.object(settings, "CONFIG_CACHE", config), patch.object(
             machines.HerdrCLI, "_run", return_value=json.dumps(profiles)
         ):
-            self.assertEqual([machine["label"] for machine in machines.saved_machines()], ["intranet"])
+            self.assertEqual([machine["label"] for machine in machines.saved_machines()], ["workbox"])
         with patch.object(machines.HerdrCLI, "_run", side_effect=HerdrCLIError("unknown command: machine")):
             with self.assertRaises(machines.MachineError):
                 machines.saved_machines()
@@ -400,10 +400,10 @@ class MachineTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_remote_command_is_non_interactive_and_targets_the_saved_session(self):
-        argv = machines.remote_argv({**PERSONAL, "session": "agents"}, ["export"])
+        argv = machines.remote_argv({**GPUBOX, "session": "agents"}, ["export"])
         self.assertEqual(argv[0], "ssh")
         self.assertIn("BatchMode=yes", argv)
-        self.assertEqual(argv[-3:-1], ["--", "d-personal01"])
+        self.assertEqual(argv[-3:-1], ["--", "gpubox.lan"])
         self.assertNotIn("\n", argv[-1])
         remote = shlex.split(argv[-1])
         self.assertEqual(remote[:2], ["env", "HERDR_SESSION=agents"])
@@ -416,7 +416,7 @@ class MachineTests(unittest.TestCase):
             json.dumps([{"plugin_id": "herdr.omnisearch", "plugin_root": str(ROOT)}]),
             encoding="utf-8",
         )
-        remote = machines.remote_argv(INTRANET, ["export"])[-1]
+        remote = machines.remote_argv(WORKBOX, ["export"])[-1]
         env = {
             key: value
             for key, value in os.environ.items()
