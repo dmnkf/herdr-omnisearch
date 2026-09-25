@@ -99,7 +99,7 @@ class HerdrClientTests(unittest.TestCase):
         self.assertEqual(client.next_event(timeout=0.1)["event"], "pane.scroll_changed")
         self.assertEqual(fake.connect_count, 1)
 
-    def test_overlay_plugin_pane_implicitly_targets_active_pane(self):
+    def test_default_plugin_pane_uses_the_manifest_popup(self):
         client, fake = client_with(
             lambda request: [{"id": request["id"], "result": {"type": "plugin_pane_opened"}}]
         )
@@ -108,6 +108,7 @@ class HerdrClientTests(unittest.TestCase):
         params = fake.requests[0]["params"]
         self.assertEqual(params["plugin_id"], "herdr.omnisearch")
         self.assertEqual(params["entrypoint"], "live")
+        self.assertNotIn("placement", params)
         self.assertNotIn("target_pane_id", params)
 
     def test_split_plugin_pane_uses_injected_target_pane(self):

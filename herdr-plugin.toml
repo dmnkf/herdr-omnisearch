@@ -59,13 +59,17 @@ command = ["bin/herdr-omnisearch", "doctor"]
 [[panes]]
 id = "live"
 title = "OmniSearch"
-placement = "overlay"
+placement = "popup"
+width = "80%"
+height = "80%"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch\" pick --native --no-refresh --background-refresh --stale-seconds 10 --lines 500"]
 
 [[panes]]
 id = "archive"
 title = "Archive Search"
-placement = "overlay"
+placement = "popup"
+width = "80%"
+height = "80%"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch\" archive-pick --native --no-refresh --background-refresh --stale-seconds 300"]
 
 [[events]]

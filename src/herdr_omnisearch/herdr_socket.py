@@ -232,14 +232,16 @@ class HerdrClient:
             {"pane_id": pane_id, "text": text, "keys": ["enter"]},
         )
 
-    def open_plugin_pane(self, entrypoint, placement="overlay", focus=True):
+    def open_plugin_pane(self, entrypoint, placement=None, focus=True):
+        # Without a placement Herdr uses the manifest's popup and its size.
         params = {
             "plugin_id": "herdr.omnisearch",
             "entrypoint": entrypoint,
-            "placement": placement,
             "focus": focus,
             "env": {},
         }
+        if placement:
+            params["placement"] = placement
         pane_id = os.environ.get("HERDR_PANE_ID") or os.environ.get("HERDR_ACTIVE_PANE_ID")
         workspace_id = os.environ.get("HERDR_WORKSPACE_ID") or os.environ.get("HERDR_ACTIVE_WORKSPACE_ID")
         if pane_id and placement in {"split", "zoomed"}:
