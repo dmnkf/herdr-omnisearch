@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.0 - 2026-09-25
+
+- Search OpenCode conversations in ArchiveSearch, next to Codex and Claude
+  Code. OmniSearch lists top-level sessions read-only from OpenCode's storage
+  (its SQLite database, or the JSON files of older releases) and reads each
+  changed session with `opencode export`. Subagent sessions are skipped;
+  archived sessions are included. Resume runs `opencode --session <id>` in
+  the session's directory.
+- Exports are written to a temporary file, because OpenCode cuts off output
+  sent to a pipe at 64 KiB.
+- A session whose export fails keeps its previous catalog entry and is
+  retried on the next refresh. An unreadable OpenCode database leaves
+  existing entries in place. One run stops exporting once `opencode` turns out
+  to be missing or keeps timing out, and spends at most ten minutes on
+  OpenCode, so it cannot block Codex and Claude refreshes.
+- `opencode` is found on PATH or in its usual install locations (`~/.opencode`,
+  `~/.bun`, Homebrew, npm global). `doctor` shows which binary is used, and
+  `[archive.opencode]` accepts `database`, `storage` and `export` overrides.
+- The default `agents` list is now `codex, claude, opencode`. Configs that set
+  `agents` explicitly need `opencode` added.
+
 ## 0.8.1 - 2026-09-25
 
 - Stop long row titles from running into the path column. Titles now end in
