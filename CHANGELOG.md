@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.1 - 2026-09-25
+
+- Stop long row titles from running into the path column. Titles now end in
+  `…` before the column, and long paths keep their final directories, where
+  worktree names usually are.
+- Pin top matches only when hits span more than one machine. Previously a
+  query matching a single machine showed every hit twice.
+- Pane rows under a workspace header no longer repeat the workspace name. The
+  preview header still shows the full path. This also applies to
+  single-machine setups.
+
 ## 0.8.0 - 2026-09-25
 
 - Search every machine at once. When Herdr has saved SSH machines
