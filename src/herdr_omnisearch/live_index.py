@@ -236,56 +236,13 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
         # Replace only this session's rows so concurrent Herdr sessions on the
         # same machine never clobber each other. Rows without a session are
         # pre-upgrade leftovers and are swept by whichever session runs first.
-        stale = (
-            "SELECT stable_id FROM docs WHERE herdr_session = :session OR herdr_session IS NULL"
-        )
-        conn.execute(
-            f"DELETE FROM docs_fts WHERE stable_id IN ({stale})", {"session": session_key}
-        )
-        conn.execute(
-            f"DELETE FROM token_docs WHERE stable_id IN ({stale})", {"session": session_key}
-        )
-        conn.execute(
-            "DELETE FROM docs WHERE herdr_session = :session OR herdr_session IS NULL",
+        replace_docs(
+            conn,
+            "machine_id = '' AND (herdr_session = :session OR herdr_session IS NULL)",
             {"session": session_key},
-        )
-        conn.executemany(
-            """
-            INSERT INTO docs (
-                stable_id, herdr_session, socket_path, workspace_id, workspace_label, tab_id,
-                terminal_id, pane_id, pane_label, agent, agent_session_id, agent_status, cwd,
-                foreground_cwd, chunk_index, content, indexed_at
-            )
-            VALUES (
-                :stable_id, :herdr_session, :socket_path, :workspace_id, :workspace_label, :tab_id,
-                :terminal_id, :pane_id, :pane_label, :agent, :agent_session_id, :agent_status, :cwd,
-                :foreground_cwd, :chunk_index, :content, :indexed_at
-            )
-            """,
             docs,
+            doc_tokens,
         )
-        conn.executemany(
-            "INSERT INTO docs_fts (stable_id, body) VALUES (:stable_id, :body)",
-            docs,
-        )
-        if doc_tokens:
-            unique_terms = sorted({token for token, _stable_id in doc_tokens})
-            conn.executemany(
-                "INSERT OR IGNORE INTO terms (token) VALUES (?)",
-                [(token,) for token in unique_terms],
-            )
-            conn.executemany(
-                "INSERT OR IGNORE INTO token_docs (token, stable_id) VALUES (?, ?)",
-                doc_tokens,
-            )
-            trigram_rows = []
-            for token in unique_terms:
-                for trigram in token_trigrams(token):
-                    trigram_rows.append((trigram, token))
-            conn.executemany(
-                "INSERT OR IGNORE INTO token_trigrams (trigram, token) VALUES (?, ?)",
-                trigram_rows,
-            )
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed_at', ?)",
             (str(now),),
@@ -299,12 +256,58 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
     return len(docs)
 
 
+DOC_COLUMNS = (
+    "stable_id", "herdr_session", "socket_path", "machine_id", "machine_label",
+    "workspace_id", "workspace_label", "tab_id", "terminal_id",
+    "pane_id", "pane_label", "agent", "agent_session_id", "agent_status", "cwd",
+    "foreground_cwd", "chunk_index", "content", "indexed_at",
+)
+
+
+def replace_docs(conn, owner_where: str, owner_params, docs, doc_tokens) -> None:
+    """Swap the rows matching owner_where for docs, keeping FTS and token tables in sync."""
+    stale = f"SELECT stable_id FROM docs WHERE {owner_where}"
+    conn.execute(f"DELETE FROM docs_fts WHERE stable_id IN ({stale})", owner_params)
+    conn.execute(f"DELETE FROM token_docs WHERE stable_id IN ({stale})", owner_params)
+    conn.execute(f"DELETE FROM docs WHERE {owner_where}", owner_params)
+    rows = [
+        {"machine_id": "", "machine_label": None, **doc}
+        for doc in docs
+    ]
+    conn.executemany(
+        f"""
+        INSERT INTO docs ({', '.join(DOC_COLUMNS)})
+        VALUES ({', '.join(':' + column for column in DOC_COLUMNS)})
+        """,
+        rows,
+    )
+    conn.executemany(
+        "INSERT INTO docs_fts (stable_id, body) VALUES (:stable_id, :body)",
+        rows,
+    )
+    if not doc_tokens:
+        return
+    unique_terms = sorted({token for token, _stable_id in doc_tokens})
+    conn.executemany(
+        "INSERT OR IGNORE INTO terms (token) VALUES (?)",
+        [(token,) for token in unique_terms],
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO token_docs (token, stable_id) VALUES (?, ?)",
+        doc_tokens,
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO token_trigrams (trigram, token) VALUES (?, ?)",
+        [(trigram, token) for token in unique_terms for trigram in token_trigrams(token)],
+    )
+
+
 def reap_dead_sessions(conn, current_key: str) -> int:
     """Drop index rows and state files of sessions whose socket is gone."""
     rows = conn.execute(
         """
         SELECT DISTINCT herdr_session, socket_path FROM docs
-        WHERE herdr_session IS NOT NULL AND herdr_session != ?
+        WHERE machine_id = '' AND herdr_session IS NOT NULL AND herdr_session != ?
         """,
         (current_key,),
     ).fetchall()
@@ -314,10 +317,7 @@ def reap_dead_sessions(conn, current_key: str) -> int:
         if not socket_is_alive(row["socket_path"] or "")
     ]
     for key in dead:
-        stale = "SELECT stable_id FROM docs WHERE herdr_session = ?"
-        conn.execute(f"DELETE FROM docs_fts WHERE stable_id IN ({stale})", (key,))
-        conn.execute(f"DELETE FROM token_docs WHERE stable_id IN ({stale})", (key,))
-        conn.execute("DELETE FROM docs WHERE herdr_session = ?", (key,))
+        replace_docs(conn, "machine_id = '' AND herdr_session = :session", {"session": key}, [], [])
         conn.execute("DELETE FROM meta WHERE key = ?", (f"last_indexed_at:{key}",))
         stop_watcher_at(data_dir() / f"watch-{key}.pid")
         for leftover in (
@@ -339,7 +339,7 @@ def maybe_background_index(lines: int, include_empty: bool, include_wrappers: bo
     conn = connect()
     try:
         doc_count = conn.execute(
-            "SELECT COUNT(*) FROM docs WHERE herdr_session = ?", (session_key,)
+            "SELECT COUNT(*) FROM docs WHERE machine_id = '' AND herdr_session = ?", (session_key,)
         ).fetchone()[0]
         last = conn.execute(
             "SELECT value FROM meta WHERE key = ?", (f"last_indexed_at:{session_key}",)
@@ -363,7 +363,26 @@ def maybe_background_index(lines: int, include_empty: bool, include_wrappers: bo
     spawn_locked_background(cmd, lock_fd)
 
 
-def search_index(query: str, limit: int, *, status=None, agent=None, snippets=True, all_sessions=False):
+def scope_clause(all_sessions: bool, machines: bool, params) -> str:
+    """Rows visible to a search: this session, all local sessions, and optionally synced machines."""
+    if all_sessions:
+        return "1 = 1" if machines else "d.machine_id = ''"
+    params["herdr_session"] = herdr_session_key()
+    local = "(d.machine_id = '' AND d.herdr_session = :herdr_session)"
+    return f"(d.machine_id <> '' OR {local})" if machines else local
+
+
+def search_index(
+    query: str,
+    limit: int,
+    *,
+    status=None,
+    agent=None,
+    snippets=True,
+    all_sessions=False,
+    machines=False,
+    machine_id=None,
+):
     query, filters = parse_filters(query)
     if status:
         filters["status"] = status
@@ -371,11 +390,11 @@ def search_index(query: str, limit: int, *, status=None, agent=None, snippets=Tr
         filters["agent"] = agent
     query_terms = tokens(query)
 
-    clauses = []
     params = {}
-    if not all_sessions:
-        clauses.append("d.herdr_session = :herdr_session")
-        params["herdr_session"] = herdr_session_key()
+    clauses = [scope_clause(all_sessions, machines, params)]
+    if machine_id is not None:
+        clauses.append("d.machine_id = :machine_id")
+        params["machine_id"] = machine_id
     if filters.get("status"):
         clauses.append("COALESCE(d.agent_status, '') = :status")
         params["status"] = filters["status"]
@@ -388,6 +407,9 @@ def search_index(query: str, limit: int, *, status=None, agent=None, snippets=Tr
     if filters.get("cwd"):
         clauses.append("COALESCE(d.cwd, '') LIKE :cwd")
         params["cwd"] = f"%{filters['cwd']}%"
+    if filters.get("machine"):
+        clauses.append("COALESCE(NULLIF(d.machine_label, ''), 'Local') LIKE :machine")
+        params["machine"] = f"%{filters['machine']}%"
 
     conn = connect()
     fts = fts_query(query)
@@ -537,11 +559,15 @@ def is_workspace_row(row) -> bool:
     return (row.get("pane_id") or "").startswith("workspace:")
 
 
-def fetch_workspace_rows(workspace_ids):
-    workspace_ids = [workspace_id for workspace_id in dict.fromkeys(workspace_ids) if workspace_id]
-    if not workspace_ids:
+def workspace_key(row):
+    return (row.get("machine_id") or "", row.get("herdr_session") or "", row.get("workspace_id") or "")
+
+
+def fetch_workspace_rows(keys):
+    keys = [key for key in dict.fromkeys(keys) if key[2]]
+    if not keys:
         return {}
-    placeholders = ",".join("?" for _ in workspace_ids)
+    placeholders = ",".join("?" for _ in keys)
     conn = connect()
     try:
         rows = conn.execute(
@@ -550,66 +576,159 @@ def fetch_workspace_rows(workspace_ids):
             FROM docs
             WHERE pane_id IN ({placeholders})
             """,
-            tuple(f"workspace:{workspace_id}" for workspace_id in workspace_ids),
+            tuple(f"workspace:{key[2]}" for key in keys),
         ).fetchall()
     finally:
         conn.close()
-    return {row["workspace_id"]: dict(row) for row in rows}
+    wanted = set(keys)
+    found = {}
+    for row in rows:
+        row = dict(row)
+        key = workspace_key(row)
+        if key in wanted:
+            found[key] = row
+    return found
 
 
-def decorate_live_tree(rows):
+def machine_name(row) -> str:
+    return row.get("machine_label") or "Local"
+
+
+def machine_header(machine_id: str, rows):
+    first = rows[0]
+    workspaces = {workspace_key(row) for row in rows}
+    return {
+        "stable_id": f"machine:{machine_id or 'local'}",
+        "machine_id": machine_id,
+        "machine_label": first.get("machine_label"),
+        "pane_id": f"machine:{machine_id or 'local'}",
+        "workspace_id": "",
+        "workspace_label": machine_name(first),
+        "agent_status": "machine",
+        "cwd": "",
+        "content": "",
+        "match_count": len(workspaces),
+    }
+
+
+def is_machine_row(row) -> bool:
+    return (row.get("pane_id") or "").startswith("machine:")
+
+
+def decorate_live_tree(rows, *, machine_level=False):
     if not rows:
         return rows
     workspace_order = []
     workspace_rows = {}
     child_rows = {}
     for row in rows:
-        workspace_id = row.get("workspace_id") or ""
-        if workspace_id and workspace_id not in workspace_order:
-            workspace_order.append(workspace_id)
+        key = workspace_key(row)
+        if key[2] and key not in workspace_order:
+            workspace_order.append(key)
         if is_workspace_row(row):
-            workspace_rows[workspace_id] = row
+            workspace_rows[key] = row
             continue
-        child_rows.setdefault(workspace_id, []).append(row)
+        child_rows.setdefault(key, []).append(row)
 
     missing_headers = [
-        workspace_id
-        for workspace_id in workspace_order
-        if workspace_id and workspace_id not in workspace_rows and child_rows.get(workspace_id)
+        key
+        for key in workspace_order
+        if key not in workspace_rows and child_rows.get(key)
     ]
     workspace_rows.update(fetch_workspace_rows(missing_headers))
 
-    decorated = []
-    for workspace_id in workspace_order:
-        header = workspace_rows.get(workspace_id)
-        children = child_rows.get(workspace_id, [])
+    depth = 1 if machine_level else 0
+    groups = {}
+    machine_order = []
+    for key in workspace_order:
+        header = workspace_rows.get(key)
+        children = child_rows.get(key, [])
+        block = []
         if header:
             header = dict(header)
-            header["_tree_depth"] = 0
-            decorated.append(header)
+            header["_tree_depth"] = depth
+            block.append(header)
         for child in children:
             child = dict(child)
-            child["_tree_depth"] = 1
-            decorated.append(child)
+            child["_tree_depth"] = depth + 1
+            block.append(child)
+        if not block:
+            continue
+        if key[0] not in groups:
+            machine_order.append(key[0])
+            groups[key[0]] = []
+        groups[key[0]].extend(block)
+
+    decorated = []
+    if not any(float(row.get("rank") or 0) for row in rows):
+        machine_order.sort(key=lambda machine_id: (machine_id != "", machine_name(groups[machine_id][0]).lower()))
+    for machine_id in machine_order:
+        block = groups[machine_id]
+        if machine_level:
+            header = machine_header(machine_id, block)
+            header["_tree_depth"] = 0
+            decorated.append(header)
+        decorated.extend(block)
     return decorated
 
 
-def grouped_search_index(query: str, limit: int, *, status=None, agent=None, snippets=True, all_sessions=False):
-    rows = search_index(
-        query, max(limit * 8, 120), status=status, agent=agent, snippets=snippets, all_sessions=all_sessions
-    )
+TOP_MATCHES = 5
+
+
+def synced_machine_ids():
+    conn = connect()
+    try:
+        return [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT machine_id FROM docs WHERE machine_id <> ''
+                GROUP BY machine_id ORDER BY MIN(machine_label)
+                """
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def grouped_search_index(
+    query: str,
+    limit: int,
+    *,
+    status=None,
+    agent=None,
+    snippets=True,
+    all_sessions=False,
+    machines=False,
+):
+    # Each machine gets its own limit so a busy host cannot crowd the others out.
+    owners = synced_machine_ids() if machines else []
+    rows = []
+    for owner in ["", *owners] if owners else [None]:
+        rows.extend(
+            search_index(
+                query,
+                max(limit * 8, 120),
+                status=status,
+                agent=agent,
+                snippets=snippets,
+                all_sessions=all_sessions,
+                machines=machines,
+                machine_id=owner,
+            )
+        )
     grouped = {}
     for row in rows:
-        pane_id = row["pane_id"]
-        current = grouped.get(pane_id)
+        pane_key = (row.get("machine_id") or "", row.get("herdr_session") or "", row["pane_id"])
+        current = grouped.get(pane_key)
         if current is None:
             row["match_count"] = 1
-            grouped[pane_id] = row
+            grouped[pane_key] = row
             continue
         current["match_count"] += 1
         if float(row.get("rank") or 0) < float(current.get("rank") or 0):
             row["match_count"] = current["match_count"]
-            grouped[pane_id] = row
+            grouped[pane_key] = row
 
     def sort_key(row):
         return (
@@ -620,7 +739,35 @@ def grouped_search_index(query: str, limit: int, *, status=None, agent=None, sni
             row.get("pane_label") or "",
         )
 
-    return decorate_live_tree(sorted(grouped.values(), key=sort_key)[:limit])
+    per_machine = {}
+    ranked = []
+    for row in sorted(grouped.values(), key=sort_key):
+        owner = row.get("machine_id") or ""
+        if per_machine.get(owner, 0) >= limit:
+            continue
+        per_machine[owner] = per_machine.get(owner, 0) + 1
+        ranked.append(row)
+    spans_machines = len({row.get("machine_id") or "" for row in ranked}) > 1
+    machine_level = machines and (spans_machines or any(row.get("machine_id") for row in ranked))
+    tree = decorate_live_tree(ranked, machine_level=machine_level)
+    if not (machine_level and query.strip()):
+        return tree
+    return top_matches(ranked) + tree
+
+
+def top_matches(ranked):
+    """Best pane hits across every machine, pinned above the per-machine tree."""
+    top = []
+    for row in ranked:
+        if is_workspace_row(row):
+            continue
+        row = dict(row)
+        row["_top_match"] = True
+        row["_tree_depth"] = 0
+        top.append(row)
+        if len(top) >= TOP_MATCHES:
+            break
+    return top
 
 
 def derive_space_label_from_cwd(cwd: str) -> str:
@@ -667,7 +814,8 @@ def live_space_label_for_session(agent: str, session_id: str, conn=None, cache=N
             """
             SELECT workspace_label, COUNT(*) AS count
             FROM docs
-            WHERE COALESCE(agent, '') = ?
+            WHERE machine_id = ''
+              AND COALESCE(agent, '') = ?
               AND COALESCE(agent_session_id, '') = ?
               AND COALESCE(workspace_label, '') <> ''
             GROUP BY workspace_label
@@ -701,7 +849,8 @@ def live_space_label_for_cwd(cwd: str, conn=None, cache=None):
             """
             SELECT workspace_label, COUNT(*) AS count
             FROM docs
-            WHERE cwd = ?
+            WHERE machine_id = ''
+              AND cwd = ?
               AND COALESCE(workspace_label, '') <> ''
             GROUP BY workspace_label
             ORDER BY count DESC, workspace_label ASC
@@ -725,7 +874,8 @@ def live_space_labels_by_session(conn):
         """
         SELECT agent, agent_session_id, workspace_label, COUNT(*) AS count
         FROM docs
-        WHERE COALESCE(agent, '') <> ''
+        WHERE machine_id = ''
+          AND COALESCE(agent, '') <> ''
           AND COALESCE(agent_session_id, '') <> ''
           AND COALESCE(workspace_label, '') <> ''
         GROUP BY agent, agent_session_id, workspace_label
@@ -745,7 +895,8 @@ def live_space_labels_by_cwd(conn):
         """
         SELECT cwd, workspace_label, COUNT(*) AS count
         FROM docs
-        WHERE COALESCE(cwd, '') <> ''
+        WHERE machine_id = ''
+          AND COALESCE(cwd, '') <> ''
           AND COALESCE(workspace_label, '') <> ''
         GROUP BY cwd, workspace_label
         ORDER BY cwd ASC, count DESC, workspace_label ASC

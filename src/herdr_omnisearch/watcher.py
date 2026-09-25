@@ -14,6 +14,7 @@ from .storage import (
     watcher_pid_path,
 )
 from .live_index import index_session
+from .machines import machines_config, maybe_background_sync
 
 def watcher_subscriptions(snapshot):
     subscriptions = [
@@ -67,6 +68,7 @@ def watch_live_index(lines: int, debounce: float) -> int:
         print(f"watcher already running: {read_watcher_pid()}")
         return 0
     retry_delay = 1.0
+    sync_due = 0.0
     try:
         while True:
             try:
@@ -84,6 +86,10 @@ def watch_live_index(lines: int, debounce: float) -> int:
                         except HerdrTimeout:
                             event = None
                         now = time.monotonic()
+                        if now >= sync_due:
+                            sync_seconds = machines_config()["sync_seconds"]
+                            maybe_background_sync(sync_seconds, discover=True)
+                            sync_due = now + sync_seconds
                         if event:
                             if refresh_due is None:
                                 refresh_due = now + debounce

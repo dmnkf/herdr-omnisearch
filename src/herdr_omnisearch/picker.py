@@ -19,9 +19,12 @@ from .live_index import (
     fuzzy_snippet,
     grouped_search_index,
     index_session,
+    is_machine_row,
     is_workspace_row,
+    machine_name,
     maybe_background_index,
 )
+from .machines import machine_statuses, maybe_background_sync, machines_config
 from .archive_catalog import (
     archive_catalog_index,
     archive_catalog_max_window_offset,
@@ -31,8 +34,8 @@ from .archive_catalog import (
     maybe_background_archive_catalog_index,
     require_archive_enabled,
 )
-from .render import display_status, format_result, tree_indent
-from .navigate import focus_archive_catalog_result, focus_archive_row, focus_result, row_client
+from .render import display_status, format_result, machine_prefix, tree_indent
+from .navigate import focus_archive_catalog_result, focus_archive_row, focus_result, focus_row, row_client
 
 ARCHIVE_PICKER_DEBOUNCE_MS = 100
 
@@ -47,9 +50,15 @@ def pick(args) -> int:
             print(f"indexed {count} chunks", file=sys.stderr)
     elif args.background_refresh:
         maybe_background_index(args.lines, args.include_empty, args.include_wrappers, args.stale_seconds)
+    if merges_machines(args) and (args.refresh or args.background_refresh):
+        maybe_background_sync(min(args.stale_seconds, machines_config()["sync_seconds"]))
     if args.native or (not args.fzf and sys.stdin.isatty() and sys.stdout.isatty()):
         return curses.wrapper(lambda stdscr: curses_picker(stdscr, args))
     return fzf_picker(args)
+
+
+def merges_machines(args) -> bool:
+    return not getattr(args, "local_only", False) and machines_config()["enabled"]
 
 
 def archive_pick(args) -> int:
@@ -81,7 +90,7 @@ def archive_pick(args) -> int:
 
 def fzf_picker(args) -> int:
     query = " ".join(args.query)
-    rows = picker_rows(args, query)
+    rows = [row for row in picker_rows(args, query) if not is_machine_row(row)]
     if not rows:
         print("No OmniSearch matches.", file=sys.stderr)
         return 1
@@ -143,6 +152,8 @@ def addnstr_safe(stdscr, y, x, text, width, attr=0):
 def status_attr(status):
     if status == "archive":
         return curses.color_pair(1)
+    if status == "machine":
+        return curses.color_pair(8) | curses.A_BOLD
     if status == "workspace":
         return curses.color_pair(1) | curses.A_BOLD
     if status == "working":
@@ -165,6 +176,7 @@ def init_curses_colors():
         curses.init_pair(5, curses.COLOR_YELLOW, -1)
         curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_WHITE)
         curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+        curses.init_pair(8, curses.COLOR_MAGENTA, -1)
     except curses.error:
         pass
 
@@ -188,18 +200,23 @@ def row_title(row):
         matches = row.get("match_count")
         count = f" x{matches}" if matches and int(matches) > 1 else ""
         return f"[archive] {space} / {agent} / {summary} / {date}{count}"
+    if is_machine_row(row):
+        spaces = row.get("match_count") or 0
+        detail = row.get("_machine_detail") or ""
+        return f"[machine] {machine_name(row)} · {spaces} space{'s' if spaces != 1 else ''}{detail}"
     if is_workspace_row(row):
         workspace = row.get("workspace_label") or row.get("workspace_id")
         matches = row.get("match_count")
         count = f" x{matches}" if matches and int(matches) > 1 else ""
-        return f"[workspace] {workspace}{count}"
+        return f"{tree_indent(row)}[workspace] {workspace}{count}"
     label = row.get("pane_label") or row.get("pane_id")
     agent = row.get("agent") or "shell"
     status = display_status(row)
     workspace = row.get("workspace_label") or row.get("workspace_id")
     matches = row.get("match_count")
     count = f" x{matches}" if matches and int(matches) > 1 else ""
-    return f"{tree_indent(row)}[{status}] {workspace} / {agent} / {label}{count}"
+    marker = "★ " if row.get("_top_match") else ""
+    return f"{tree_indent(row)}{marker}[{status}] {machine_prefix(row)}{workspace} / {agent} / {label}{count}"
 
 
 def query_terms_for_display(query: str):
@@ -404,14 +421,31 @@ def picker_rows(args, query, *, snippets=False):
             window_days=None if searching else args.window_days,
             window_offset=None if searching else args.window_offset,
         )
-    return grouped_search_index(
+    rows = grouped_search_index(
         query,
         args.limit,
         status=getattr(args, "status", None),
         agent=args.agent,
         snippets=snippets,
         all_sessions=getattr(args, "all_sessions", False),
+        machines=merges_machines(args),
     )
+    if any(is_machine_row(row) for row in rows):
+        annotate_machine_rows(rows)
+    return rows
+
+
+def annotate_machine_rows(rows):
+    statuses = machine_statuses()
+    for row in rows:
+        if not is_machine_row(row) or not row.get("machine_id"):
+            continue
+        status = statuses.get(row["machine_id"]) or {}
+        if status and not status.get("ok"):
+            row["_machine_detail"] = " · offline, showing last sync"
+        elif status.get("error"):
+            row["_machine_detail"] = " · stale, remote index failed"
+        row["content"] = status.get("error") or ""
 
 
 def picker_focus(args, result):
@@ -421,6 +455,8 @@ def picker_focus(args, result):
         if row is not None and row.get("_archive_catalog"):
             return focus_archive_row(row)
         return focus_archive_catalog_result(stable_id)
+    if row is not None and row.get("machine_id"):
+        return focus_row(row)
     return focus_result(stable_id)
 
 
@@ -459,7 +495,7 @@ def picker_title(args, query=""):
 def picker_help(args):
     if getattr(args, "archive", False):
         return "insert: type search | Esc normal | left older | right newer | Enter resume | q quit"
-    return "insert: type search | Esc normal | normal: j/k gg G Enter focus a/: actions q quit"
+    return "insert: type search | Esc normal | normal: j/k gg G Enter focus a/: actions q quit | machine:name"
 
 
 def clipboard_copy(text: str):
@@ -504,10 +540,15 @@ def clipboard_copy(text: str):
 def action_specs(args, row):
     archive = row.get("source") == "archive" or getattr(args, "archive", False)
     specs = []
+    if is_machine_row(row):
+        return []
     focus_label = "focus existing or resume archive session" if archive else "focus exact selected row"
+    if row.get("machine_id"):
+        focus_label = f"focus on {machine_name(row)}, then select that machine"
     specs.append({"name": "focus", "label": focus_label})
 
-    if not archive:
+    # Renames target the local socket; synced rows belong to another server.
+    if not archive and not row.get("machine_id"):
         if row.get("workspace_id"):
             specs.append({"name": "rename-workspace", "label": "rename workspace"})
         if row.get("pane_id") and not is_workspace_row(row):
@@ -768,7 +809,9 @@ def curses_picker(stdscr, args) -> int:
                 continue
 
         if key in ("\n", "\r"):
-            if rows:
+            if rows and is_machine_row(rows[selected]):
+                message = "Machine headers group results; pick a row below"
+            elif rows:
                 return picker_focus(args, rows[selected])
             continue
 

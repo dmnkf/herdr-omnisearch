@@ -263,10 +263,13 @@ def init_schema(conn):
     ensure_column(conn, "docs", "agent_session_id", "TEXT")
     ensure_column(conn, "docs", "herdr_session", "TEXT")
     ensure_column(conn, "docs", "socket_path", "TEXT")
+    ensure_column(conn, "docs", "machine_id", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "docs", "machine_label", "TEXT")
     conn.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_docs_agent_session_id ON docs(agent_session_id);
         CREATE INDEX IF NOT EXISTS idx_docs_herdr_session ON docs(herdr_session);
+        CREATE INDEX IF NOT EXISTS idx_docs_machine_id ON docs(machine_id);
         """
     )
 

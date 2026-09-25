@@ -223,6 +223,9 @@ class HerdrClient:
             {"cwd": cwd, "label": label, "focus": focus, "env": {}},
         )
 
+    def show_notification(self, title, body=None):
+        return self.request("notification.show", {"title": title, "body": body})
+
     def send_input(self, pane_id, text):
         return self.request(
             "pane.send_input",

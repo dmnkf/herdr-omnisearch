@@ -5,10 +5,11 @@ from pathlib import Path
 
 from .herdr_cli import HerdrCLI, HerdrCLIError
 from .herdr_socket import HerdrClient, HerdrError, resolve_socket_path
+from .machines import MachineError, focus_remote_row
 from .settings import app_config, herdr_bin
 from .storage import connect
 from .textmatch import shorten
-from .live_index import is_workspace_row, merge_agent_records, pane_agent
+from .live_index import is_workspace_row, machine_name, merge_agent_records, pane_agent
 from .archive_catalog import archive_catalog_result, archive_space_label, is_archive_placeholder_label
 
 def focused_pane_id(client=None) -> str:
@@ -70,12 +71,45 @@ def focus_result(stable_id: str) -> int:
     if not row:
         print(f"unknown result id: {stable_id}", file=sys.stderr)
         return 2
-    row = dict(row)
+    return focus_row(dict(row))
+
+
+def focus_row(row) -> int:
+    if row.get("machine_id"):
+        return focus_machine_row(row)
     if is_workspace_row(row):
         return 0 if focus_workspace_tab(row) else 1
     if focus_exact_pane(row):
         return 0
-    print(f"could not focus exact pane: {row.get('pane_id') or stable_id}", file=sys.stderr)
+    print(f"could not focus exact pane: {row.get('pane_id') or row.get('stable_id')}", file=sys.stderr)
+    return 1
+
+
+def focus_machine_row(row) -> int:
+    try:
+        focus_remote_row(row)
+    except MachineError as exc:
+        print(f"could not focus on {machine_name(row)}: {exc}", file=sys.stderr)
+        return 1
+    # Herdr gives other processes no way to switch the client's machine, so say where to go.
+    try:
+        HerdrClient().show_notification(
+            f"OmniSearch: {machine_name(row)} › {row.get('workspace_label') or row.get('workspace_id')}",
+            f"Ready on {machine_name(row)}. Select it in the sidebar or with prefix+w to land there.",
+        )
+    except HerdrError:
+        pass
+    return 0
+
+
+def focus_target(workspace_id: str, tab_id: str, pane_id: str, agent: str, workspace_only: bool) -> int:
+    row = {"workspace_id": workspace_id, "tab_id": tab_id, "pane_id": pane_id, "agent": agent}
+    if workspace_only or not pane_id:
+        return 0 if focus_workspace_tab(row) else 1
+    focus_workspace_tab(row)
+    if focus_exact_pane(row):
+        return 0
+    print(f"could not focus exact pane: {pane_id}", file=sys.stderr)
     return 1
 
 

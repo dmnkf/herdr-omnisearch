@@ -4,13 +4,15 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from . import __version__
 from .herdr_cli import HerdrCLI
-from .herdr_socket import HerdrClient, resolve_socket_path
+from .herdr_socket import HerdrClient, resolve_socket_path, socket_is_alive
 from .settings import (
     DEFAULT_LIMIT,
     DEFAULT_LINES,
@@ -33,6 +35,16 @@ from .storage import (
 )
 from .textmatch import clean_text
 from .live_index import grouped_search_index, index_session, maybe_background_index
+from .machines import (
+    EXPORT_FORMAT,
+    MachineError,
+    machine_statuses,
+    machines_config,
+    saved_machines,
+    sync_lock_path,
+    sync_machines,
+)
+from .storage import try_exclusive_lock
 from .archive_catalog import (
     archive_catalog_index,
     archive_catalog_result,
@@ -43,7 +55,7 @@ from .archive_catalog import (
     maybe_background_archive_catalog_index,
 )
 from .render import display_status, format_result
-from .navigate import focus_archive_catalog_result, focus_result
+from .navigate import focus_archive_catalog_result, focus_result, focus_target
 from .picker import archive_pick, pick
 from .watcher import watch_live_index, watcher_is_running
 
@@ -130,6 +142,7 @@ def cmd_search(args) -> int:
         status=args.status,
         agent=args.agent,
         all_sessions=args.all_sessions,
+        machines=not args.local_only and machines_config()["enabled"],
     )
     if args.json:
         print(json.dumps(rows, indent=2))
@@ -137,6 +150,131 @@ def cmd_search(args) -> int:
     for row in rows:
         print(format_result(row, multiline=True))
         print()
+    return 0
+
+
+EXPORT_STALE_SECONDS = 10
+
+
+def cmd_export(_args) -> int:
+    """Print this session's own live rows for a machine that merges indexes."""
+    session_key = herdr_session_key()
+    conn = connect()
+    try:
+        last = conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (f"last_indexed_at:{session_key}",)
+        ).fetchone()
+    finally:
+        conn.close()
+    last_indexed = int(last[0]) if last else 0
+    error = ""
+    if not socket_is_alive(resolve_socket_path()):
+        # A running watcher skips reindexing, so check the server itself.
+        error = f"Herdr server is not running at {resolve_socket_path()}"
+    elif not watcher_is_running() and time.time() - last_indexed > EXPORT_STALE_SECONDS:
+        try:
+            index_session(DEFAULT_LINES, False, False)
+        except Exception as exc:  # stale rows beat no rows for the merging machine
+            error = str(exc)
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT d.*, f.body AS body
+            FROM docs d
+            LEFT JOIN docs_fts f ON f.stable_id = d.stable_id
+            WHERE d.machine_id = '' AND d.herdr_session = ?
+            """,
+            (session_key,),
+        ).fetchall()
+        last = conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (f"last_indexed_at:{session_key}",)
+        ).fetchone()
+    finally:
+        conn.close()
+    skip = {"machine_id", "machine_label"}
+    payload = {
+        "format": EXPORT_FORMAT,
+        "version": __version__,
+        "hostname": socket.gethostname(),
+        "last_indexed_at": int(last[0]) if last else 0,
+        "error": error,
+        "docs": [{key: row[key] for key in row.keys() if key not in skip} for row in rows],
+    }
+    json.dump(payload, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    return 0
+
+
+def cmd_sync_machines(args) -> int:
+    # Background syncs inherit the lock from their spawner; manual runs take it here.
+    lock_fd = None if args.locked else try_exclusive_lock(sync_lock_path())
+    if not args.locked and lock_fd is None:
+        print("machine sync already running")
+        return 0
+    try:
+        summary = sync_machines()
+    except MachineError as exc:
+        print(f"machine sync skipped: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+    if not summary:
+        print("no saved Herdr machines to sync")
+        return 0
+    failed = 0
+    for machine, status in summary:
+        if status["ok"]:
+            line = f"{machine['label']}: {status['docs']} chunks (omnisearch {status.get('remote_version') or '?'})"
+            if status.get("error"):
+                line += f", stale: {status['error']}"
+            print(line)
+        else:
+            failed += 1
+            print(f"{machine['label']}: {status['error']}", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def format_age(epoch: int) -> str:
+    if not epoch:
+        return "never"
+    seconds = max(0, int(time.time()) - int(epoch))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit} ago"
+    return f"{seconds}s ago"
+
+
+def machine_state(status) -> str:
+    if not status:
+        return "pending"
+    if not status.get("ok"):
+        return "offline"
+    return "stale" if status.get("error") else "ok"
+
+
+def cmd_machines(_args) -> int:
+    try:
+        machines = saved_machines()
+    except MachineError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if not machines:
+        print("no saved Herdr machines; add one with `herdr machine add <ssh-target> --label <name>`")
+        return 0
+    statuses = machine_statuses()
+    for machine in machines:
+        status = statuses.get(machine["id"], {})
+        state = machine_state(status)
+        line = (
+            f"{machine['label']:<16} {machine['target']:<24} {state:<8} "
+            f"{status.get('docs', 0):>5} chunks  synced {format_age(status.get('synced_at', 0))}"
+        )
+        if status.get("remote_version"):
+            line += f"  omnisearch {status['remote_version']} on {status.get('hostname') or '?'}"
+        print(line)
+        if status.get("error"):
+            print(f"  {status['error']}")
     return 0
 
 
@@ -186,6 +324,10 @@ def cmd_archive_search(args) -> int:
 
 def cmd_focus(args) -> int:
     return focus_result(args.stable_id)
+
+
+def cmd_focus_target(args) -> int:
+    return focus_target(args.workspace_id, args.tab_id, args.pane_id, args.agent, args.workspace_only)
 
 
 def cmd_archive_resume(args) -> int:
@@ -267,6 +409,23 @@ def cmd_doctor(_args) -> int:
         )
     pid = read_watcher_pid()
     print(f"watcher: {'running ' + str(pid) if watcher_is_running() else 'stopped'}")
+    if not machines_config()["enabled"]:
+        print("machines: sync disabled")
+        return 0
+    try:
+        machines = saved_machines()
+    except MachineError as exc:
+        print(f"machines: {exc}")
+        return 0
+    print(f"machines: {len(machines)} saved")
+    statuses = machine_statuses()
+    for machine in machines:
+        status = statuses.get(machine["id"], {})
+        detail = f" {status['error']}" if status.get("error") else ""
+        print(
+            f"machine_{machine['label']}: {machine_state(status)}{detail} "
+            f"({status.get('docs', 0)} chunks, synced {format_age(status.get('synced_at', 0))})"
+        )
     return 0
 
 
@@ -291,6 +450,7 @@ def cmd_purge(args) -> int:
         Path(str(catalog_path) + "-wal"),
         Path(str(catalog_path) + "-shm"),
         data_dir() / "archive-catalog.lock",
+        data_dir() / "machines-sync.lock",
     ]
     for pattern in ("watch*.pid", "watch*.log", "index*.lock", "migrate.lock"):
         candidates.extend(sorted(data_dir().glob(pattern)))
@@ -323,8 +483,19 @@ def main(argv=None) -> int:
     p.add_argument("--status")
     p.add_argument("--agent")
     p.add_argument("--all-sessions", action="store_true", help="include rows from every Herdr session")
+    p.add_argument("--local-only", action="store_true", help="leave out rows synced from saved machines")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("export", help="print this session's live rows as JSON for machine sync")
+    p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("sync-machines", help="pull live rows from Herdr's saved SSH machines")
+    p.add_argument("--locked", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_sync_machines)
+
+    p = sub.add_parser("machines", help="show saved machines and their sync state")
+    p.set_defaults(func=cmd_machines)
 
     p = sub.add_parser(
         "archive-catalog-index",
@@ -361,6 +532,7 @@ def main(argv=None) -> int:
     p.add_argument("--include-empty", action="store_true")
     p.add_argument("--include-wrappers", action="store_true")
     p.add_argument("--all-sessions", action="store_true", help="include rows from every Herdr session")
+    p.add_argument("--local-only", action="store_true", help="leave out rows synced from saved machines")
     picker = p.add_mutually_exclusive_group()
     picker.add_argument("--native", action="store_true", help="force the native terminal picker")
     picker.add_argument("--fzf", action="store_true", help="use fzf instead of the native picker")
@@ -387,6 +559,14 @@ def main(argv=None) -> int:
     p = sub.add_parser("focus", help="focus a stable search result id")
     p.add_argument("stable_id")
     p.set_defaults(func=cmd_focus)
+
+    p = sub.add_parser("focus-target", help=argparse.SUPPRESS)
+    p.add_argument("--workspace-id", required=True)
+    p.add_argument("--tab-id", default="")
+    p.add_argument("--pane-id", default="")
+    p.add_argument("--agent", default="")
+    p.add_argument("--workspace-only", action="store_true")
+    p.set_defaults(func=cmd_focus_target)
 
     p = sub.add_parser("archive-resume", help="resume an archived session result in Herdr")
     p.add_argument("stable_id")

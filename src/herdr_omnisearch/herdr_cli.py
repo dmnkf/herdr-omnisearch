@@ -57,6 +57,16 @@ class HerdrCLI:
             raise HerdrCLIError("agent list response has no agents array")
         return agents
 
+    def machine_list(self):
+        output = self._run(["machine", "list", "--json"], timeout=10)
+        try:
+            profiles = json.loads(output or "[]")
+        except json.JSONDecodeError as exc:
+            raise HerdrCLIError(f"machine list returned invalid JSON: {output[:500]!r}") from exc
+        if not isinstance(profiles, list):
+            raise HerdrCLIError("machine list response is not an array")
+        return profiles
+
     def agent_read(self, target, lines):
         return self._run(
             [

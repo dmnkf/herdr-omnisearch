@@ -260,7 +260,7 @@ def parse_filters(query: str):
             filters[name] = values[-1]
             query = re.sub(rf"\b{name}:[A-Za-z0-9_.:/@+-]+", " ", query)
 
-    for key in ("status", "agent", "workspace", "cwd"):
+    for key in ("status", "agent", "workspace", "cwd", "machine"):
         pull(key)
     return " ".join(query.split()), filters
 

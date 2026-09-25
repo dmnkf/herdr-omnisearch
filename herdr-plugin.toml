@@ -2,7 +2,7 @@ id = "herdr.omnisearch"
 name = "Herdr OmniSearch"
 version = "0.7.0"
 min_herdr_version = "0.7.5"
-description = "Fast local search across live Herdr panes and archived agent sessions"
+description = "Fast search across live Herdr panes on every connected machine and archived agent sessions"
 platforms = ["linux", "macos"]
 
 [[startup]]
@@ -30,6 +30,11 @@ command = ["bin/herdr-omnisearch", "index"]
 id = "refresh-archive"
 title = "Refresh archive catalog"
 command = ["bin/herdr-omnisearch", "archive-catalog-index"]
+
+[[actions]]
+id = "sync-machines"
+title = "Sync live results from saved SSH machines"
+command = ["bin/herdr-omnisearch", "sync-machines"]
 
 [[actions]]
 id = "watch-start"

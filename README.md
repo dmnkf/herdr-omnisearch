@@ -233,6 +233,73 @@ Use `config.example.ini` as a starting point. Runtime overrides:
 - `HERDR_OMNISEARCH_COMMAND`: command used for background indexing and previews
 - `HERDR_SOCKET_PATH`: Herdr socket; named sessions can use `HERDR_SESSION`
 
+## Multiple machines
+
+When Herdr has saved SSH machines, OmniSearch searches all of them from one
+picker:
+
+```bash
+herdr machine add d-intranet01 --label intranet
+herdr-omnisearch sync-machines
+herdr-omnisearch machines
+```
+
+```text
+★ [idle] intranet › Billing / claude / w4:p1        top hits across machines
+★ [idle] personal › rsi-game / codex / w5:p8
+[machine] Local · 1 space
+  [workspace] Laptop
+    [idle] Laptop / codex / w1:p1
+[machine] intranet · 9 spaces
+  [workspace] Billing
+    [idle] Billing / claude / w4:p1
+```
+
+How it works:
+
+- Every machine runs OmniSearch and indexes only its own panes, using its own
+  config.
+- The machine with saved machines pulls each remote's
+  `herdr-omnisearch export` over non-interactive SSH and stores those rows
+  under a machine namespace. `export` only refreshes the remote's own index,
+  and only when its watcher is not running. Nothing else is written there.
+- Each remote needs OmniSearch 0.8.0 installed as a Herdr plugin and
+  `python3`. The remote command finds the plugin through Herdr's plugin
+  registry, so it does not depend on the SSH `PATH`.
+- The watcher refreshes machines every `sync_seconds`, and opening the picker
+  refreshes them when stale. An unreachable machine keeps its last results and
+  is marked offline. A remote whose Herdr server cannot be read is marked
+  stale.
+- The watcher checks for newly saved machines every five minutes. Run
+  `sync-machines` to include a new machine right away.
+- A query pins the best five hits across all machines above the tree. Each
+  machine gets its own result limit. Narrow a query with `machine:intranet`,
+  or use `--local-only`.
+
+Selecting a result on another machine focuses that exact pane on its server.
+Herdr gives other processes no way to switch the client's selected machine,
+so OmniSearch shows a toast. Select the machine in the sidebar, or with
+`prefix+w`, and you land on the pane. Renames only apply to local rows.
+
+Custom keybindings belong to the selected server. `cmd+o` therefore opens the
+picker of whichever machine you are viewing. Only machines that have other
+machines saved show merged results.
+
+Without saved machines, search results and the picker stay exactly as they
+were. Opening the picker does no machine work. The watcher asks
+`herdr machine list` at most once every five minutes. Set `enabled = false` to
+turn that check off and hide synced rows.
+
+```ini
+[machines]
+enabled = true
+exclude =
+sync_seconds = 30
+ssh = ssh
+connect_timeout_seconds = 5
+timeout_seconds = 20
+```
+
 ## Multiple sessions
 
 Concurrent Herdr sessions on one machine share the SQLite database but own
@@ -314,6 +381,7 @@ The package is split by responsibility, lower layers never import higher ones:
 - `live_index.py` live pane indexing and search
 - `archive_catalog.py` archived session catalog, indexing and search
 - `render.py` result row formatting
+- `machines.py` saved SSH machine sync and remote focus
 - `navigate.py` focus and resume operations against Herdr
 - `picker.py` the native curses picker and the fzf fallback
 - `watcher.py` the background live index watcher

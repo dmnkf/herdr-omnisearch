@@ -1,14 +1,21 @@
 from .textmatch import clean_text, shorten
-from .live_index import is_workspace_row
+from .live_index import is_machine_row, is_workspace_row, machine_name
 
 def display_status(row) -> str:
+    if is_machine_row(row):
+        return "machine"
     if is_workspace_row(row):
         return "workspace"
     return row.get("agent_status") or "unknown"
 
 
 def tree_indent(row) -> str:
-    return "  " if int(row.get("_tree_depth") or 0) > 0 else ""
+    return "  " * int(row.get("_tree_depth") or 0)
+
+
+def machine_prefix(row) -> str:
+    """Name the machine on rows shown outside their machine's subtree."""
+    return f"{machine_name(row)} › " if row.get("_top_match") else ""
 
 
 def format_result(row, *, multiline=False):
@@ -23,10 +30,12 @@ def format_result(row, *, multiline=False):
         snippet_value = row.get("content") or ""
     snippet = clean_text(snippet_value or "")
     snippet = " ".join(snippet.split())
-    if is_workspace:
-        title = f"[{status}] {workspace}"
+    if is_machine_row(row):
+        title = f"[machine] {machine_name(row)}"
+    elif is_workspace:
+        title = f"{tree_indent(row)}[{status}] {workspace}"
     else:
-        title = f"{tree_indent(row)}[{status}] {workspace} / {agent} / {label}"
+        title = f"{tree_indent(row)}[{status}] {machine_prefix(row)}{workspace} / {agent} / {label}"
     if multiline:
         return (
             f"{row['stable_id']}\t{title}\n"

@@ -85,6 +85,14 @@ def default_config():
         "worktree_markers": ["worktrees"],
         "remove_words": [],
         "exact_workspace_labels": {},
+        "machines": {
+            "enabled": True,
+            "exclude": [],
+            "sync_seconds": 30,
+            "ssh": "ssh",
+            "connect_timeout_seconds": 5,
+            "timeout_seconds": 20,
+        },
     }
 
 
@@ -184,6 +192,14 @@ def app_config():
             cfg["worktree_markers"] = markers
         if remove_words:
             cfg["remove_words"] = remove_words
+
+    if parser.has_section("machines"):
+        machines = cfg["machines"]
+        machines["enabled"] = parser.getboolean("machines", "enabled", fallback=machines["enabled"])
+        machines["exclude"] = split_config_list(parser.get("machines", "exclude", fallback=""))
+        machines["ssh"] = parser.get("machines", "ssh", fallback=machines["ssh"]).strip() or "ssh"
+        for key in ("sync_seconds", "connect_timeout_seconds", "timeout_seconds"):
+            machines[key] = max(1, parser.getint("machines", key, fallback=machines[key]))
 
     if parser.has_section("workspace_labels.exact"):
         cfg["exact_workspace_labels"] = dict(parser.items("workspace_labels.exact"))
