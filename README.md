@@ -19,7 +19,7 @@ The name and interaction model are inspired by
 
 ## Requirements
 
-- Herdr 0.7.5 or newer
+- Herdr 0.7.5 or newer (0.9.0 or newer for [multiple machines](#multiple-machines))
 - Python 3.9 or newer
 - Linux or macOS
 
