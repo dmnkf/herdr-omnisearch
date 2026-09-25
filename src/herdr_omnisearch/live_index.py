@@ -16,6 +16,7 @@ from .settings import (
 )
 from .storage import (
     connect,
+    db_path,
     lock_is_held,
     spawn_locked_background,
     stop_watcher_at,
@@ -27,6 +28,7 @@ from .textmatch import (
     clean_text,
     fts_query,
     has_prefix_token,
+    index_tokens,
     mark_space_matches,
     parse_filters,
     space_sort_weight,
@@ -189,7 +191,7 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
                 "indexed_at": now,
             }
         )
-        for token in set(tokens(body)):
+        for token in set(index_tokens(body)):
             doc_tokens.append((token, digest))
 
     for pane, workspace_label in indexable_panes:
@@ -227,7 +229,7 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
                     "indexed_at": now,
                 }
             )
-            indexed_tokens = set(tokens(body))
+            indexed_tokens = set(index_tokens(body))
             for token in indexed_tokens:
                 doc_tokens.append((token, digest))
 
@@ -372,6 +374,129 @@ def scope_clause(all_sessions: bool, machines: bool, params) -> str:
     return f"(d.machine_id <> '' OR {local})" if machines else local
 
 
+FACET_STATUSES = ("working", "blocked", "idle", "done")
+FACET_MIN_PREFIX = 3
+FACET_CACHE_SECONDS = 30
+FACET_CACHE = {}
+
+
+def known_facets(conn, *, machines=True):
+    """Machine, agent and workspace names in the index, keyed lowercase."""
+    key = (str(db_path()), bool(machines))
+    cached = FACET_CACHE.get(key)
+    now = time.monotonic()
+    if cached and now - cached[0] < FACET_CACHE_SECONDS:
+        return cached[1]
+    facets = {"machine": {}, "agent": {"shell": "shell"}, "workspace": {}}
+    if machines:
+        facets["machine"]["local"] = "Local"
+        for (label,) in conn.execute("SELECT DISTINCT machine_label FROM docs WHERE COALESCE(machine_label, '') <> ''"):
+            facets["machine"][label.lower()] = label
+    scope = "" if machines else "WHERE machine_id = ''"
+    for kind, column in (("agent", "agent"), ("workspace", "workspace_label")):
+        for (value,) in conn.execute(f"SELECT DISTINCT {column} FROM docs {scope}"):
+            if value:
+                facets[kind][value.lower()] = value
+    FACET_CACHE[key] = (now, facets)
+    return facets
+
+
+def interpret_query(conn, query: str, *, machines=True):
+    """Split a query into filters, text, and words that also name a facet.
+
+    A word that starts a known machine or agent name (or is a status) reads as
+    "that facet or this word", so `billing work` narrows to the workbox machine
+    without "work" having to appear in any pane. `@name` and `#name` become
+    strict machine and workspace filters only when they name one; otherwise
+    they stay text, so `#3845` or `@pytest.fixture` still search as typed.
+    """
+    text, filters = parse_filters(query)
+    facets = known_facets(conn, machines=machines)
+    text_words = []
+    facet_words = []
+    for word in text.split():
+        lowered = word.lower()
+        sigil, rest = lowered[:1], lowered[1:]
+        if sigil == "@" and rest and "machine" not in filters and any(key.startswith(rest) for key in facets["machine"]):
+            filters["machine"] = rest
+            continue
+        if sigil == "#" and rest and not rest.isdigit() and "workspace" not in filters and any(rest in key for key in facets["workspace"]):
+            filters["workspace"] = rest
+            continue
+        matches = []
+        if len(lowered) >= FACET_MIN_PREFIX:
+            for kind in ("machine", "agent"):
+                matches.extend((kind, value) for key, value in facets[kind].items() if key.startswith(lowered))
+        if lowered in FACET_STATUSES:
+            matches.append(("status", lowered))
+        if matches:
+            facet_words.append((lowered, matches))
+        else:
+            text_words.append(word)
+    return " ".join(text_words), filters, facet_words
+
+
+def facet_clause(index: int, word: str, matches, params) -> str:
+    """SQL for "row has one of these facet values, or contains this exact word"."""
+    options = []
+    by_kind = {}
+    for kind, value in matches:
+        by_kind.setdefault(kind, []).append(value)
+    for kind, values in by_kind.items():
+        names = []
+        for position, value in enumerate(values):
+            name = f"facet{index}_{kind}{position}"
+            params[name] = value.lower()
+            names.append(f":{name}")
+        column = {
+            "machine": "LOWER(COALESCE(NULLIF(d.machine_label, ''), 'Local'))",
+            "agent": "LOWER(COALESCE(NULLIF(d.agent, ''), 'shell'))",
+            "status": "LOWER(COALESCE(d.agent_status, ''))",
+        }[kind]
+        condition = f"{column} IN ({', '.join(names)})"
+        if kind != "machine":
+            # Workspace headers carry no agent or status of their own.
+            condition = f"(d.pane_id NOT LIKE 'workspace:%' AND {condition})"
+        options.append(condition)
+    params[f"facet{index}_word"] = word
+    options.append(f"d.stable_id IN (SELECT stable_id FROM token_docs WHERE token = :facet{index}_word)")
+    return "(" + " OR ".join(options) + ")"
+
+
+def row_facet_hits(row, facet_words) -> int:
+    hits = 0
+    for _word, matches in facet_words:
+        for kind, value in matches:
+            if kind == "machine":
+                actual = machine_name(row)
+            elif is_workspace_row(row):
+                continue
+            elif kind == "agent":
+                actual = row.get("agent") or "shell"
+            else:
+                actual = row.get("agent_status") or ""
+            if actual.lower() == value.lower():
+                hits += 1
+                break
+    return hits
+
+
+def describe_query(query: str, *, machines=True) -> str:
+    """How a query is read, e.g. "workbox (machine) · text: billing"; empty for plain text."""
+    conn = connect()
+    try:
+        text, filters, facet_words = interpret_query(conn, query, machines=machines)
+    finally:
+        conn.close()
+    if not filters and not facet_words:
+        return ""
+    parts = [f"{key}: {value}" for key, value in filters.items()]
+    parts.extend(" / ".join(f"{value} ({kind})" for kind, value in matches) for _word, matches in facet_words)
+    if text:
+        parts.append(f"text: {text}")
+    return " · ".join(parts)
+
+
 def search_index(
     query: str,
     limit: int,
@@ -383,7 +508,20 @@ def search_index(
     machines=False,
     machine_id=None,
 ):
-    query, filters = parse_filters(query)
+    conn = connect()
+    try:
+        return search_connection(
+            conn, query, limit, status=status, agent=agent, snippets=snippets,
+            all_sessions=all_sessions, machines=machines, machine_id=machine_id,
+        )
+    finally:
+        conn.close()
+
+
+def search_connection(conn, query, limit, *, status, agent, snippets, all_sessions, machines, machine_id):
+    typed_text, _typed_filters = parse_filters(query)
+    query, filters, facet_words = interpret_query(conn, query, machines=machines)
+    fetch_limit = limit
     if status:
         filters["status"] = status
     if agent:
@@ -410,8 +548,9 @@ def search_index(
     if filters.get("machine"):
         clauses.append("COALESCE(NULLIF(d.machine_label, ''), 'Local') LIKE :machine")
         params["machine"] = f"%{filters['machine']}%"
+    for index, (word, matches) in enumerate(facet_words):
+        clauses.append(facet_clause(index, word, matches, params))
 
-    conn = connect()
     fts = fts_query(query)
     rows = []
     if fts:
@@ -420,7 +559,7 @@ def search_index(
             where.extend(clauses)
             fts_params = dict(params)
             fts_params["fts"] = fts
-            fts_params["limit"] = limit
+            fts_params["limit"] = fetch_limit
             sql = f"""
                 SELECT d.*, bm25(docs_fts) AS rank,
                        substr(d.content, 1, 260) AS snippet
@@ -440,10 +579,10 @@ def search_index(
         len(term) >= 4 and not has_prefix_token(conn, term)
         for term in query_terms
     )
-    needs_more_results = bool(query_terms) and len(rows) < min(limit, 40)
+    needs_more_results = bool(query_terms) and len(rows) < min(fetch_limit, 40)
     use_fuzzy = (not fts) or (not rows) or needs_typo_fuzzy or needs_more_results
     if use_fuzzy:
-        fuzzy_rows = fuzzy_search(conn, query, clauses, params, limit * 4, snippets=snippets)
+        fuzzy_rows = fuzzy_search(conn, query, clauses, params, fetch_limit * 4, snippets=snippets)
         seen = {row["stable_id"]: row for row in rows}
         for row in fuzzy_rows:
             existing = seen.get(row["stable_id"])
@@ -454,9 +593,10 @@ def search_index(
             if row["stable_id"] not in seen:
                 rows.append(row)
                 seen[row["stable_id"]] = row
-    mark_space_matches(rows, query)
-    rows.sort(key=lambda row: (space_sort_weight(row), float(row.get("rank") or 0)))
-    conn.close()
+    for row in rows:
+        row["_facet_hits"] = row_facet_hits(row, facet_words)
+    mark_space_matches(rows, typed_text)
+    rows.sort(key=lambda row: (-row["_facet_hits"], space_sort_weight(row), float(row.get("rank") or 0)))
     return rows[:limit]
 
 
@@ -733,6 +873,7 @@ def grouped_search_index(
 
     def sort_key(row):
         return (
+            -row.get("_facet_hits", 0),
             space_sort_weight(row),
             float(row.get("rank") or 0),
             STATUS_WEIGHT.get(row.get("agent_status") or "unknown", 9),

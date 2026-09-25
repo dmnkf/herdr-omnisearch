@@ -17,6 +17,7 @@ from .textmatch import (
     tokens,
 )
 from .live_index import (
+    describe_query,
     fuzzy_snippet,
     grouped_search_index,
     index_session,
@@ -328,6 +329,7 @@ def render_picker(
     actions=None,
     action_selected=0,
     message="",
+    interpretation="",
 ):
     stdscr.erase()
     height, width = stdscr.getmaxyx()
@@ -348,6 +350,9 @@ def render_picker(
     else:
         prompt = f"-- {mode_title(mode)} -- / {query}"
     addnstr_safe(stdscr, 2, 0, prompt, width - 1, curses.A_BOLD)
+    if interpretation and mode != "action":
+        hint = f"   → {interpretation}"
+        addnstr_safe(stdscr, 2, len(prompt), hint, width - 1 - len(prompt), curses.A_DIM)
     if message:
         addnstr_safe(stdscr, 3, 0, shorten(message, width - 1), width - 1, curses.A_DIM)
 
@@ -505,7 +510,7 @@ def picker_title(args, query=""):
 def picker_help(args):
     if getattr(args, "archive", False):
         return "insert: type search | Esc normal | left older | right newer | Enter resume | q quit"
-    return "insert: type search | Esc normal | normal: j/k gg G Enter focus a/: actions q quit | machine:name"
+    return "insert: type search | Esc normal | normal: j/k gg G Enter focus a/: actions q quit | @machine #workspace"
 
 
 def clipboard_copy(text: str):
@@ -713,6 +718,16 @@ def cached_picker_rows(args, query, cache):
     return rows
 
 
+def picker_interpretation(args, query, cache) -> str:
+    if getattr(args, "archive", False) or not query.strip():
+        return ""
+    if query not in cache:
+        if len(cache) > 128:
+            cache.clear()
+        cache[query] = describe_query(query, machines=merges_machines(args))
+    return cache[query]
+
+
 def curses_picker(stdscr, args) -> int:
     init_curses_colors()
     curses.noecho()
@@ -725,6 +740,7 @@ def curses_picker(stdscr, args) -> int:
     query = " ".join(args.query)
     selected = 0
     row_cache = {}
+    interpretations = {}
     rows = cached_picker_rows(
         args,
         archive_picker_lookup_query(args, query),
@@ -755,6 +771,7 @@ def curses_picker(stdscr, args) -> int:
             actions=actions,
             action_selected=action_selected,
             message=message,
+            interpretation=picker_interpretation(args, query, interpretations),
         )
         message = ""
         key = stdscr.get_wch()

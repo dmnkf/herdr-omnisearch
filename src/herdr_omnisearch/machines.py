@@ -16,7 +16,7 @@ from .herdr_cli import HerdrCLI, HerdrCLIError
 from .live_index import replace_docs
 from .settings import app_config, cli_command, data_dir, herdr_bin
 from .storage import connect, spawn_locked_background, try_exclusive_lock
-from .textmatch import tokens
+from .textmatch import index_tokens
 
 EXPORT_FORMAT = 1
 
@@ -208,7 +208,7 @@ def ingest_export(conn, machine, payload) -> int:
             }
         )
         docs.append(doc)
-        doc_tokens.extend((token, stable_id) for token in set(tokens(doc["body"])))
+        doc_tokens.extend((token, stable_id) for token in set(index_tokens(doc["body"])))
     replace_docs(conn, "machine_id = :machine", {"machine": machine["id"]}, docs, doc_tokens)
     return len(docs)
 

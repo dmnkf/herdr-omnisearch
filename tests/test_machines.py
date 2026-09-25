@@ -18,7 +18,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 os.environ.setdefault("HERDR_PLUGIN_STATE_DIR", tempfile.mkdtemp(prefix="herdr-omnisearch-tests-"))
 
-from herdr_omnisearch import cli, live_index, machines, picker, settings, storage  # noqa: E402
+from herdr_omnisearch import cli, live_index, machines, picker, settings, storage, textmatch  # noqa: E402
 from herdr_omnisearch.herdr_cli import HerdrCLIError  # noqa: E402
 
 
@@ -96,6 +96,7 @@ class LocalHerdrCLI:
 class MachineTests(unittest.TestCase):
     def setUp(self):
         settings.CONFIG_CACHE = None
+        live_index.FACET_CACHE["value"] = None
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         env = patch.dict(
@@ -312,6 +313,111 @@ class MachineTests(unittest.TestCase):
         fitted = picker.shorten_start(path, 40)
         self.assertEqual(len(fitted), 40)
         self.assertTrue(fitted.startswith("…") and fitted.endswith("feature-login-rate-limit"))
+
+    def search_labels(self, query):
+        rows = live_index.search_index(query, 20, machines=True)
+        return {(live_index.machine_name(row), row.get("workspace_label")) for row in rows if not live_index.is_workspace_row(row)}
+
+    def test_words_naming_a_machine_narrow_without_appearing_in_text(self):
+        live_index.index_session(50, False, False)
+        self.sync({
+            "workbox": export_payload("Billing", "deploy pipeline for billing"),
+            "gpubox": export_payload("Game", "deploy the game server"),
+        })
+        self.assertEqual(self.search_labels("deploy work"), {("workbox", "Billing")})
+        self.assertEqual(self.search_labels("deploy gpu"), {("gpubox", "Game")})
+        self.assertEqual(self.search_labels("billing gpu"), set())
+        self.assertEqual(self.search_labels("@work deploy"), {("workbox", "Billing")})
+
+    def test_words_naming_an_agent_or_status_narrow_too(self):
+        live_index.index_session(50, False, False)
+        self.sync({
+            "workbox": export_payload("Billing", "deploy pipeline for billing"),
+            "gpubox": export_payload("Game", "deploy the game server"),
+        })
+        self.assertEqual({agent for _machine, agent in self.agents("deploy cla")}, {"claude"})
+        self.assertEqual({agent for _machine, agent in self.agents("deploy codex")}, {"codex"})
+        self.assertEqual(self.agents("deploy blocked"), set())
+
+    def agents(self, query):
+        rows = live_index.search_index(query, 20, machines=True)
+        return {(live_index.machine_name(row), row.get("agent")) for row in rows if not live_index.is_workspace_row(row)}
+
+    def test_a_facet_word_still_matches_as_text(self):
+        self.sync({
+            "workbox": export_payload("Billing", "migrate the gpubox cluster"),
+            "gpubox": export_payload("Game", "quiet output"),
+        })
+        self.assertIn(("workbox", "Billing"), self.search_labels("migrate gpubox"))
+
+    def test_compound_names_match_their_parts(self):
+        self.sync({
+            "workbox": export_payload("api-server", "tuning run"),
+            "gpubox": export_payload("Game", "quiet output"),
+        })
+        self.assertIn(("workbox", "api-server"), self.search_labels("api tuning"))
+
+    def test_the_picker_explains_how_a_query_was_read(self):
+        live_index.index_session(50, False, False)
+        self.sync({
+            "workbox": export_payload("Billing", "deploy"),
+            "gpubox": export_payload("Game", "deploy"),
+        })
+        self.assertEqual(live_index.describe_query("deploy gpu"), "gpubox (machine) · text: deploy")
+        self.assertEqual(live_index.describe_query("codex blocked"), "codex (agent) · blocked (status)")
+        self.assertEqual(live_index.describe_query("plain words"), "")
+
+    def test_hash_and_at_words_stay_text_unless_they_name_something(self):
+        self.sync({
+            "workbox": export_payload("Billing", "fix #3845 by patching @pytest.fixture and @types/node"),
+            "gpubox": export_payload("Game", "quiet output"),
+        })
+        for query in ("fix #3845", "@pytest.fixture", "@types/node"):
+            self.assertIn(("workbox", "Billing"), self.search_labels(query), query)
+        self.assertEqual(self.search_labels("@gpu"), {("gpubox", "Game")})
+        self.assertEqual(self.search_labels("#bill"), {("workbox", "Billing")})
+        self.assertEqual(textmatch.parse_filters("@decorator #12 text"), ("@decorator #12 text", {}))
+
+    def test_typos_in_compound_words_still_match(self):
+        self.sync({
+            "workbox": export_payload("Billing", "herdr-omnisearch release 0.10.0 notes"),
+            "gpubox": export_payload("Game", "quiet output"),
+        })
+        for query in ("herdr-omnisaerch", "v0.10.0 notes", "omnisearch"):
+            self.assertIn(("workbox", "Billing"), self.search_labels(query), query)
+
+    def test_workspace_headers_never_count_as_shell_or_status(self):
+        payload = export_payload("Billing", "remote text", panes=1)
+        for index in range(30):
+            payload["docs"].append({
+                **payload["docs"][0], "stable_id": f"ws-{index}", "workspace_id": f"w{index + 2}",
+                "workspace_label": f"Space {index}", "pane_id": f"workspace:w{index + 2}",
+            })
+        shell = dict(payload["docs"][1], stable_id="shell-pane", pane_id="w1:p9", agent="", agent_status="idle", content="plain prompt")
+        payload["docs"].append(shell)
+        self.sync({"workbox": payload, "gpubox": export_payload("Game", "quiet output")})
+        rows = live_index.search_index("shell", 20, machines=True)
+        panes = [row for row in rows if not live_index.is_workspace_row(row)]
+        self.assertIn("w1:p9", [row["pane_id"] for row in panes])
+        self.assertFalse([row for row in rows if live_index.is_workspace_row(row) and row["_facet_hits"]])
+
+    def test_facet_only_queries_are_complete_beyond_the_fetch_size(self):
+        payload = export_payload("Billing", "deploy chatter", panes=300)
+        codex = dict(payload["docs"][1], stable_id="codex-pane", pane_id="w1:p999", agent="codex", content="one mention")
+        payload["docs"].append(codex)
+        self.sync({"workbox": payload, "gpubox": export_payload("Game", "quiet output")})
+        rows = live_index.search_index("codex", 5, machines=True)
+        self.assertEqual([row["pane_id"] for row in rows], ["w1:p999"])
+
+    def test_facet_matches_rank_first_and_respect_local_only(self):
+        live_index.index_session(50, False, False)
+        self.sync({
+            "workbox": export_payload("Billing", "deploy the gpubox fleet"),
+            "gpubox": export_payload("Game", "deploy"),
+        })
+        rows = [row for row in live_index.search_index("deploy gpubox", 20, machines=True) if not live_index.is_workspace_row(row)]
+        self.assertEqual(live_index.machine_name(rows[0]), "gpubox")
+        self.assertEqual(live_index.describe_query("deploy gpu", machines=False), "")
 
     def test_busy_machine_cannot_crowd_out_the_others(self):
         self.sync({

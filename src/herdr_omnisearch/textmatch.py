@@ -5,6 +5,8 @@ from datetime import datetime
 from .settings import app_config
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]*")
+PART_SPLIT_RE = re.compile(r"[_.:/@+-]+")
+FILTER_ALIASES = {"m": "machine", "a": "agent", "s": "status", "w": "workspace", "c": "cwd"}
 
 
 def clean_text(value: str) -> str:
@@ -20,6 +22,21 @@ def tokens(value: str):
         token = token.lower().strip("._:/@+-")
         if 2 <= len(token) <= 64:
             out.append(token)
+    return out
+
+
+def index_tokens(value: str):
+    """Tokens to index: compound words like api-server also yield their parts.
+
+    Only indexed text gets the parts; queries keep whole words so a typo in one
+    part cannot fail an otherwise good fuzzy match.
+    """
+    out = []
+    for token in tokens(value):
+        out.append(token)
+        parts = PART_SPLIT_RE.split(token)
+        if len(parts) > 1:
+            out.extend(part for part in parts if 2 <= len(part) <= 64)
     return out
 
 
@@ -253,15 +270,18 @@ def iso_to_epoch(value: str) -> float:
 def parse_filters(query: str):
     filters = {}
 
-    def pull(name):
+    def pull(pattern, name):
         nonlocal query
-        values = re.findall(rf"\b{name}:([A-Za-z0-9_.:/@+-]+)", query)
+        values = re.findall(pattern, query)
         if values:
             filters[name] = values[-1]
-            query = re.sub(rf"\b{name}:[A-Za-z0-9_.:/@+-]+", " ", query)
+            query = re.sub(pattern, " ", query)
 
     for key in ("status", "agent", "workspace", "cwd", "machine"):
-        pull(key)
+        pull(rf"\b{key}:([A-Za-z0-9_.:/@+-]+)", key)
+    for alias, key in FILTER_ALIASES.items():
+        if key not in filters:
+            pull(rf"(?<!\S){alias}:([A-Za-z0-9_.:/@+-]+)", key)
     return " ".join(query.split()), filters
 
 

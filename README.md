@@ -108,6 +108,27 @@ Run the standalone live picker:
 herdr-omnisearch pick --no-refresh --background-refresh --stale-seconds 10 --lines 350
 ```
 
+### Writing queries
+
+Type what you are looking for. Words that start the name of a machine or an
+agent, or name a status (`working`, `blocked`, `idle`, `done`), also count as
+that filter, so they narrow results without having to appear in any pane:
+
+```text
+billing work      panes about billing on the workbox machine
+codex blocked     blocked Codex agents on any machine
+api gpu           matches api-server on the gpubox machine
+```
+
+Such a word still matches as text too, and matches on the filter rank first.
+The picker shows how it read the query next to what you type, for example
+`→ gpubox (machine) · text: api`. Compound names match their parts, so `api`
+finds `api-server`.
+
+To be explicit, use `@machine` or `#workspace`, or the `machine:`, `agent:`,
+`status:`, `workspace:` and `cwd:` filters, shortened to `m:`, `a:`, `s:`,
+`w:` and `c:`.
+
 ### Picker controls
 
 Both pickers use the same Vim-style controls:
@@ -283,8 +304,8 @@ How it works:
 - The watcher checks for newly saved machines every five minutes. Run
   `sync-machines` to include a new machine right away.
 - A query pins the best five hits across all machines above the tree. Each
-  machine gets its own result limit. Narrow a query with `machine:workbox`,
-  or use `--local-only`.
+  machine gets its own result limit. Narrow a query by naming the machine
+  (`deploy work`), with `@workbox`, or use `--local-only`.
 
 Selecting a result on another machine focuses that exact pane on its server.
 Herdr gives other processes no way to switch the client's selected machine,
