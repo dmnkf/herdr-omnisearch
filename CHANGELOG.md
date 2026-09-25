@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.1 - 2026-09-25
+
+- Read OpenCode history only from its SQLite database (OpenCode 1.2 and
+  newer), and drop the reader for the older JSON storage and its `storage`
+  option. To upgrade an OpenCode older than 1.2, run a 1.2.x release once
+  (`opencode db migrate`), because later releases no longer migrate the old
+  files.
+
 ## 0.9.0 - 2026-09-25
 
 - Search OpenCode conversations in ArchiveSearch, next to Codex and Claude
