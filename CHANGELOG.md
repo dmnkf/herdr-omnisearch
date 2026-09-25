@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.2 - 2026-09-25
+
+- Open the pickers faster. The `open-live` and `open-archive` actions now call
+  `herdr plugin pane open` directly instead of starting Python only to send
+  that request, which saves 40 to 75 ms on every open.
+
 ## 0.11.1 - 2026-09-25
 
 - Fix the live index growing without bound. The fuzzy-search vocabulary kept
