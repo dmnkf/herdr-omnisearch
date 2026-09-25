@@ -65,18 +65,6 @@ class OpenCodeListingTests(unittest.TestCase):
             self.assertEqual(sessions["ses_untitled"]["title"], "")
             self.assertEqual(sessions["ses_root"]["cwd"], "/work/api")
 
-    def test_older_json_storage_is_listed_without_children(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            storage = Path(tmp) / "storage"
-            (storage / "session" / "global").mkdir(parents=True)
-            for name, extra in (("ses_a", {}), ("ses_child", {"parentID": "ses_a"})):
-                (storage / "session" / "global" / f"{name}.json").write_text(json.dumps({
-                    "id": name, "title": "Old session", "directory": "/srv",
-                    "time": {"created": 1782805141995, "updated": 1782805142046}, **extra,
-                }), encoding="utf-8")
-            sessions = opencode_history.list_sessions({"database": str(Path(tmp) / "missing.db"), "storage": str(storage)})
-        self.assertEqual([s["session_id"] for s in sessions], ["ses_a"])
-
     def test_export_survives_an_exporter_that_exits_before_a_pipe_drains(self):
         with tempfile.TemporaryDirectory() as tmp:
             dump = Path(tmp) / "export.json"

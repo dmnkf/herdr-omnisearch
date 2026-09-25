@@ -1,17 +1,15 @@
 """Read OpenCode session history for the archive catalog.
 
-OpenCode keeps history in its own storage instead of per-session files:
-current releases use a SQLite database, older ones JSON files. Sessions are
-listed from that storage (read-only, top-level sessions only, like Codex
-subagents are skipped) and their messages come from `opencode export`, the
-public format, so only the small session listing depends on OpenCode's
-internal layout.
+OpenCode keeps history in a SQLite database instead of per-session files
+(since 1.2, which migrated older JSON storage on first run). Sessions are
+listed from it read-only, top-level sessions only, like Codex subagents are
+skipped, and their messages come from `opencode export`, the public format,
+so only the small session listing depends on OpenCode's internal layout.
 
 Failures raise OpenCodeError (an OSError), which the catalog treats like an
 unreadable history file: it keeps what it already has and retries next run.
 """
 
-import glob
 import json
 import os
 import re
@@ -95,32 +93,10 @@ def database_sessions(database: Path):
     return [session_row(*row) for row in rows]
 
 
-def storage_sessions(storage: Path):
-    sessions = []
-    for path in glob.glob(str(storage / "session" / "*" / "*.json")):
-        try:
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict) or not data.get("id") or data.get("parentID"):
-            continue
-        times = data.get("time") if isinstance(data.get("time"), dict) else {}
-        sessions.append(
-            session_row(data["id"], data.get("title"), data.get("directory"), times.get("created"), times.get("updated"))
-        )
-    return sessions
-
-
 def list_sessions(source_cfg):
     """Top-level OpenCode sessions; [] when OpenCode has no history here."""
-    data_dir = default_data_dir()
-    database = Path(source_cfg.get("database") or data_dir / "opencode.db").expanduser()
-    storage = Path(source_cfg.get("storage") or data_dir / "storage").expanduser()
-    if database.is_file():
-        return database_sessions(database)
-    if storage.is_dir():
-        return storage_sessions(storage)
-    return []
+    database = Path(source_cfg.get("database") or default_data_dir() / "opencode.db").expanduser()
+    return database_sessions(database) if database.is_file() else []
 
 
 def export_command(source_cfg, session_id):

@@ -157,7 +157,7 @@ def app_config():
             cfg["archive"][agent]["start_timeout_ms"] = max(
                 1000, parser.getint(section, "start_timeout_ms")
             )
-        for key in ("database", "storage", "export"):
+        for key in ("database", "export"):
             if parser.has_option(section, key):
                 cfg["archive"][agent][key] = parser.get(section, key).strip()
 
@@ -175,7 +175,7 @@ def app_config():
             }
             if parser.has_option(section, "thread_names"):
                 cfg["archive"][agent]["thread_names"] = parser.get(section, "thread_names")
-            for key in ("database", "storage", "export"):
+            for key in ("database", "export"):
                 if parser.has_option(section, key):
                     cfg["archive"][agent][key] = parser.get(section, key).strip()
 
