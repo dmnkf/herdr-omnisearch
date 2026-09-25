@@ -36,7 +36,7 @@ from .archive_catalog import (
     maybe_background_archive_catalog_index,
     require_archive_enabled,
 )
-from .render import display_status, format_result, machine_prefix, tree_indent
+from .render import format_result, machine_prefix
 from .navigate import focus_archive_catalog_result, focus_archive_row, focus_result, focus_row, row_client
 
 ARCHIVE_PICKER_DEBOUNCE_MS = 100
@@ -151,77 +151,95 @@ def addnstr_safe(stdscr, y, x, text, width, attr=0):
         pass
 
 
-def status_attr(status):
-    if status == "archive":
-        return curses.color_pair(1)
-    if status == "machine":
-        return curses.color_pair(8) | curses.A_BOLD
-    if status == "workspace":
-        return curses.color_pair(1) | curses.A_BOLD
-    if status == "working":
-        return curses.color_pair(2) | curses.A_BOLD
-    if status == "blocked":
-        return curses.color_pair(3) | curses.A_BOLD
-    if status == "idle":
-        return curses.color_pair(4)
-    return curses.color_pair(5)
+# Mirrors Herdr's session navigator: status dots, a quiet tree, one accent bar.
+PAIR_DONE, PAIR_IDLE, PAIR_BLOCKED, PAIR_WORKING, PAIR_SELECTED = 1, 2, 3, 5, 7
+STATUS_GLYPHS = {"working": "●", "blocked": "●", "done": "●", "idle": "○"}
+STATUS_PAIRS = {"working": PAIR_WORKING, "blocked": PAIR_BLOCKED, "done": PAIR_DONE, "idle": PAIR_IDLE}
+
+
+def status_glyph(row) -> str:
+    if is_machine_row(row) or is_workspace_row(row):
+        return ""
+    if row.get("source") == "archive":
+        return "○"
+    return STATUS_GLYPHS.get(row.get("agent_status") or "", "·")
+
+
+def status_glyph_attr(row):
+    pair = STATUS_PAIRS.get(row.get("agent_status") or "")
+    return curses.color_pair(pair) if pair else curses.A_DIM
 
 
 def init_curses_colors():
     try:
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_CYAN, -1)
-        curses.init_pair(2, curses.COLOR_GREEN, -1)
-        curses.init_pair(3, curses.COLOR_RED, -1)
-        curses.init_pair(4, curses.COLOR_BLUE, -1)
-        curses.init_pair(5, curses.COLOR_YELLOW, -1)
-        curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_WHITE)
-        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_YELLOW)
-        curses.init_pair(8, curses.COLOR_MAGENTA, -1)
+        curses.init_pair(PAIR_DONE, curses.COLOR_CYAN, -1)
+        curses.init_pair(PAIR_IDLE, curses.COLOR_GREEN, -1)
+        curses.init_pair(PAIR_BLOCKED, curses.COLOR_RED, -1)
+        curses.init_pair(PAIR_WORKING, curses.COLOR_YELLOW, -1)
+        curses.init_pair(PAIR_SELECTED, curses.COLOR_BLACK, curses.COLOR_YELLOW)
     except curses.error:
         pass
 
 
+def match_count(row) -> str:
+    matches = row.get("match_count")
+    return f" ×{matches}" if matches and int(matches) > 1 and not is_machine_row(row) else ""
+
+
 def row_title(row, *, full=False):
+    """The row's main text, without tree decoration or status dot."""
     if row.get("source") == "archive":
         agent = row.get("agent") or "agent"
         space = row.get("workspace_label") or "archive"
-        date = (row.get("updated_at") or row.get("started_at") or "archive")[:10]
         if row.get("match_content"):
-            summary = fuzzy_snippet(
-                row["match_content"],
-                row.get("matched_tokens") or [],
-            )
-            role = row.get("match_role") or "message"
-            summary = f"{role}: {summary}"
+            summary = fuzzy_snippet(row["match_content"], row.get("matched_tokens") or [])
+            summary = f"{row.get('match_role') or 'message'}: {summary}"
         else:
             preview_lines = clean_text(row.get("content") or "").splitlines()
             summary = preview_lines[-1] if preview_lines else row.get("title") or "session"
-        summary = shorten(summary, 76)
-        matches = row.get("match_count")
-        count = f" x{matches}" if matches and int(matches) > 1 else ""
-        return f"[archive] {space} / {agent} / {summary} / {date}{count}"
+        return f"{space} · {agent} · {shorten(summary, 76)}{match_count(row)}"
     if is_machine_row(row):
-        spaces = row.get("match_count") or 0
-        detail = row.get("_machine_detail") or ""
-        return f"[machine] {machine_name(row)} · {spaces} space{'s' if spaces != 1 else ''}{detail}"
+        return machine_name(row)
     if is_workspace_row(row):
-        workspace = row.get("workspace_label") or row.get("workspace_id")
-        matches = row.get("match_count")
-        count = f" x{matches}" if matches and int(matches) > 1 else ""
-        return f"{tree_indent(row)}[workspace] {workspace}{count}"
+        return f"{row.get('workspace_label') or row.get('workspace_id')}{match_count(row)}"
     label = row.get("pane_label") or row.get("pane_id")
     agent = row.get("agent") or "shell"
-    status = display_status(row)
-    workspace = row.get("workspace_label") or row.get("workspace_id")
-    matches = row.get("match_count")
-    count = f" x{matches}" if matches and int(matches) > 1 else ""
-    marker = "★ " if row.get("_top_match") else ""
     if row.get("_under_workspace") and not full:
         # The workspace header right above already names it.
-        return f"{tree_indent(row)}[{status}] {agent} / {label}{count}"
-    return f"{tree_indent(row)}{marker}[{status}] {machine_prefix(row)}{workspace} / {agent} / {label}{count}"
+        return f"{agent} · {label}{match_count(row)}"
+    workspace = row.get("workspace_label") or row.get("workspace_id")
+    return f"{machine_prefix(row)}{workspace} · {agent} · {label}{match_count(row)}"
+
+
+def row_meta(row) -> str:
+    """Quiet right-aligned detail: the path, a machine's size, an archive date."""
+    if row.get("source") == "archive":
+        return (row.get("updated_at") or row.get("started_at") or "")[:10]
+    if is_machine_row(row):
+        spaces = row.get("match_count") or 0
+        return f"{spaces} space{'s' if spaces != 1 else ''}{row.get('_machine_detail') or ''}"
+    return row.get("cwd") or ""
+
+
+def tree_prefix(rows, index) -> str:
+    row = rows[index]
+    depth = int(row.get("_tree_depth") or 0)
+    if row.get("_top_match"):
+        return "★ "
+    if is_machine_row(row):
+        return "▾ "
+    if is_workspace_row(row):
+        return "  " * depth + "▾ "
+    following = next(
+        (other for other in rows[index + 1:] if int(other.get("_tree_depth") or 0) <= depth),
+        None,
+    )
+    last = following is None or int(following.get("_tree_depth") or 0) < depth or is_workspace_row(following) or is_machine_row(following)
+    if depth == 0:
+        return ""
+    return "  " * depth + ("└── " if last else "├── ")
 
 
 def query_terms_for_display(query: str):
@@ -308,12 +326,38 @@ def add_highlighted(stdscr, y, x, text, width, base_attr=0, highlight_attr=0, te
         addnstr_safe(stdscr, y, col, text[cursor:], width - (col - x), base_attr)
 
 
-def mode_title(mode: str) -> str:
-    if mode == "normal":
-        return "NORMAL"
+def key_hints(args, mode) -> str:
     if mode == "action":
-        return "ACTION"
-    return "INSERT"
+        return " filter type · move j/k · run enter · back esc"
+    archive = "older ← · newer → · " if getattr(args, "archive", False) else ""
+    if mode == "insert":
+        return f" search type · move ↑↓ · {archive}open enter · keys esc"
+    return f" move j/k · search / · actions a · {archive}open enter · close q"
+
+
+def render_row(stdscr, y, width, rows, index, selected, terms):
+    row = rows[index]
+    selected_row = index == selected
+    base = curses.color_pair(PAIR_SELECTED) | curses.A_BOLD if selected_row else curses.A_NORMAL
+    if is_machine_row(row) and not selected_row:
+        base |= curses.A_BOLD
+    highlight = base | curses.A_BOLD if selected_row else curses.color_pair(PAIR_WORKING) | curses.A_BOLD
+    addnstr_safe(stdscr, y, 0, " " * width, width, base)
+    prefix = " " + tree_prefix(rows, index)
+    glyph = status_glyph(row)
+    meta = row_meta(row)
+    meta_width = min(len(meta), max(0, width // 2 - 2)) if meta else 0
+    text_width = width - 1 - (meta_width + 2 if meta_width else 0)
+    addnstr_safe(stdscr, y, 0, prefix, text_width, base if selected_row else base | curses.A_DIM)
+    x = len(prefix)
+    if glyph:
+        addnstr_safe(stdscr, y, x, glyph, text_width - x, base if selected_row else status_glyph_attr(row))
+        x += len(glyph) + 1
+    title = shorten(row_title(row), max(1, text_width - x))
+    add_highlighted(stdscr, y, x, title, text_width - x, base, highlight, terms)
+    if meta_width:
+        fitted = shorten_start(meta, meta_width)
+        addnstr_safe(stdscr, y, width - 1 - len(fitted), fitted, len(fitted), base if selected_row else curses.A_DIM)
 
 
 def render_picker(
@@ -323,105 +367,88 @@ def render_picker(
     selected,
     *,
     title="Herdr OmniSearch",
-    help_text=None,
+    hints="",
+    placeholder="search panes and chats",
     mode="insert",
     action_query="",
     actions=None,
     action_selected=0,
     message="",
     interpretation="",
+    status_text="",
 ):
     stdscr.erase()
     height, width = stdscr.getmaxyx()
-    if height < 10 or width < 60:
+    if height < 10 or width < 40:
         addnstr_safe(stdscr, 0, 0, f"{title} needs a larger terminal.", width - 1, curses.A_BOLD)
         stdscr.refresh()
         return
 
-    list_height = max(5, min(height - 7, height // 2))
-    preview_y = list_height + 4
-    preview_height = max(1, height - preview_y - 1)
-
-    addnstr_safe(stdscr, 0, 0, title, width - 1, curses.color_pair(1) | curses.A_BOLD)
-    help_text = help_text or "Type to search chats | filters: status:working agent:codex workspace:api cwd:backend | Enter focus | Esc quit"
-    addnstr_safe(stdscr, 1, 0, help_text, width - 1, curses.A_DIM)
+    dim = curses.A_DIM
     if mode == "action":
-        prompt = f"-- {mode_title(mode)} -- :{action_query}"
+        search = f" : {action_query}"
+        search_attr = curses.A_NORMAL
+    elif query:
+        search = f" / {query}"
+        search_attr = curses.A_NORMAL if mode == "insert" else dim
     else:
-        prompt = f"-- {mode_title(mode)} -- / {query}"
-    addnstr_safe(stdscr, 2, 0, prompt, width - 1, curses.A_BOLD)
-    if interpretation and mode != "action":
-        hint = f"   → {interpretation}"
-        addnstr_safe(stdscr, 2, len(prompt), hint, width - 1 - len(prompt), curses.A_DIM)
-    if message:
-        addnstr_safe(stdscr, 3, 0, shorten(message, width - 1), width - 1, curses.A_DIM)
+        search = f" / {placeholder}"
+        search_attr = dim
+    addnstr_safe(stdscr, 0, 0, search, width - 1, search_attr)
+    if interpretation and mode != "action" and query:
+        addnstr_safe(stdscr, 0, len(search), f"   → {interpretation}", width - 1 - len(search), dim)
+    right = status_text or f"{sum(1 for row in rows if not (is_machine_row(row) or is_workspace_row(row)))} results"
+    addnstr_safe(stdscr, 0, max(0, width - 1 - len(right)), right, len(right), dim)
+    addnstr_safe(stdscr, 1, 0, "─" * (width - 1), width - 1, dim)
+
+    footer_y = height - 2
+    preview_height = max(3, (height - 5) // 3)
+    list_height = max(3, footer_y - 2 - preview_height - 1)
+    separator_y = 2 + list_height
+    preview_y = separator_y + 1
 
     if not rows:
-        if not message:
-            addnstr_safe(stdscr, 4, 0, "No matches.", width - 1, curses.A_DIM)
+        addnstr_safe(stdscr, 2, 0, f" {message or 'No matches.'}", width - 1, dim)
+        addnstr_safe(stdscr, height - 1, 0, hints, width - 1, dim)
         stdscr.refresh()
         return
 
     selected = max(0, min(selected, len(rows) - 1))
-    visible = rows[:list_height]
-    if selected >= list_height:
-        start = selected - list_height + 1
-        visible = rows[start : start + list_height]
-    else:
-        start = 0
+    start = max(0, selected - list_height + 1) if selected >= list_height else 0
+    for index in range(start, min(len(rows), start + list_height)):
+        render_row(stdscr, 2 + index - start, width, rows, index, selected, highlight_terms(rows[index], query))
 
-    for offset, row in enumerate(visible):
-        idx = start + offset
-        y = 4 + offset
-        selected_row = idx == selected
-        attr = curses.color_pair(6) if selected_row else status_attr(display_status(row))
-        terms = highlight_terms(row, query)
-        highlight_attr = curses.color_pair(7) | curses.A_BOLD
-        title = row_title(row)
-        cwd = row.get("cwd") or ""
-        if width > 100 and cwd and row.get("source") != "archive":
-            cwd_x = min(62, width // 2)
-            indent = title[: len(title) - len(title.lstrip())]
-            fitted = indent + shorten(title, cwd_x - 2 - len(indent))
-            add_highlighted(stdscr, y, 0, fitted, cwd_x - 2, attr, highlight_attr, terms)
-            path_attr = attr if selected_row else attr | curses.A_DIM
-            add_highlighted(
-                stdscr,
-                y,
-                cwd_x,
-                shorten_start(cwd, width - cwd_x - 1),
-                width - cwd_x - 1,
-                path_attr,
-                highlight_attr,
-                terms,
-            )
-        else:
-            add_highlighted(stdscr, y, 0, title, width - 1, attr, highlight_attr, terms)
-
-    addnstr_safe(stdscr, preview_y - 2, 0, "─" * max(0, width - 1), width - 1, curses.A_DIM)
+    addnstr_safe(stdscr, separator_y, 0, "─" * (width - 1), width - 1, dim)
     row = rows[selected]
     terms = highlight_terms(row, query)
-    highlight_attr = curses.color_pair(7) | curses.A_BOLD
-    preview_header = f"{row_title(row, full=True).strip()} | {row.get('cwd') or ''}"
-    add_highlighted(stdscr, preview_y - 1, 0, preview_header, width - 1, curses.A_BOLD, highlight_attr, terms)
+    highlight = curses.color_pair(PAIR_WORKING) | curses.A_BOLD
     if mode == "action":
-        actions = actions or []
+        for offset, action in enumerate((actions or [])[: footer_y - preview_y]):
+            attr = curses.color_pair(PAIR_SELECTED) | curses.A_BOLD if offset == action_selected else curses.A_NORMAL
+            line = f" {action['name']:<18} {action['label']}"
+            addnstr_safe(stdscr, preview_y + offset, 0, " " * (width - 1), width - 1, attr)
+            add_highlighted(stdscr, preview_y + offset, 0, line, width - 1, attr, highlight, tokens(action_query))
         if not actions:
-            addnstr_safe(stdscr, preview_y, 0, "No actions.", width - 1, curses.A_DIM)
-            stdscr.refresh()
-            return
-        action_selected = max(0, min(action_selected, len(actions) - 1))
-        for offset, action in enumerate(actions[:preview_height]):
-            attr = curses.color_pair(6) if offset == action_selected else 0
-            prefix = "> " if offset == action_selected else "  "
-            line = f"{prefix}{action['name']:<18} {action['label']}"
-            add_highlighted(stdscr, preview_y + offset, 0, line, width - 1, attr, highlight_attr, tokens(action_query))
-        stdscr.refresh()
-        return
-    preview_lines = preview_lines_for_match(row.get("content") or "", terms, preview_height)
-    for offset, line in enumerate(preview_lines):
-        add_highlighted(stdscr, preview_y + offset, 0, line, width - 1, 0, highlight_attr, terms)
+            addnstr_safe(stdscr, preview_y, 0, " No actions.", width - 1, dim)
+    else:
+        for offset, line in enumerate(preview_lines_for_match(row.get("content") or "", terms, footer_y - preview_y)):
+            add_highlighted(stdscr, preview_y + offset, 1, line, width - 2, curses.A_NORMAL, highlight, terms)
+
+    detail = message or " · ".join(part for part in (row_title(row, full=True), row.get("cwd") or "") if part)
+    addnstr_safe(stdscr, footer_y, 0, f" {detail}", width - 1, dim)
+    addnstr_safe(stdscr, height - 1, 0, hints, width - 1, dim)
     stdscr.refresh()
+
+
+def picker_chrome(args, query, mode):
+    """Keyword arguments render_picker needs for this picker and mode."""
+    archive = getattr(args, "archive", False)
+    return {
+        "title": picker_title(args, query),
+        "hints": key_hints(args, mode),
+        "placeholder": "search archived chats" if archive else "search panes and chats",
+        "status_text": picker_title(args, query).split("| ", 1)[-1] if archive else "",
+    }
 
 
 def picker_rows(args, query, *, snippets=False):
@@ -764,8 +791,7 @@ def curses_picker(stdscr, args) -> int:
             query,
             rows,
             selected,
-            title=picker_title(args, query),
-            help_text=picker_help(args),
+            **picker_chrome(args, query, mode),
             mode=mode,
             action_query=action_query,
             actions=actions,
@@ -939,8 +965,7 @@ def curses_picker(stdscr, args) -> int:
                     query,
                     rows,
                     selected,
-                    title=picker_title(args, query),
-                    help_text=picker_help(args),
+                    **picker_chrome(args, query, mode),
                     mode=mode,
                 )
             idle_ms = (
@@ -966,8 +991,7 @@ def curses_picker(stdscr, args) -> int:
                             query,
                             rows,
                             selected,
-                            title=picker_title(args, query),
-                            help_text=picker_help(args),
+                            **picker_chrome(args, query, mode),
                             mode=mode,
                         )
                     if queued_exit_insert:

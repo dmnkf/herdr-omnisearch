@@ -135,9 +135,10 @@ class MachineTests(unittest.TestCase):
             rows = picker.picker_rows(args, query)
             self.assertEqual(
                 [picker.row_title(row) for row in rows],
-                ["[workspace] Laptop", "  [idle] codex / agent"],
+                ["Laptop", "codex · agent"],
             )
-            self.assertEqual(picker.row_title(rows[1], full=True), "  [idle] Laptop / codex / agent")
+            self.assertEqual(picker.row_title(rows[1], full=True), "Laptop · codex · agent")
+            self.assertEqual([picker.tree_prefix(rows, index) for index in range(len(rows))], ["▾ ", "  └── "])
             self.assertEqual(rows, live_index.grouped_search_index(query, 20, machines=False))
 
     def test_single_machine_picker_and_watcher_spawn_no_herdr_calls(self):
@@ -211,7 +212,7 @@ class MachineTests(unittest.TestCase):
         args = Namespace(limit=20, agent=None, status=None, all_sessions=False, local_only=False)
         headers = [row for row in picker.picker_rows(args, "") if live_index.is_machine_row(row)]
         workbox = next(row for row in headers if row["machine_label"] == "workbox")
-        self.assertIn("stale", picker.row_title(workbox))
+        self.assertIn("stale", picker.row_meta(workbox))
 
     def test_disabling_machines_hides_synced_rows(self):
         live_index.index_session(50, False, False)
