@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.10.0 - 2026-09-25
+
+- Type what you are looking for. In live search, a word that starts the name
+  of a machine or an agent, or names a status (`working`, `blocked`, `idle`,
+  `done`), also counts as that filter. So `billing work` finds billing panes
+  on the workbox machine, and `codex blocked` finds blocked Codex agents on
+  every machine, even though those words do not appear in the panes.
+- Such a word still matches as text too (the exact word), and rows matching
+  the filter rank first. The filters apply inside the SQL search, so results
+  stay complete however large the index grows.
+- The picker shows how it read the query next to what you type, for example
+  `→ workbox (machine) · text: billing`.
+- `@name` and `#name` filter by machine and workspace when they name one, and
+  otherwise stay text, so `#3845` or `@pytest.fixture` search as typed. The
+  `machine:`, `agent:`, `status:`, `workspace:` and `cwd:` filters accept `m:`,
+  `a:`, `s:`, `w:` and `c:`.
+- Compound names are indexed with their parts, so `api` finds `api-server`.
+  Queries keep whole words, so typo tolerance for compound words is unchanged.
+- With `--local-only`, words are never read as machine names.
+
 ## 0.9.1 - 2026-09-25
 
 - Read OpenCode history only from its SQLite database (OpenCode 1.2 and
