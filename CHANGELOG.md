@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.1 - 2026-09-25
+
+- Fix the live index growing without bound. The fuzzy-search vocabulary kept
+  every word that ever appeared in a pane, so busy machines reached hundreds
+  of megabytes to over a gigabyte for a few dozen panes. Searches slowed to
+  about 100 ms per keystroke, and every refresh rewrote a huge file. Words no
+  pane contains any more are now forgotten after each index run.
+- An index that is already bloated, or still carries the archive tables
+  removed in 0.7.0, is rebuilt from the panes on the next run. That takes about
+  a second and brings it back to a few megabytes. Free pages are vacuumed once
+  they make up a quarter of the file. The archive catalog is not affected.
+
 ## 0.11.0 - 2026-09-25
 
 - Restyle both pickers after Herdr's session navigator. Rows use Herdr's
