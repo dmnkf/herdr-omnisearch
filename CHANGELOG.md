@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.11.0 - 2026-09-25
+
+- Restyle both pickers after Herdr's session navigator. Rows use Herdr's
+  status dots (`●` working, blocked and done, `○` idle, `·` unknown) in its
+  colours instead of bracketed states, and machines, workspaces and panes form
+  a `▾` / `├──` tree. Paths and counts sit quietly on the right, and the
+  selection is a single accent bar.
+- The search line reads ` / query`, with a placeholder when empty and the
+  result count on the right. A two-line footer shows the selected row and the
+  key hints. The mode banner and help line are gone, and matching text still
+  shows below the list.
+- The popup fills the pane area. Herdr sizes plugin popups within the panes,
+  so unlike its own navigator it cannot cover the sidebar.
+
 ## 0.10.1 - 2026-09-25
 
 - Open the live and archive pickers as a centered popup (80% of the screen),
