@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.8.0 - 2026-09-25
+
+- Search every machine at once. When Herdr has saved SSH machines
+  (`herdr machine add`), OmniSearch pulls each machine's live index over SSH
+  and merges it into the picker. The tree gains a machine level above
+  workspaces, and a query pins the five best hits across all machines above
+  the tree. Each machine gets its own result limit, so a busy host cannot
+  crowd out the others.
+- Selecting a result on another machine focuses that exact pane on its server
+  and shows a toast. Herdr does not let other processes switch the client's
+  selected machine, so select it in the sidebar or with `prefix+w` to land
+  there.
+- Every machine keeps indexing its own panes with its own config. The merging
+  machine reads each remote's `export`, which returns that session's own rows
+  and never re-exports synced ones. It refreshes the remote index first when
+  the remote watcher is not running. Remotes need OmniSearch 0.8.0 and
+  `python3`. The SSH command is a single line, so any login shell works,
+  csh included.
+- New commands: `export`, `sync-machines`, `machines`. There is a new
+  `sync-machines` plugin action and a `machine:` query filter. `--local-only`
+  on `search` and `pick` restores single-machine results. `doctor` reports
+  per-machine sync state.
+- New `[machines]` config section: `enabled`, `exclude`, `sync_seconds`,
+  `ssh`, `connect_timeout_seconds`, `timeout_seconds`. The watcher refreshes
+  machines every `sync_seconds` in the background. A machine that cannot be
+  reached keeps its last rows and is marked offline. A remote that cannot read
+  its own Herdr server is marked stale. A malformed export fails only its own
+  machine, and a failing `herdr machine list` never drops synced rows.
+- Single-machine setups are unchanged. Search results and the picker stay
+  exactly as they were. The picker does no machine work, and the watcher checks
+  for saved machines at most every five minutes. `enabled = false` turns that
+  off.
+- Fix live tree grouping for panes from different sessions that share a
+  workspace id.
+
 ## 0.7.0 - 2026-09-20
 
 - Remove the legacy `archive-index` window path: its command, SQLite tables,
