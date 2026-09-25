@@ -13,6 +13,7 @@ from .textmatch import (
     parse_filters,
     score_token_candidate,
     shorten,
+    shorten_start,
     tokens,
 )
 from .live_index import (
@@ -181,7 +182,7 @@ def init_curses_colors():
         pass
 
 
-def row_title(row):
+def row_title(row, *, full=False):
     if row.get("source") == "archive":
         agent = row.get("agent") or "agent"
         space = row.get("workspace_label") or "archive"
@@ -216,6 +217,9 @@ def row_title(row):
     matches = row.get("match_count")
     count = f" x{matches}" if matches and int(matches) > 1 else ""
     marker = "★ " if row.get("_top_match") else ""
+    if row.get("_under_workspace") and not full:
+        # The workspace header right above already names it.
+        return f"{tree_indent(row)}[{status}] {agent} / {label}{count}"
     return f"{tree_indent(row)}{marker}[{status}] {machine_prefix(row)}{workspace} / {agent} / {label}{count}"
 
 
@@ -368,26 +372,32 @@ def render_picker(
         attr = curses.color_pair(6) if selected_row else status_attr(display_status(row))
         terms = highlight_terms(row, query)
         highlight_attr = curses.color_pair(7) | curses.A_BOLD
-        add_highlighted(stdscr, y, 0, row_title(row), width - 1, attr, highlight_attr, terms)
+        title = row_title(row)
         cwd = row.get("cwd") or ""
-        if width > 100 and row.get("source") != "archive":
+        if width > 100 and cwd and row.get("source") != "archive":
             cwd_x = min(62, width // 2)
+            indent = title[: len(title) - len(title.lstrip())]
+            fitted = indent + shorten(title, cwd_x - 2 - len(indent))
+            add_highlighted(stdscr, y, 0, fitted, cwd_x - 2, attr, highlight_attr, terms)
+            path_attr = attr if selected_row else attr | curses.A_DIM
             add_highlighted(
                 stdscr,
                 y,
                 cwd_x,
-                shorten(cwd, width - cwd_x - 1),
+                shorten_start(cwd, width - cwd_x - 1),
                 width - cwd_x - 1,
-                attr,
+                path_attr,
                 highlight_attr,
                 terms,
             )
+        else:
+            add_highlighted(stdscr, y, 0, title, width - 1, attr, highlight_attr, terms)
 
     addnstr_safe(stdscr, preview_y - 2, 0, "─" * max(0, width - 1), width - 1, curses.A_DIM)
     row = rows[selected]
     terms = highlight_terms(row, query)
     highlight_attr = curses.color_pair(7) | curses.A_BOLD
-    preview_header = f"{row_title(row)} | {row.get('cwd') or ''}"
+    preview_header = f"{row_title(row, full=True).strip()} | {row.get('cwd') or ''}"
     add_highlighted(stdscr, preview_y - 1, 0, preview_header, width - 1, curses.A_BOLD, highlight_attr, terms)
     if mode == "action":
         actions = actions or []

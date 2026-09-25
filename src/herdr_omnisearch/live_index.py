@@ -651,6 +651,7 @@ def decorate_live_tree(rows, *, machine_level=False):
         for child in children:
             child = dict(child)
             child["_tree_depth"] = depth + 1
+            child["_under_workspace"] = header is not None
             block.append(child)
         if not block:
             continue
@@ -750,7 +751,8 @@ def grouped_search_index(
     spans_machines = len({row.get("machine_id") or "" for row in ranked}) > 1
     machine_level = machines and (spans_machines or any(row.get("machine_id") for row in ranked))
     tree = decorate_live_tree(ranked, machine_level=machine_level)
-    if not (machine_level and query.strip()):
+    # Pinning only adds information when the hits are spread over machines.
+    if not (spans_machines and query.strip()):
         return tree
     return top_matches(ranked) + tree
 

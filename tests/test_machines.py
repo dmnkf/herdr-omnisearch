@@ -132,11 +132,11 @@ class MachineTests(unittest.TestCase):
         args = Namespace(limit=20, agent=None, status=None, all_sessions=False, local_only=False)
         for query in ("", "deploy"):
             rows = picker.picker_rows(args, query)
-            # The pre-0.8.0 tree, title for title.
             self.assertEqual(
                 [picker.row_title(row) for row in rows],
-                ["[workspace] Laptop", "  [idle] Laptop / codex / agent"],
+                ["[workspace] Laptop", "  [idle] codex / agent"],
             )
+            self.assertEqual(picker.row_title(rows[1], full=True), "  [idle] Laptop / codex / agent")
             self.assertEqual(rows, live_index.grouped_search_index(query, 20, machines=False))
 
     def test_single_machine_picker_and_watcher_spawn_no_herdr_calls(self):
@@ -297,6 +297,21 @@ class MachineTests(unittest.TestCase):
             {"Local", "intranet", "personal"},
         )
         self.assertIn("intranet › Billing", picker.row_title(top[[live_index.machine_name(r) for r in top].index("intranet")]))
+
+    def test_hits_on_one_machine_are_not_pinned_twice(self):
+        self.sync({
+            "intranet": export_payload("Billing", "deploy pipeline for billing"),
+            "personal": export_payload("Game", "quiet output"),
+        })
+        rows = live_index.grouped_search_index("pipeline", 20, machines=True)
+        self.assertFalse(any(row.get("_top_match") for row in rows))
+        self.assertEqual([live_index.machine_name(r) for r in rows if live_index.is_machine_row(r)], ["intranet"])
+
+    def test_path_column_keeps_the_distinguishing_tail(self):
+        path = "/home/intranet/intranet/intranet-worktrees/20260902-dfi-expedia-recapture-precheck"
+        fitted = picker.shorten_start(path, 40)
+        self.assertEqual(len(fitted), 40)
+        self.assertTrue(fitted.startswith("…") and fitted.endswith("expedia-recapture-precheck"))
 
     def test_busy_machine_cannot_crowd_out_the_others(self):
         self.sync({

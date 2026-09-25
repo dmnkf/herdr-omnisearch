@@ -287,6 +287,16 @@ def strip_date_prefix(value: str) -> str:
     return value
 
 
+def shorten_start(value: str, width: int) -> str:
+    """Keep the end of a path, where the distinguishing directory usually is."""
+    value = " ".join(clean_text(value or "").split())
+    if len(value) <= width:
+        return value
+    if width <= 1:
+        return value[-width:] if width else ""
+    return "…" + value[-(width - 1):]
+
+
 def shorten(value: str, width: int) -> str:
     value = " ".join(clean_text(value or "").split())
     if len(value) <= width:
