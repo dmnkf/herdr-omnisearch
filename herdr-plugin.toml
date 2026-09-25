@@ -14,12 +14,13 @@ command = ["bin/herdr-omnisearch", "archive-catalog-start", "--stale-seconds", "
 [[actions]]
 id = "open-live"
 title = "Open live OmniSearch"
-command = ["bin/herdr-omnisearch", "open-plugin-pane", "live"]
+# Herdr's own CLI opens the popup far faster than starting Python for it.
+command = ["sh", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin herdr.omnisearch --entrypoint live"]
 
 [[actions]]
 id = "open-archive"
 title = "Open archived session search"
-command = ["bin/herdr-omnisearch", "open-plugin-pane", "archive"]
+command = ["sh", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin herdr.omnisearch --entrypoint archive"]
 
 [[actions]]
 id = "refresh-live"

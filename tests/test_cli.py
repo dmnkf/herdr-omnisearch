@@ -121,6 +121,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(manifest.count("--native"), 2)
         self.assertEqual(manifest.count('placement = "popup"'), 2)
         self.assertNotIn('placement = "overlay"', manifest)
+        self.assertEqual(manifest.count('plugin pane open --plugin herdr.omnisearch --entrypoint'), 2)
 
     def test_managed_picker_can_force_native_mode_without_tty_detection(self):
         args = Namespace(
