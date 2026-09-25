@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.1 - 2026-09-25
+
+- Open the live and archive pickers as a centered popup (80% of the screen),
+  like Herdr's own session navigator, instead of a zoomed overlay that takes
+  over the active pane. Popups need Herdr 0.7.4, which the plugin's minimum
+  version already covers.
+
 ## 0.10.0 - 2026-09-25
 
 - Type what you are looking for. In live search, a word that starts the name
