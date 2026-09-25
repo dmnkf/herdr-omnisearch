@@ -32,6 +32,7 @@ from .textmatch import (
     title_from_text,
     tokens,
 )
+from . import opencode_history
 from .live_index import (
     derive_space_label_from_cwd,
     fuzzy_snippet,
@@ -42,6 +43,23 @@ from .live_index import (
 )
 
 ARCHIVE_MAX_RECORD_BYTES = 2 * 1024 * 1024
+
+# OpenCode sessions have no file per session; the catalog keys them by a
+# virtual path and uses the session's update time as its change stamp.
+OPENCODE_PREFIX = "opencode:"
+OPENCODE_SOURCES = {}
+# Caps one run's OpenCode exports so a hanging or missing opencode cannot hold
+# the catalog lock (and every other agent's refresh) for long.
+OPENCODE_RUN_SECONDS = 600
+OPENCODE_MAX_TIMEOUTS = 2
+OPENCODE_RUN = {}
+
+
+def reset_opencode_run() -> None:
+    OPENCODE_SOURCES.clear()
+    OPENCODE_RUN.update(
+        {"deadline": time.monotonic() + OPENCODE_RUN_SECONDS, "timeouts": 0, "stopped": ""}
+    )
 
 
 ARCHIVE_MESSAGE_MAX_CHARS = 16000
@@ -201,7 +219,23 @@ def iter_archive_records(path: Path, max_record_bytes: int = ARCHIVE_MAX_RECORD_
                 yield item
 
 
+def is_opencode_source(agent: str) -> bool:
+    return app_config()["archive"].get(agent, {}).get("kind") == "opencode"
+
+
+def epoch_ms_iso(value) -> str:
+    return datetime.fromtimestamp(int(value) / 1000).isoformat() if value else ""
+
+
 def archive_paths(agent: str):
+    if is_opencode_source(agent):
+        sessions = opencode_history.list_sessions(app_config()["archive"][agent])
+        paths = []
+        for session in sessions:
+            key = f"{OPENCODE_PREFIX}{agent}:{session['session_id']}"
+            OPENCODE_SOURCES[key] = session
+            paths.append(Path(key))
+        return sorted(paths)
     globs = app_config()["archive"].get(agent, {}).get("sessions", [])
     paths = []
     for pattern in globs:
@@ -209,7 +243,44 @@ def archive_paths(agent: str):
     return sorted(paths)
 
 
+def archive_source_stamp(agent: str, path: Path):
+    """(size, mtime_ns) identifying one version of a source."""
+    session = OPENCODE_SOURCES.get(str(path))
+    if session is not None:
+        return 0, session["updated_ms"] * 1_000_000
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns
+
+
+def archive_source_items(agent: str, path: Path):
+    session = OPENCODE_SOURCES.get(str(path))
+    if session is None:
+        yield from iter_archive_records(path)
+        return
+    if not OPENCODE_RUN:
+        reset_opencode_run()
+    if OPENCODE_RUN["stopped"] or time.monotonic() > OPENCODE_RUN["deadline"]:
+        raise opencode_history.OpenCodeError(OPENCODE_RUN["stopped"] or "OpenCode export budget used up")
+    try:
+        messages = list(opencode_history.export_messages(app_config()["archive"][agent], session["session_id"]))
+    except opencode_history.OpenCodeUnavailable as exc:
+        OPENCODE_RUN["stopped"] = str(exc)
+        raise
+    except opencode_history.OpenCodeError as exc:
+        if "timed out" in str(exc):
+            OPENCODE_RUN["timeouts"] += 1
+            if OPENCODE_RUN["timeouts"] >= OPENCODE_MAX_TIMEOUTS:
+                OPENCODE_RUN["stopped"] = "opencode export keeps timing out"
+        raise
+    OPENCODE_RUN["timeouts"] = 0
+    for message in messages:
+        yield {**message, "timestamp": epoch_ms_iso(message["created_ms"])}
+
+
 def archive_path_timestamp(agent: str, path: Path) -> float:
+    session = OPENCODE_SOURCES.get(str(path))
+    if session is not None:
+        return session["created_ms"] / 1000
     match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})", path.name)
     if match:
         try:
@@ -239,7 +310,23 @@ def codex_session_is_subagent(payload) -> bool:
     return bool(payload.get("parent_thread_id"))
 
 
+def opencode_metadata(agent: str, path: Path):
+    session = OPENCODE_SOURCES[str(path)]
+    return {
+        "agent": agent,
+        "session_id": session["session_id"],
+        "title": session["title"],
+        "cwd": session["cwd"],
+        "path": str(path),
+        "started_at": epoch_ms_iso(session["created_ms"]),
+        "updated_at": epoch_ms_iso(session["updated_ms"]),
+        "is_subagent": False,
+    }
+
+
 def archive_file_metadata(agent: str, path: Path, thread_names):
+    if str(path) in OPENCODE_SOURCES:
+        return opencode_metadata(agent, path)
     session_id = path.stem
     title = ""
     cwd = ""
@@ -317,6 +404,9 @@ def archive_catalog_turn(agent: str, item):
         message = item.get("message") or {}
         role = message.get("role") or item.get("type") or ""
         content = message.get("content")
+    elif is_opencode_source(agent):
+        role = item.get("role") or ""
+        content = item.get("text") or ""
     if role not in ("user", "assistant"):
         return None
     text = extract_message_text(content)
@@ -366,7 +456,7 @@ def archive_catalog_document(
     message_count = 0
     updated_at = metadata.get("updated_at") or metadata.get("started_at") or ""
     try:
-        for item in iter_archive_records(path):
+        for item in archive_source_items(agent, path):
             timestamp = item.get("timestamp") or ""
             if timestamp:
                 updated_at = timestamp
@@ -386,6 +476,10 @@ def archive_catalog_document(
     except OSError:
         return None
     metadata["updated_at"] = updated_at
+    if not metadata.get("title") and str(path) in OPENCODE_SOURCES:
+        # Untitled OpenCode sessions carry a timestamp title; use the first request instead.
+        first_user = next((turn for turn in first_turns if turn["role"] == "user"), None)
+        metadata["title"] = title_from_text(first_user["content"], "") if first_user else ""
     metadata["preview"] = archive_catalog_preview(recent_turns)
     metadata["message_count"] = message_count
     metadata["space_label"] = derive_space_label_from_cwd(metadata.get("cwd") or "")
@@ -489,9 +583,15 @@ def archive_catalog_index(agents: str = ""):
 def _archive_catalog_index_unlocked(agents: str = ""):
     selected = selected_archive_sources(agents)
     thread_names = load_codex_thread_names() if "codex" in selected else {}
+    reset_opencode_run()
     sources = []
+    # Agents whose history cannot be listed this run keep their catalog rows as they are.
+    unlisted = set()
     for agent in sorted(selected):
-        sources.extend((agent, path) for path in archive_paths(agent))
+        try:
+            sources.extend((agent, path) for path in archive_paths(agent))
+        except opencode_history.OpenCodeError:
+            unlisted.add(agent)
     sources = list(dict.fromkeys(sources))
     sources.sort(
         key=lambda item: archive_path_timestamp(item[0], item[1]),
@@ -540,7 +640,7 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             stale_paths = {
                 path
                 for path, row in existing.items()
-                if row["agent"] in selected and path not in source_paths
+                if row["agent"] in selected and row["agent"] not in unlisted and path not in source_paths
             }
             for stale_path in sorted(stale_paths):
                 old = existing[stale_path]
@@ -573,14 +673,14 @@ def _archive_catalog_index_unlocked(agents: str = ""):
 
         for agent, path in sources:
             try:
-                stat = path.stat()
+                source_size, source_mtime_ns = archive_source_stamp(agent, path)
             except OSError:
                 continue
             old = existing.get(str(path))
             if (
                 old
-                and int(old["source_size"]) == stat.st_size
-                and int(old["source_mtime_ns"]) == stat.st_mtime_ns
+                and int(old["source_size"]) == source_size
+                and int(old["source_mtime_ns"]) == source_mtime_ns
                 and int(old["started_epoch"] or 0) > 0
                 and int(old["message_index_version"] or 0)
                 == ARCHIVE_CATALOG_CONTENT_VERSION
@@ -643,8 +743,8 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             row = {
                 **metadata,
                 "session_key": session_key,
-                "source_size": stat.st_size,
-                "source_mtime_ns": stat.st_mtime_ns,
+                "source_size": source_size,
+                "source_mtime_ns": source_mtime_ns,
                 "indexed_at": indexed_at,
                 "message_generation": generation,
                 "message_index_version": ARCHIVE_CATALOG_CONTENT_VERSION,

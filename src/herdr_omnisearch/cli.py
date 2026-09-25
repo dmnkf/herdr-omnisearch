@@ -35,6 +35,7 @@ from .storage import (
 )
 from .textmatch import clean_text
 from .live_index import grouped_search_index, index_session, maybe_background_index
+from .opencode_history import opencode_binary
 from .machines import (
     EXPORT_FORMAT,
     MachineError,
@@ -392,6 +393,7 @@ def cmd_doctor(_args) -> int:
     print(f"archive_catalog_size_bytes: {catalog_size}")
     print(f"archive_indexing: {'enabled' if app_config()['archive_enabled'] else 'disabled'}")
     print(f"fzf: {shutil.which('fzf') or 'missing'}")
+    print(f"opencode: {opencode_binary() or 'missing'}")
     conn = connect()
     docs = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
     last = conn.execute("SELECT value FROM meta WHERE key = 'last_indexed_at'").fetchone()

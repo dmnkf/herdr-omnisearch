@@ -60,7 +60,7 @@ def default_config():
         "fallback_cwd": str(Path.home()),
         "archive_enabled": False,
         "archive_window_days": 14,
-        "archive_agents": ["codex", "claude"],
+        "archive_agents": ["codex", "claude", "opencode"],
         "archive": {
             "codex": {
                 "sessions": [str(Path.home() / ".codex" / "sessions" / "**" / "*.jsonl")],
@@ -75,6 +75,13 @@ def default_config():
                 "resume": "claude --resume {session_id}",
                 "launcher": "agent",
                 "kind": "claude",
+                "start_timeout_ms": 60000,
+            },
+            "opencode": {
+                "sessions": [],
+                "resume": "opencode --session {session_id}",
+                "launcher": "agent",
+                "kind": "opencode",
                 "start_timeout_ms": 60000,
             },
         },
@@ -150,6 +157,9 @@ def app_config():
             cfg["archive"][agent]["start_timeout_ms"] = max(
                 1000, parser.getint(section, "start_timeout_ms")
             )
+        for key in ("database", "storage", "export"):
+            if parser.has_option(section, key):
+                cfg["archive"][agent][key] = parser.get(section, key).strip()
 
     for section in parser.sections():
         if section.startswith("archive.") and section.split(".", 1)[1] not in cfg["archive"]:
@@ -165,6 +175,9 @@ def app_config():
             }
             if parser.has_option(section, "thread_names"):
                 cfg["archive"][agent]["thread_names"] = parser.get(section, "thread_names")
+            for key in ("database", "storage", "export"):
+                if parser.has_option(section, key):
+                    cfg["archive"][agent][key] = parser.get(section, key).strip()
 
     if parser.has_section("skip"):
         labels = split_config_list(parser.get("skip", "pane_label_contains", fallback=""))

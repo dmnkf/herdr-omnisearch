@@ -167,9 +167,18 @@ Run the standalone archive picker:
 herdr-omnisearch archive-pick --no-refresh --background-refresh --stale-seconds 300
 ```
 
-The archive catalog contains user and assistant messages. It excludes system
-instructions, reasoning records, and tool payloads. The first build streams
-one history file at a time; later refreshes only reread changed files.
+The archive catalog contains user and assistant messages from Codex, Claude
+Code and OpenCode. It excludes system instructions, reasoning records, and tool
+payloads. The first build streams one history file at a time; later refreshes
+only reread changed files.
+
+OpenCode keeps its history in its own storage instead of one file per session.
+OmniSearch lists top-level sessions read-only from that storage (its SQLite
+database, or the JSON files of older releases) and reads each changed session
+with `opencode export`. Subagent sessions are skipped. The first build exports
+every session once, which can take a while with long histories. A session
+whose export fails keeps its previous catalog entry and is retried on the next
+refresh. `doctor` shows which `opencode` binary is used.
 
 Normal text queries search conversation content and Herdr workspace names.
 Workspace-name matches appear before sessions that only match conversation
@@ -329,7 +338,7 @@ fallback_cwd = ~
 [archive]
 enabled = false
 window_days = 14
-agents = codex, claude
+agents = codex, claude, opencode
 
 [archive.codex]
 sessions = ~/.codex/sessions/**/*.jsonl
@@ -344,6 +353,15 @@ sessions = ~/.claude/projects/*/*.jsonl
 resume = claude --resume {session_id}
 launcher = agent
 kind = claude
+start_timeout_ms = 60000
+
+[archive.opencode]
+# database = ~/.local/share/opencode/opencode.db
+# storage = ~/.local/share/opencode/storage
+# export = opencode export {session_id}
+resume = opencode --session {session_id}
+launcher = agent
+kind = opencode
 start_timeout_ms = 60000
 
 [skip]
@@ -379,6 +397,7 @@ The package is split by responsibility, lower layers never import higher ones:
 - `storage.py` SQLite paths, schema, repair and migration, lock files
 - `textmatch.py` tokenizing, fuzzy matching, FTS query building
 - `live_index.py` live pane indexing and search
+- `opencode_history.py` OpenCode session listing and export
 - `archive_catalog.py` archived session catalog, indexing and search
 - `render.py` result row formatting
 - `machines.py` saved SSH machine sync and remote focus
