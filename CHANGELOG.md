@@ -1,10 +1,53 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 - 2026-10-21
 
-- Add oh-my-pi (`omp`) conversation archive search and indexing.
-- Support toggling individual archive agent integrations on or off with
-  `enabled = true|false` under their respective `[archive.<agent>]` sections.
+- Add oh-my-pi (`omp`) to archive search. Its sessions under
+  `~/.omp/agent/sessions/` are indexed like the other agents' and resume with
+  `omp --resume`, and its subagent and advisor transcripts stay out of the
+  results. (#4 by @RONNCC)
+- Turn one archive agent off with `enabled = false` under its
+  `[archive.<agent>]` section. Its sessions are hidden from search and paging
+  but kept in the catalog, not moved to `archive-catalog-absent/`, and
+  `enabled = true` shows them again without re-indexing. (#4 by @RONNCC)
+- Fix the archive catalog growing without bound. Re-indexing a changed session
+  kept every earlier version of its messages, and sessions whose history file
+  was deleted kept theirs too, although search never showed either. One
+  long-used catalog had reached 503 MB for about 16,000 searchable messages.
+  Indexing now deletes superseded messages and moves the messages of vanished
+  sessions to the `archive-catalog-absent/` directory next to the catalog, one
+  gzip file per export, so their text is kept but no longer searched. Each file
+  is written to disk before the catalog deletes its messages, and a failed
+  delete removes the file again.
+- An existing catalog is cleaned up once on the next index run. Superseded
+  messages and tables left by older releases are removed and the file is
+  vacuumed. On a copy of that catalog this went from 503 MB to 26.7 MB and
+  exported 175,448 messages of 721 vanished sessions (36 MB of gzip). Archive
+  searches in a fresh process went from a 137 ms median and 523 ms p90 to 26 ms
+  and 60 ms; repeated searches went from 98 to 22 ms at p90. Free pages are
+  vacuumed again once they make up a quarter of the file. Open pickers keep
+  answering while this runs. The cleanup waits while the disk has less free
+  space than the catalog plus 64 MB, and a failed cleanup no longer stops
+  indexing.
+- An agent whose history listing comes back empty, for example an unmounted
+  folder or a missing `opencode.db`, keeps its catalog sessions for that run
+  instead of having them all exported and removed.
+- Build archive results faster. A query word that appears in a message is no
+  longer compared against every other word in it, and control characters are
+  stripped in one pass. In a test catalog of 16,000 long messages, two-word
+  queries went from 240 to 310 ms down to 13 to 16 ms.
+- Open both pickers faster. A picker now loads only the modules its first
+  screen needs, parses only its own command line instead of building every
+  subcommand, starts its background refresh once the first screen is drawn,
+  and its pane starts Python directly instead of going through the
+  `bin/herdr-omnisearch` launcher. From starting the pane to a complete first
+  screen, the live picker went from 45 to 29 ms and the archive picker from
+  44 to 28 ms (medians of 20 runs), and from 49 and 52 ms to 33 and 32 ms with
+  cold caches.
+- Archive results now follow each keystroke. Typing no longer waits for
+  100 ms of quiet before searching, and keys typed together still run one
+  search. On the cleaned-up catalog a keystroke that searches went from 108 ms
+  to 8 ms at the median and from 122 to 21 ms at p90.
 
 ## 0.11.2 - 2026-09-25
 
