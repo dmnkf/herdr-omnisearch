@@ -594,8 +594,8 @@ def archive_catalog_delete_messages(conn, condition: str, params) -> None:
     conn.execute(f"DELETE FROM catalog_messages WHERE {condition}", params)
 
 
-def archive_catalog_export_sessions(conn, session_keys):
-    session_keys = [
+def archive_catalog_sessions_with_messages(conn, session_keys):
+    return [
         session_key
         for session_key in session_keys
         if conn.execute(
@@ -603,6 +603,10 @@ def archive_catalog_export_sessions(conn, session_keys):
             (session_key,),
         ).fetchone()
     ]
+
+
+def archive_catalog_export_sessions(conn, session_keys):
+    session_keys = archive_catalog_sessions_with_messages(conn, session_keys)
     if not session_keys:
         return None
     directory = ensure_private_directory(archive_catalog_absent_dir(), "archive catalog export")
@@ -661,7 +665,12 @@ def archive_catalog_absent_transaction(conn, session_keys):
             export = archive_catalog_export_sessions(conn, session_keys)
             yield
     except BaseException:
-        if export is not None:
+        # An interrupt can land after COMMIT, so only rows still in the catalog prove the delete rolled back.
+        try:
+            rolled_back = export is not None and bool(archive_catalog_sessions_with_messages(conn, session_keys))
+        except Exception:
+            rolled_back = False
+        if rolled_back:
             export.unlink(missing_ok=True)
         raise
 

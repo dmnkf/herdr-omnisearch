@@ -455,6 +455,56 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                     [("codex:kept", "kept giraffe")],
                 )
 
+    def test_an_interrupt_right_after_the_delete_commits_keeps_the_export(self):
+        for check_fails in (False, True):
+            with self.subTest(check_fails=check_fails), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                with archive_catalog_env(root) as sessions:
+                    write_codex_session(sessions / "kept.jsonl", "kept", [("user", "kept giraffe")])
+                    write_codex_session(sessions / "gone.jsonl", "gone", [("user", "orphaned otter notes")])
+                    archive_catalog.archive_catalog_index()
+                    (sessions / "gone.jsonl").unlink()
+                    real_connect = sqlite3.connect
+
+                    class InterruptedConnection(sqlite3.Connection):
+                        began = False
+                        interrupted = False
+
+                        def execute(self, sql, *args):
+                            if sql == "BEGIN IMMEDIATE":
+                                self.began = True
+                            if check_fails and self.interrupted:
+                                raise sqlite3.OperationalError("disk I/O error")
+                            return super().execute(sql, *args)
+
+                        def __exit__(self, *exc_info):
+                            result = super().__exit__(*exc_info)
+                            if self.began:
+                                self.interrupted = True
+                                raise KeyboardInterrupt
+                            return result
+
+                    def connect(*args, **kwargs):
+                        return real_connect(*args, factory=InterruptedConnection, **kwargs)
+
+                    with patch.object(sqlite3, "connect", connect), self.assertRaises(KeyboardInterrupt):
+                        archive_catalog.archive_catalog_index()
+
+                    self.assertEqual(
+                        catalog_value("SELECT session_key, content FROM catalog_messages ORDER BY session_key"),
+                        [("codex:kept", "kept giraffe")],
+                    )
+                    self.assertEqual(
+                        [
+                            [
+                                (record["session"]["session_key"], [message["content"] for message in record["messages"]])
+                                for record in export
+                            ]
+                            for export in read_absent_exports(root)
+                        ],
+                        [[("codex:gone", ["orphaned otter notes"])]],
+                    )
+
     def test_a_failing_upgrade_still_indexes_and_keeps_old_rows_until_the_upgrade_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
