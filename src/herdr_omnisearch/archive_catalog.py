@@ -810,6 +810,12 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             """
         ).fetchall()
     }
+    listed = {agent for agent, _path in sources}
+    for agent in sorted(selected - unlisted - listed):
+        # An empty listing is far more often an unmounted folder or a config typo than a wiped history.
+        if any(row["agent"] == agent and int(row["is_present"] or 0) for row in existing.values()):
+            print(f"archive catalog kept {agent} sessions: no history files listed", file=sys.stderr)
+            unlisted.add(agent)
     source_paths = {str(path) for _agent, path in sources}
     changed = 0
     unchanged = 0

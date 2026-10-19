@@ -193,6 +193,38 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                 finally:
                     conn.close()
 
+    def test_an_empty_listing_keeps_the_agent_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                write_codex_session(sessions / "one.jsonl", "one", [("user", "first marmot")])
+                write_codex_session(sessions / "two.jsonl", "two", [("user", "second marmot")])
+                archive_catalog.archive_catalog_index()
+                hidden = root / "unmounted"
+                sessions.rename(hidden)
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    self.assertEqual(archive_catalog.archive_catalog_index()[:3], (0, 0, 0))
+
+                self.assertEqual(stderr.getvalue(), "archive catalog kept codex sessions: no history files listed\n")
+                self.assertEqual(
+                    catalog_value("SELECT session_key, is_present FROM catalog_sessions ORDER BY session_key"),
+                    [("codex:one", 1), ("codex:two", 1)],
+                )
+                self.assertEqual(
+                    catalog_contents(),
+                    ([("codex:one", 0, "first marmot"), ("codex:two", 0, "second marmot")], ["first", "marmot", "second"]),
+                )
+                self.assertFalse(absent_export_dir(root).exists())
+
+                hidden.rename(sessions)
+                (sessions / "two.jsonl").unlink()
+                self.assertEqual(archive_catalog.archive_catalog_index()[:3], (0, 1, 1))
+                self.assertEqual(
+                    [[record["session"]["session_key"] for record in export] for export in read_absent_exports(root)],
+                    [["codex:two"]],
+                )
+
     def test_rows_an_older_version_left_behind_are_pruned_on_the_next_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

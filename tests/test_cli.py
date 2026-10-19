@@ -1577,7 +1577,7 @@ class CliTests(unittest.TestCase):
                             (f"{agent}:session", agent, "session", f"/{agent}.jsonl"),
                         )
                 conn.close()
-                with patch.object(archive_catalog, "archive_paths", return_value=[]):
+                with patch.object(archive_catalog, "archive_paths", return_value=[root / "other-codex.jsonl"]):
                     archive_catalog.archive_catalog_index("codex")
                 conn = storage.archive_catalog_connect()
                 try:
