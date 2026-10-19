@@ -14,6 +14,7 @@ from .settings import app_config, cli_command, data_dir
 from .storage import (
     archive_catalog_absent_path,
     archive_catalog_connect,
+    compact_index,
     connect,
     exclusive_lock,
     lock_is_held,
@@ -74,6 +75,12 @@ ARCHIVE_CATALOG_CONTENT_VERSION = 6
 
 
 ARCHIVE_PREFIX_MIN_CHARS = 4
+
+
+ARCHIVE_CATALOG_LAYOUT_VERSION = 1
+
+
+ARCHIVE_CATALOG_LEGACY_TABLES = ("catalog_fts", "catalog_terms", "catalog_token_trigrams")
 
 
 def is_archive_noise(text: str) -> bool:
@@ -616,6 +623,54 @@ def archive_catalog_export_sessions(conn, session_keys) -> None:
             handle.write(json.dumps(record) + "\n")
 
 
+def archive_catalog_upgrade_layout(conn) -> None:
+    row = conn.execute("SELECT value FROM catalog_meta WHERE key = 'layout_version'").fetchone()
+    if row and int(row[0]) >= ARCHIVE_CATALOG_LAYOUT_VERSION:
+        return
+    with conn:
+        archive_catalog_export_sessions(
+            conn,
+            [
+                session["session_key"]
+                for session in conn.execute(
+                    "SELECT session_key FROM catalog_sessions WHERE is_present = 0 ORDER BY session_key"
+                )
+            ],
+        )
+        conn.execute(
+            """
+            DELETE FROM catalog_messages
+            WHERE session_key IN (SELECT session_key FROM catalog_sessions WHERE is_present = 0)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM catalog_messages
+            WHERE indexed_generation != (
+                SELECT s.message_generation
+                FROM catalog_sessions s
+                WHERE s.session_key = catalog_messages.session_key
+            )
+            """
+        )
+        conn.execute("INSERT INTO catalog_message_fts (catalog_message_fts) VALUES ('rebuild')")
+        for table in ARCHIVE_CATALOG_LEGACY_TABLES:
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+    try:
+        conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.OperationalError:
+        return
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO catalog_meta (key, value) VALUES ('layout_version', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (str(ARCHIVE_CATALOG_LAYOUT_VERSION),),
+        )
+
+
 def archive_catalog_index(agents: str = ""):
     require_archive_enabled()
     inherited_lock = os.environ.get("HERDR_OMNISEARCH_CATALOG_LOCK_FD")
@@ -660,6 +715,7 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             live_conn.close()
 
     conn = archive_catalog_connect()
+    archive_catalog_upgrade_layout(conn)
     existing = {
         row["path"]: dict(row)
         for row in conn.execute(
@@ -860,6 +916,7 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                 """,
                 (str(int(time.time())),),
             )
+        compact_index(conn, min_free_bytes=0)
     finally:
         conn.close()
     return changed, unchanged, removed, message_count

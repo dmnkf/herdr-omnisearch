@@ -299,13 +299,15 @@ def reset_index_file() -> None:
             pass
 
 
-def compact_index(conn) -> None:
+def compact_index(conn, min_free_bytes=None) -> None:
     """Reclaim free pages once they pile up; a busy database is left for next time."""
+    if min_free_bytes is None:
+        min_free_bytes = COMPACT_MIN_FREE_BYTES
     try:
         page_size = conn.execute("PRAGMA page_size").fetchone()[0]
         pages = conn.execute("PRAGMA page_count").fetchone()[0]
         free = conn.execute("PRAGMA freelist_count").fetchone()[0]
-        if free * page_size >= COMPACT_MIN_FREE_BYTES and free * 4 >= pages:
+        if free * page_size >= min_free_bytes and free * 4 >= pages:
             conn.execute("VACUUM")
             # In WAL mode the smaller file only lands once the log is checkpointed.
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

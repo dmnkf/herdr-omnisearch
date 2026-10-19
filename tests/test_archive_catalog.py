@@ -1,6 +1,7 @@
 import gzip
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -140,6 +141,147 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                     )
                 finally:
                     conn.close()
+
+    def test_upgrading_an_old_catalog_keeps_only_searchable_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = root / "state" / "archive-catalog.sqlite3"
+            with archive_catalog_env(root) as sessions:
+                write_codex_session(
+                    sessions / "alpha.jsonl",
+                    "alpha",
+                    [("user", "penguin migration plan"), ("assistant", "penguin plan approved")],
+                )
+                write_codex_session(sessions / "beta.jsonl", "beta", [("user", "beta release notes")])
+                write_codex_session(sessions / "gone.jsonl", "gone", [("user", "orphaned otter notes")])
+                archive_catalog.archive_catalog_index()
+
+                legacy = sqlite3.connect(catalog)
+                with legacy:
+                    legacy.execute("DELETE FROM catalog_meta WHERE key = 'layout_version'")
+                    legacy.execute("UPDATE catalog_sessions SET is_present = 0 WHERE session_key = 'codex:gone'")
+                    legacy.execute(
+                        """
+                        INSERT INTO catalog_messages (
+                            message_key, session_key, ordinal, role, content, indexed_generation
+                        ) VALUES ('stale-1', 'codex:alpha', 0, 'user', 'obsolete quokka draft', 1)
+                        """
+                    )
+                    legacy.execute(
+                        """
+                        INSERT INTO catalog_message_fts (rowid, content)
+                        SELECT id, content FROM catalog_messages WHERE message_key = 'stale-1'
+                        """
+                    )
+                    legacy.execute(
+                        "CREATE VIRTUAL TABLE catalog_fts USING fts5(session_key UNINDEXED, body, tokenize = 'porter unicode61')"
+                    )
+                    legacy.executemany(
+                        "INSERT INTO catalog_fts (session_key, body) VALUES (?, ?)",
+                        ((f"codex:old-{index}", "legacy body " * 200) for index in range(300)),
+                    )
+                    legacy.execute("CREATE TABLE catalog_terms (token TEXT PRIMARY KEY)")
+                    legacy.execute("INSERT INTO catalog_terms (token) VALUES ('legacy')")
+                    legacy.execute(
+                        "CREATE TABLE catalog_token_trigrams (trigram TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY (trigram, token))"
+                    )
+                    legacy.execute("CREATE INDEX idx_catalog_token_trigrams_token ON catalog_token_trigrams(token)")
+                    legacy.execute("INSERT INTO catalog_token_trigrams (trigram, token) VALUES ('leg', 'legacy')")
+                legacy.close()
+                (sessions / "gone.jsonl").unlink()
+
+                queries = ["penguin", "penguim", "beta release", "quokka", "otter", ""]
+
+                def results():
+                    return {
+                        query: [
+                            (row["session_id"], row["content"], row["matched_tokens"])
+                            for row in archive_catalog.archive_catalog_search(query, 10)
+                        ]
+                        for query in queries
+                    }
+
+                before = results()
+                self.assertEqual(before["penguim"][0][:1], ("alpha",))
+                self.assertEqual(before["quokka"], [])
+                self.assertEqual(archive_catalog.archive_catalog_index()[:3], (0, 2, 0))
+
+                self.assertEqual(results(), before)
+                self.assertEqual(
+                    catalog_contents(),
+                    (
+                        [
+                            ("codex:alpha", 0, "penguin migration plan"),
+                            ("codex:alpha", 1, "penguin plan approved"),
+                            ("codex:beta", 0, "beta release notes"),
+                        ],
+                        ["approved", "beta", "migration", "notes", "penguin", "plan", "release"],
+                    ),
+                )
+                export = read_absent_export(root)
+                self.assertEqual(
+                    [
+                        (record["session"]["session_key"], [message["content"] for message in record["messages"]])
+                        for record in export
+                    ],
+                    [("codex:gone", ["orphaned otter notes"])],
+                )
+                conn = storage.archive_catalog_connect()
+                try:
+                    tables = {
+                        row["name"]
+                        for row in conn.execute("SELECT name FROM sqlite_master WHERE name LIKE 'catalog_%'")
+                    }
+                    self.assertEqual(
+                        sorted(table for table in tables if not table.startswith("catalog_message_fts_")),
+                        ["catalog_message_fts", "catalog_message_vocab", "catalog_messages", "catalog_meta", "catalog_sessions"],
+                    )
+                    self.assertEqual(conn.execute("PRAGMA freelist_count").fetchone()[0], 0)
+                    self.assertEqual(
+                        conn.execute("SELECT value FROM catalog_meta WHERE key = 'layout_version'").fetchone()[0],
+                        "1",
+                    )
+                finally:
+                    conn.close()
+
+                archive_catalog.archive_catalog_index()
+                self.assertEqual(len(read_absent_export(root)), 1)
+
+    def test_a_catalog_that_loses_most_of_its_messages_is_vacuumed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                write_codex_session(sessions / "small.jsonl", "small", [("user", "small note")])
+                write_codex_session(
+                    sessions / "large.jsonl",
+                    "large",
+                    [("assistant", f"bulky turn {index} " + "padding " * 250) for index in range(200)],
+                )
+                archive_catalog.archive_catalog_index()
+                (sessions / "large.jsonl").unlink()
+                archive_catalog.archive_catalog_index()
+                conn = storage.archive_catalog_connect()
+                try:
+                    self.assertEqual(conn.execute("PRAGMA freelist_count").fetchone()[0], 0)
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM catalog_messages").fetchone()[0], 1)
+                finally:
+                    conn.close()
+
+    def test_a_search_while_the_indexer_holds_the_write_lock_still_answers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                write_codex_session(sessions / "busy.jsonl", "busy", [("user", "lockstep heron")])
+                archive_catalog.archive_catalog_index()
+                writer = sqlite3.connect(root / "state" / "archive-catalog.sqlite3", isolation_level=None)
+                try:
+                    writer.execute("BEGIN IMMEDIATE")
+                    writer.execute("DELETE FROM catalog_meta")
+                    storage.ARCHIVE_CATALOG_SCHEMA_READY.clear()
+                    self.assertEqual(search_ids("heron"), ["busy"])
+                finally:
+                    writer.execute("ROLLBACK")
+                    writer.close()
 
 
 if __name__ == "__main__":
