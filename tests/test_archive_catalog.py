@@ -111,6 +111,16 @@ def make_legacy_catalog(root, sessions):
         legacy.execute("UPDATE catalog_sessions SET is_present = 0 WHERE session_key = 'codex:gone'")
         legacy.execute("CREATE TABLE catalog_terms (token TEXT PRIMARY KEY)")
         legacy.executemany("INSERT INTO catalog_terms (token) VALUES (?)", ((f"legacy{index}" * 4,) for index in range(2000)))
+        legacy.execute(
+            """
+            INSERT INTO catalog_messages (message_key, session_key, ordinal, role, content, indexed_generation)
+            SELECT 'stale-key', session_key, 0, 'user', 'stale walrus', message_generation - 1
+            FROM catalog_sessions WHERE session_key = 'codex:kept'
+            """
+        )
+        legacy.execute(
+            "INSERT INTO catalog_message_fts (rowid, content) SELECT id, content FROM catalog_messages WHERE message_key = 'stale-key'"
+        )
     legacy.close()
     (sessions / "gone.jsonl").unlink()
 
@@ -425,8 +435,7 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
 
                 stderr = io.StringIO()
                 with failing_sql("DELETE FROM catalog_messages"), redirect_stderr(stderr):
-                    with self.assertRaises(sqlite3.OperationalError):
-                        archive_catalog.archive_catalog_index()
+                    self.assertEqual(archive_catalog.archive_catalog_index()[:3], (0, 1, 0))
 
                 self.assertEqual(stderr.getvalue(), "archive catalog cleanup failed: database or disk is full\n")
                 self.assertEqual(list(absent_export_dir(root).iterdir()), [])
@@ -446,7 +455,7 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                     [("codex:kept", "kept giraffe")],
                 )
 
-    def test_a_failing_upgrade_still_indexes_and_exports_the_absent_session_once(self):
+    def test_a_failing_upgrade_still_indexes_and_keeps_old_rows_until_the_upgrade_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with archive_catalog_env(root) as sessions:
@@ -459,11 +468,27 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                 self.assertEqual(stderr.getvalue(), "archive catalog cleanup failed: database or disk is full\n")
                 self.assertEqual(search_ids("pelican"), ["fresh"])
                 self.assertEqual(
+                    catalog_value("SELECT session_key, content FROM catalog_messages ORDER BY session_key, content"),
+                    [
+                        ("codex:fresh", "fresh pelican idea"),
+                        ("codex:gone", "orphaned otter notes"),
+                        ("codex:kept", "kept giraffe"),
+                        ("codex:kept", "stale walrus"),
+                    ],
+                )
+                self.assertEqual(list(absent_export_dir(root).iterdir()), [])
+                self.assertEqual(catalog_value("SELECT value FROM catalog_meta WHERE key = 'layout_version'"), [])
+                self.assertEqual(catalog_value("SELECT COUNT(*) FROM catalog_terms"), [(2000,)])
+
+                archive_catalog.archive_catalog_index()
+                self.assertEqual(
                     [[record["session"]["session_key"] for record in export] for export in read_absent_exports(root)],
                     [["codex:gone"]],
                 )
-                self.assertEqual(catalog_value("SELECT value FROM catalog_meta WHERE key = 'layout_version'"), [])
-                self.assertEqual(catalog_value("SELECT COUNT(*) FROM catalog_terms"), [(2000,)])
+                self.assertEqual(
+                    catalog_value("SELECT session_key, content FROM catalog_messages ORDER BY session_key, content"),
+                    [("codex:fresh", "fresh pelican idea"), ("codex:kept", "kept giraffe")],
+                )
 
     def test_a_nearly_full_disk_skips_the_upgrade_but_still_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -484,6 +509,16 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                 self.assertEqual(asked, [root / "state"])
                 self.assertEqual(stderr.getvalue(), "archive catalog cleanup skipped: 10 MB free, needs 64 MB\n")
                 self.assertEqual(search_ids("pelican"), ["fresh"])
+                self.assertEqual(
+                    catalog_value("SELECT session_key, content FROM catalog_messages ORDER BY session_key, content"),
+                    [
+                        ("codex:fresh", "fresh pelican idea"),
+                        ("codex:gone", "orphaned otter notes"),
+                        ("codex:kept", "kept giraffe"),
+                        ("codex:kept", "stale walrus"),
+                    ],
+                )
+                self.assertFalse(absent_export_dir(root).exists())
                 self.assertEqual(catalog_value("SELECT value FROM catalog_meta WHERE key = 'layout_version'"), [])
                 self.assertEqual(catalog_value("SELECT COUNT(*) FROM catalog_terms"), [(2000,)])
 

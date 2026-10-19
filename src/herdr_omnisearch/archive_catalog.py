@@ -697,10 +697,10 @@ def archive_catalog_prune(conn) -> None:
         )
 
 
-def archive_catalog_upgrade_layout(conn) -> None:
+def archive_catalog_upgrade_layout(conn) -> bool:
     row = conn.execute("SELECT value FROM catalog_meta WHERE key = 'layout_version'").fetchone()
     if row and int(row[0]) >= ARCHIVE_CATALOG_LAYOUT_VERSION:
-        return
+        return True
     catalog = archive_catalog_db_path().expanduser()
     needed = catalog.stat().st_size + ARCHIVE_CATALOG_UPGRADE_HEADROOM_BYTES
     free = shutil.disk_usage(catalog.parent).free
@@ -709,7 +709,7 @@ def archive_catalog_upgrade_layout(conn) -> None:
             f"archive catalog cleanup skipped: {free // 2**20} MB free, needs {needed // 2**20} MB",
             file=sys.stderr,
         )
-        return
+        return False
     absent = [
         session["session_key"]
         for session in conn.execute(
@@ -749,6 +749,7 @@ def archive_catalog_upgrade_layout(conn) -> None:
             )
     finally:
         conn.execute(f"PRAGMA secure_delete = {SQLITE_SECURE_DELETE_MODES[secure_delete]}")
+    return True
 
 
 def archive_catalog_index(agents: str = ""):
@@ -796,9 +797,10 @@ def _archive_catalog_index_unlocked(agents: str = ""):
 
     conn = archive_catalog_connect()
     try:
-        archive_catalog_upgrade_layout(conn)
+        layout_current = archive_catalog_upgrade_layout(conn)
     except (sqlite3.Error, OSError) as exc:
         print(f"archive catalog cleanup failed: {exc}", file=sys.stderr)
+        layout_current = False
     existing = {
         row["path"]: dict(row)
         for row in conn.execute(
@@ -991,7 +993,9 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             changed += 1
             message_count += indexed_messages
 
-        archive_catalog_prune(conn)
+        # Before the upgrade the prune would do its bulk delete with secure_delete on and no disk check.
+        if layout_current:
+            archive_catalog_prune(conn)
         with conn:
             conn.execute(
                 """
