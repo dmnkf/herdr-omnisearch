@@ -1036,6 +1036,9 @@ def archive_catalog_matched_tokens(content: str, query_terms):
     content_terms = set(tokens(content or ""))
     matched = []
     for query_term in query_terms:
+        if query_term in content_terms:
+            matched.append(query_term)
+            continue
         candidates = [
             (score_token_candidate(query_term, candidate), candidate)
             for candidate in content_terms

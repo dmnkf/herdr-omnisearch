@@ -6,13 +6,14 @@ from .settings import app_config
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]*")
 PART_SPLIT_RE = re.compile(r"[_.:/@+-]+")
+CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f]")
 FILTER_ALIASES = {"m": "machine", "a": "agent", "s": "status", "w": "workspace", "c": "cwd"}
 
 
 def clean_text(value: str) -> str:
     value = value.replace("\r\n", "\n").replace("\r", "\n")
     value = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", value)
-    value = "".join(ch for ch in value if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+    value = CONTROL_CHARS_RE.sub("", value)
     return value.strip()
 
 

@@ -1,6 +1,8 @@
 import gzip
 import json
 import os
+import random
+import re
 import sqlite3
 import sys
 import tempfile
@@ -14,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 os.environ.setdefault("HERDR_PLUGIN_STATE_DIR", tempfile.mkdtemp(prefix="herdr-omnisearch-tests-"))
 
-from herdr_omnisearch import archive_catalog, settings, storage  # noqa: E402
+from herdr_omnisearch import archive_catalog, settings, storage, textmatch  # noqa: E402
 
 
 def write_codex_session(path, session_id, turns):
@@ -282,6 +284,84 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                 finally:
                     writer.execute("ROLLBACK")
                     writer.close()
+
+
+def clean_text_before_0_12(value):
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", value)
+    value = "".join(ch for ch in value if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+    return value.strip()
+
+
+def matched_tokens_before_0_12(content, query_terms):
+    content_terms = set(textmatch.tokens(content or ""))
+    matched = []
+    for query_term in query_terms:
+        candidates = [
+            (textmatch.score_token_candidate(query_term, candidate), candidate)
+            for candidate in content_terms
+        ]
+        candidates = [candidate for candidate in candidates if candidate[0] > 0]
+        if candidates:
+            matched.append(max(candidates)[1])
+    return list(dict.fromkeys(matched))
+
+
+class ResultRowMatchingTests(unittest.TestCase):
+    def test_clean_text_strips_control_characters_but_keeps_text(self):
+        cases = {
+            "a\x00b\x07c\x1bd\x1f": "abcd",
+            "\x1b[31mred\x1b[0m and \x1b[?25lhidden": "red and hidden",
+            "line1\r\nline2\rline3\n": "line1\nline2\nline3",
+            "col1\tcol2\x0bx\x0cy": "col1\tcol2xy",
+            "  café \x85 日本語 \x7f ok  ": "café \x85 日本語 \x7f ok",
+        }
+        self.assertEqual({value: textmatch.clean_text(value) for value in cases}, cases)
+
+    def test_clean_text_matches_the_previous_implementation(self):
+        rng = random.Random(12)
+        alphabet = [chr(code) for code in range(0, 33)] + [
+            "\x7f", "\x85", "\u2028", "é", "日", "\U0001f600", "a", "Z", "[", "m", "\x1b[", "\x1b[1;32m", "\r\n",
+        ]
+        values = ["".join(rng.choice(alphabet) for _ in range(rng.randint(0, 40))) for _ in range(3000)]
+        self.assertEqual(
+            [textmatch.clean_text(value) for value in values],
+            [clean_text_before_0_12(value) for value in values],
+        )
+
+    def test_matched_tokens_pick_the_best_token_per_query_term(self):
+        cases = [
+            ("deploy the api-server now", ["deploy"], ["deploy"]),
+            ("plan planning planned", ["plan"], ["plan"]),
+            ("the deployment finished", ["deplo"], ["deployment"]),
+            ("we deploy daily", ["deployment"], ["deploy"]),
+            ("the penguin swims", ["penguim"], ["penguin"]),
+            ("abce abcf", ["abcd"], ["abcf"]),
+            ("plan for today", ["plan", "plans"], ["plan"]),
+            ("the penguin swims", ["zebra"], []),
+            ("", ["deploy"], []),
+        ]
+        self.assertEqual(
+            [archive_catalog.archive_catalog_matched_tokens(content, terms) for content, terms, _ in cases],
+            [expected for _content, _terms, expected in cases],
+        )
+
+    def test_matched_tokens_match_the_previous_implementation(self):
+        rng = random.Random(7)
+        words = ["deploy", "deployment", "deployed", "plan", "planning", "penguin", "pengiun", "api-server",
+                 "abce", "abcf", "abcd", "release", "relase", "ok", "go", "migration", "migrate", "x1"]
+        variants = words + ["deplo", "penguim", "plans", "migr", "releasee", "zzzz", "ab", "api", "abc"]
+        cases = [
+            (
+                " ".join(rng.choice(words) for _ in range(rng.randint(0, 12))),
+                [rng.choice(variants) for _ in range(rng.randint(1, 4))],
+            )
+            for _ in range(3000)
+        ]
+        self.assertEqual(
+            [archive_catalog.archive_catalog_matched_tokens(content, terms) for content, terms in cases],
+            [matched_tokens_before_0_12(content, terms) for content, terms in cases],
+        )
 
 
 if __name__ == "__main__":
