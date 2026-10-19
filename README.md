@@ -242,6 +242,10 @@ Plugin installations store their SQLite indexes here:
 ~/.local/state/herdr/plugins/herdr.omnisearch/archive-catalog.sqlite3
 ```
 
+When an archived session's history file disappears, its catalog messages move
+to `archive-catalog-absent.jsonl.gz` next to the catalog, one JSON line per
+session, and no longer appear in search.
+
 Standalone CLI installations use
 `~/.local/share/herdr-omnisearch/index.sqlite3`. Existing standalone indexes
 are migrated into the plugin state directory on first plugin use.

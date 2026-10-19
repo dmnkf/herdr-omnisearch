@@ -1,5 +1,6 @@
 import base64
 import glob
+import gzip
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from .settings import app_config, cli_command, data_dir
 from .storage import (
+    archive_catalog_absent_path,
     archive_catalog_connect,
     connect,
     exclusive_lock,
@@ -567,6 +569,53 @@ def archive_catalog_store_message_batch(conn, session_key: str, generation: int,
     )
 
 
+def archive_catalog_delete_messages(conn, condition: str, params) -> None:
+    # External-content FTS keeps a row's terms until told the exact text it indexed.
+    conn.execute(
+        f"""
+        INSERT INTO catalog_message_fts (catalog_message_fts, rowid, content)
+        SELECT 'delete', id, content FROM catalog_messages WHERE {condition}
+        """,
+        params,
+    )
+    conn.execute(f"DELETE FROM catalog_messages WHERE {condition}", params)
+
+
+def archive_catalog_export_sessions(conn, session_keys) -> None:
+    session_keys = [
+        session_key
+        for session_key in session_keys
+        if conn.execute(
+            "SELECT 1 FROM catalog_messages WHERE session_key = ? LIMIT 1",
+            (session_key,),
+        ).fetchone()
+    ]
+    if not session_keys:
+        return
+    fd = os.open(archive_catalog_absent_path(), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "ab") as raw, gzip.open(raw, "at", encoding="utf-8") as handle:
+        for session_key in session_keys:
+            session = conn.execute(
+                "SELECT * FROM catalog_sessions WHERE session_key = ?",
+                (session_key,),
+            ).fetchone()
+            messages = conn.execute(
+                """
+                SELECT message_key, ordinal, role, message_at, message_epoch, content,
+                       indexed_generation
+                FROM catalog_messages
+                WHERE session_key = ?
+                ORDER BY indexed_generation ASC, ordinal ASC
+                """,
+                (session_key,),
+            ).fetchall()
+            record = {
+                "session": dict(session),
+                "messages": [dict(message) for message in messages],
+            }
+            handle.write(json.dumps(record) + "\n")
+
+
 def archive_catalog_index(agents: str = ""):
     require_archive_enabled()
     inherited_lock = os.environ.get("HERDR_OMNISEARCH_CATALOG_LOCK_FD")
@@ -642,6 +691,7 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                 for path, row in existing.items()
                 if row["agent"] in selected and row["agent"] not in unlisted and path not in source_paths
             }
+            absent_keys = []
             for stale_path in sorted(stale_paths):
                 old = existing[stale_path]
                 if int(old["is_present"] or 0):
@@ -649,7 +699,12 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                         "UPDATE catalog_sessions SET is_present = 0 WHERE session_key = ?",
                         (old["session_key"],),
                     )
+                    absent_keys.append(old["session_key"])
                     removed += 1
+            # The source file is gone, so the export is the only copy of these messages.
+            archive_catalog_export_sessions(conn, absent_keys)
+            for session_key in absent_keys:
+                archive_catalog_delete_messages(conn, "session_key = ?", (session_key,))
 
             for old in existing.values():
                 mapped_label = (
@@ -786,6 +841,11 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                     is_present = excluded.is_present
                 """,
                 row,
+            )
+            archive_catalog_delete_messages(
+                conn,
+                "session_key = ? AND indexed_generation != ?",
+                (session_key, generation),
             )
             conn.execute("RELEASE SAVEPOINT archive_catalog_source")
             conn.commit()
