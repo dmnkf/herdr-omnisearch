@@ -677,6 +677,20 @@ def archive_catalog_absent_transaction(conn, session_keys):
 
 def archive_catalog_prune(conn) -> None:
     # Runs every pass, so rows left by older versions or other writers converge too.
+    # Absent sessions keep every version for their export, which commits apart so its failure cannot block this.
+    with conn:
+        archive_catalog_delete_messages(
+            conn,
+            """
+            id IN (
+                SELECT m.id
+                FROM catalog_messages m
+                JOIN catalog_sessions s ON s.session_key = m.session_key
+                WHERE m.indexed_generation != s.message_generation AND s.is_present IS NOT 0
+            )
+            """,
+            (),
+        )
     absent = [
         row["session_key"]
         for row in conn.execute(
@@ -692,18 +706,6 @@ def archive_catalog_prune(conn) -> None:
     with archive_catalog_absent_transaction(conn, absent):
         for session_key in absent:
             archive_catalog_delete_messages(conn, "session_key = ?", (session_key,))
-        archive_catalog_delete_messages(
-            conn,
-            """
-            id IN (
-                SELECT m.id
-                FROM catalog_messages m
-                JOIN catalog_sessions s ON s.session_key = m.session_key
-                WHERE m.indexed_generation != s.message_generation
-            )
-            """,
-            (),
-        )
 
 
 def archive_catalog_upgrade_layout(conn) -> bool:
@@ -1004,7 +1006,10 @@ def _archive_catalog_index_unlocked(agents: str = ""):
 
         # Before the upgrade the prune would do its bulk delete with secure_delete on and no disk check.
         if layout_current:
-            archive_catalog_prune(conn)
+            try:
+                archive_catalog_prune(conn)
+            except (sqlite3.Error, OSError) as exc:
+                print(f"archive catalog cleanup failed: {exc}", file=sys.stderr)
         with conn:
             conn.execute(
                 """

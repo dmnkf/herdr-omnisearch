@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager, redirect_stderr
 from pathlib import Path
@@ -101,6 +102,21 @@ def failing_sql(fragment):
         yield
 
 
+def insert_superseded_message(conn, session_key, content):
+    conn.execute(
+        """
+        INSERT INTO catalog_messages (message_key, session_key, ordinal, role, content, indexed_generation)
+        SELECT 'stale-' || session_key, session_key, 0, 'user', ?, message_generation - 1
+        FROM catalog_sessions WHERE session_key = ?
+        """,
+        (content, session_key),
+    )
+    conn.execute(
+        "INSERT INTO catalog_message_fts (rowid, content) SELECT id, content FROM catalog_messages WHERE message_key = ?",
+        ("stale-" + session_key,),
+    )
+
+
 def make_legacy_catalog(root, sessions):
     write_codex_session(sessions / "kept.jsonl", "kept", [("user", "kept giraffe")])
     write_codex_session(sessions / "gone.jsonl", "gone", [("user", "orphaned otter notes")])
@@ -111,16 +127,7 @@ def make_legacy_catalog(root, sessions):
         legacy.execute("UPDATE catalog_sessions SET is_present = 0 WHERE session_key = 'codex:gone'")
         legacy.execute("CREATE TABLE catalog_terms (token TEXT PRIMARY KEY)")
         legacy.executemany("INSERT INTO catalog_terms (token) VALUES (?)", ((f"legacy{index}" * 4,) for index in range(2000)))
-        legacy.execute(
-            """
-            INSERT INTO catalog_messages (message_key, session_key, ordinal, role, content, indexed_generation)
-            SELECT 'stale-key', session_key, 0, 'user', 'stale walrus', message_generation - 1
-            FROM catalog_sessions WHERE session_key = 'codex:kept'
-            """
-        )
-        legacy.execute(
-            "INSERT INTO catalog_message_fts (rowid, content) SELECT id, content FROM catalog_messages WHERE message_key = 'stale-key'"
-        )
+        insert_superseded_message(legacy, "codex:kept", "stale walrus")
     legacy.close()
     (sessions / "gone.jsonl").unlink()
 
@@ -504,6 +511,60 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                         ],
                         [[("codex:gone", ["orphaned otter notes"])]],
                     )
+
+    def test_a_failing_export_still_prunes_superseded_rows_and_finishes_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                write_codex_session(sessions / "kept.jsonl", "kept", [("user", "kept giraffe")])
+                write_codex_session(sessions / "gone.jsonl", "gone", [("user", "orphaned otter notes")])
+                archive_catalog.archive_catalog_index()
+                legacy = sqlite3.connect(root / "state" / "archive-catalog.sqlite3")
+                with legacy:
+                    insert_superseded_message(legacy, "codex:kept", "stale walrus")
+                    insert_superseded_message(legacy, "codex:gone", "earlier otter draft")
+                    legacy.execute("UPDATE catalog_meta SET value = '1' WHERE key = 'last_indexed_at'")
+                legacy.close()
+                (sessions / "gone.jsonl").unlink()
+                write_codex_session(sessions / "fresh.jsonl", "fresh", [("user", "fresh pelican idea")])
+                absent_export_dir(root).write_text("not a directory", encoding="utf-8")
+                started = int(time.time())
+
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    self.assertEqual(archive_catalog.archive_catalog_index()[:3], (1, 1, 1))
+
+                self.assertEqual(
+                    stderr.getvalue(),
+                    "archive catalog cleanup failed: cannot create archive catalog export directory "
+                    f"{absent_export_dir(root)}: [Errno 17] File exists: '{absent_export_dir(root)}'\n",
+                )
+                self.assertEqual(
+                    catalog_value("SELECT session_key, content FROM catalog_messages ORDER BY session_key, content"),
+                    [
+                        ("codex:fresh", "fresh pelican idea"),
+                        ("codex:gone", "earlier otter draft"),
+                        ("codex:gone", "orphaned otter notes"),
+                        ("codex:kept", "kept giraffe"),
+                    ],
+                )
+                self.assertEqual(search_ids("pelican"), ["fresh"])
+                self.assertEqual(search_ids("walrus"), [])
+                [(last_indexed_at,)] = catalog_value("SELECT value FROM catalog_meta WHERE key = 'last_indexed_at'")
+                self.assertGreaterEqual(int(last_indexed_at), started)
+
+                absent_export_dir(root).unlink()
+                archive_catalog.archive_catalog_index()
+                self.assertEqual(
+                    [
+                        [
+                            (record["session"]["session_key"], sorted(message["content"] for message in record["messages"]))
+                            for record in export
+                        ]
+                        for export in read_absent_exports(root)
+                    ],
+                    [[("codex:gone", ["earlier otter draft", "orphaned otter notes"])]],
+                )
 
     def test_a_failing_upgrade_still_indexes_and_keeps_old_rows_until_the_upgrade_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
