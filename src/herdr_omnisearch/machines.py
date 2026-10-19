@@ -6,11 +6,8 @@ them under a machine namespace, so one picker can search and focus them all.
 """
 
 import base64
-import json
 import shlex
-import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 from .herdr_cli import HerdrCLI, HerdrCLIError
 from .live_index import prune_vocabulary, replace_docs
@@ -126,6 +123,7 @@ def remote_argv(machine, args):
 
 
 def run_remote(machine, args, *, timeout=None):
+    import subprocess
     timeout = timeout or machines_config()["timeout_seconds"]
     try:
         result = subprocess.run(
@@ -152,6 +150,7 @@ def run_remote(machine, args, *, timeout=None):
 
 
 def fetch_export(machine):
+    import json
     output = run_remote(machine, ["export"])
     if len(output) > MAX_EXPORT_CHARS:
         raise MachineError(f"{machine['label']}: export exceeds {MAX_EXPORT_CHARS} characters")
@@ -214,6 +213,7 @@ def ingest_export(conn, machine, payload) -> int:
 
 
 def machine_status(conn, machine_id):
+    import json
     row = conn.execute("SELECT value FROM meta WHERE key = ?", (f"machine:{machine_id}",)).fetchone()
     try:
         return json.loads(row[0]) if row else {}
@@ -222,6 +222,7 @@ def machine_status(conn, machine_id):
 
 
 def write_status(conn, machine, status) -> None:
+    import json
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
         (f"machine:{machine['id']}", json.dumps({**status, "label": machine["label"]})),
@@ -241,6 +242,7 @@ def failed_status(conn, machine, error, now):
 
 def sync_machines():
     """Pull every saved machine concurrently; a failing machine keeps its last rows."""
+    from concurrent.futures import ThreadPoolExecutor
     machines = saved_machines()
     results = {}
     if machines:
@@ -306,6 +308,7 @@ def sync_machines():
 
 
 def machine_statuses():
+    import json
     conn = connect()
     try:
         rows = conn.execute("SELECT key, value FROM meta WHERE key LIKE 'machine:%'").fetchall()

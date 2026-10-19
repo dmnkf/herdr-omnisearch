@@ -2,7 +2,6 @@ import errno
 import fcntl
 import os
 import sqlite3
-import subprocess
 import time
 from pathlib import Path
 
@@ -472,6 +471,7 @@ def lock_is_held(path: Path) -> bool:
 
 
 def spawn_locked_background(cmd, lock_fd, *, lock_env=None) -> None:
+    import subprocess
     # The child inherits lock_fd, so the flock is held for its whole
     # lifetime and releases automatically when it exits or crashes.
     env = os.environ.copy()

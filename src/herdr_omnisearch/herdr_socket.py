@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-import socket
 import time
 from collections import deque
 from pathlib import Path
@@ -45,6 +43,7 @@ def resolve_socket_path(explicit=None, env=None, home=None):
 
 def socket_is_alive(socket_path: str, timeout: float = 0.5) -> bool:
     """Probe whether a Herdr session still accepts connections on this socket."""
+    import socket
     if not socket_path:
         return False
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -62,6 +61,7 @@ class HerdrClient:
     """Use fresh control connections and persistent subscription connections."""
 
     def __init__(self, socket_path=None, timeout=15.0, socket_factory=None):
+        import socket
         self.socket_path = resolve_socket_path(socket_path)
         self.timeout = timeout
         self.socket_factory = socket_factory or socket.socket
@@ -80,6 +80,7 @@ class HerdrClient:
         self.close()
 
     def connect(self):
+        import socket
         if self._socket is not None:
             return
         sock = None
@@ -112,6 +113,8 @@ class HerdrClient:
         return time.monotonic() + (self.timeout if timeout is None else timeout)
 
     def _read_message(self, deadline):
+        import json
+        import socket
         self.connect()
         while b"\n" not in self._buffer:
             remaining = deadline - time.monotonic()
@@ -137,6 +140,7 @@ class HerdrClient:
             raise HerdrTransportError(f"invalid JSON from Herdr: {line[:200]!r}") from exc
 
     def request(self, method, params=None, timeout=None, keep_open=False):
+        import json
         if self._subscription and not keep_open:
             raise HerdrTransportError(
                 "subscription connections only receive events; use a separate client"

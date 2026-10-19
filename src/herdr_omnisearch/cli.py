@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
-import json
 import os
 import shutil
-import socket
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -65,6 +62,7 @@ def cmd_watch(args) -> int:
 
 
 def cmd_watch_start(args) -> int:
+    import subprocess
     if watcher_is_running():
         print(f"watcher running: {read_watcher_pid()}")
         return 0
@@ -122,6 +120,7 @@ def cmd_event_refresh(_args) -> int:
 
 
 def cmd_open_plugin_pane(args) -> int:
+    import json
     result = HerdrClient().open_plugin_pane(args.entrypoint)
     print(json.dumps(result, ensure_ascii=False))
     return 0
@@ -137,6 +136,7 @@ def cmd_index(args) -> int:
 
 
 def cmd_search(args) -> int:
+    import json
     rows = grouped_search_index(
         " ".join(args.query),
         args.limit,
@@ -159,6 +159,8 @@ EXPORT_STALE_SECONDS = 10
 
 def cmd_export(_args) -> int:
     """Print this session's own live rows for a machine that merges indexes."""
+    import json
+    import socket
     session_key = herdr_session_key()
     conn = connect()
     try:
@@ -313,6 +315,7 @@ def cmd_archive_catalog_status(_args) -> int:
 
 
 def cmd_archive_search(args) -> int:
+    import json
     rows = archive_catalog_search(" ".join(args.query), args.limit, agent=args.agent)
     if args.json:
         print(json.dumps(rows, indent=2))

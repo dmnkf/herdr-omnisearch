@@ -233,8 +233,8 @@ class MachineTests(unittest.TestCase):
             "gpubox": export_payload("Game", "remote text"),
         })
         args = Namespace(query=[], limit=20, agent=None, status=None, all_sessions=False, local_only=False)
-        with patch.object(picker.shutil, "which", return_value="/usr/bin/fzf"), patch.object(
-            picker.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, stdout="")
+        with patch.object(picker.shutil, "which", return_value="/usr/bin/fzf"), patch(
+            "subprocess.run", return_value=subprocess.CompletedProcess([], 1, stdout="")
         ) as run:
             picker.fzf_picker(args)
         lines = run.call_args.kwargs["input"].splitlines()

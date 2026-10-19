@@ -1,8 +1,4 @@
 import base64
-import glob
-import gzip
-import hashlib
-import json
 import os
 import re
 import shutil
@@ -90,6 +86,7 @@ SQLITE_SECURE_DELETE_MODES = {0: "OFF", 1: "ON", 2: "FAST"}
 
 
 def is_archive_noise(text: str) -> bool:
+    import json
     text = clean_text(text)
     if not text:
         return True
@@ -211,6 +208,7 @@ def load_codex_thread_names():
 
 
 def iter_archive_records(path: Path, max_record_bytes: int = ARCHIVE_MAX_RECORD_BYTES):
+    import json
     with path.open("rb") as handle:
         while True:
             record = handle.readline(max_record_bytes + 1)
@@ -243,6 +241,7 @@ def epoch_ms_iso(value) -> str:
 
 
 def archive_paths(agent: str):
+    import glob
     if is_opencode_source(agent):
         sessions = opencode_history.list_sessions(app_config()["archive"][agent])
         paths = []
@@ -515,6 +514,7 @@ def archive_catalog_document(
 
 
 def archive_catalog_store_message_batch(conn, session_key: str, generation: int, turns) -> None:
+    import hashlib
     if not turns:
         return
     rows = []
@@ -606,6 +606,8 @@ def archive_catalog_sessions_with_messages(conn, session_keys):
 
 
 def archive_catalog_export_sessions(conn, session_keys):
+    import gzip
+    import json
     session_keys = archive_catalog_sessions_with_messages(conn, session_keys)
     if not session_keys:
         return None

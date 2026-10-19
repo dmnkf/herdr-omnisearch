@@ -1,4 +1,3 @@
-import hashlib
 import re
 import sqlite3
 import time
@@ -139,6 +138,7 @@ def should_skip_pane(pane, workspace_label: str, *, include_wrappers: bool) -> b
 
 
 def index_session(lines: int, include_empty: bool, include_wrappers: bool, snapshot=None) -> int:
+    import hashlib
     client = HerdrClient()
     agent_cli = HerdrCLI(herdr_bin())
     snapshot = snapshot or client.snapshot()

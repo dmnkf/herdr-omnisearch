@@ -1,7 +1,6 @@
 import base64
 import curses
 import shutil
-import subprocess
 import sys
 
 from .herdr_socket import HerdrError
@@ -91,6 +90,7 @@ def archive_pick(args) -> int:
 
 
 def fzf_picker(args) -> int:
+    import subprocess
     query = " ".join(args.query)
     rows = [row for row in picker_rows(args, query) if not is_machine_row(row)]
     if not rows:
@@ -541,6 +541,7 @@ def picker_help(args):
 
 
 def clipboard_copy(text: str):
+    import subprocess
     text = text or ""
     if not text:
         return False, "nothing to yank"

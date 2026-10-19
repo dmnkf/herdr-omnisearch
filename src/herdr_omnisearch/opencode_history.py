@@ -10,14 +10,11 @@ Failures raise OpenCodeError (an OSError), which the catalog treats like an
 unreadable history file: it keeps what it already has and retries next run.
 """
 
-import json
 import os
 import re
 import shlex
 import shutil
 import sqlite3
-import subprocess
-import tempfile
 from pathlib import Path
 
 EXPORT_TIMEOUT_SECONDS = 30
@@ -114,6 +111,9 @@ def export_command(source_cfg, session_id):
 
 def export_messages(source_cfg, session_id):
     """Yield one item per user or assistant message with its plain text parts."""
+    import json
+    import subprocess
+    import tempfile
     command = export_command(source_cfg, session_id)
     # OpenCode exits before a pipe drains and cuts exports short; a file gets all of it.
     with tempfile.TemporaryFile() as output:

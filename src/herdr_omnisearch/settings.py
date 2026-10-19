@@ -1,5 +1,4 @@
 import configparser
-import hashlib
 import os
 import re
 import shlex
@@ -309,6 +308,7 @@ def herdr_session_identity():
     The key stays stable per socket so concurrent sessions on one machine own
     disjoint index rows, watcher locks, and background-index locks.
     """
+    import hashlib
     socket_path = resolve_socket_path()
     name = os.environ.get("HERDR_SESSION") or ""
     if not name:
