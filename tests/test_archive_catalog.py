@@ -165,6 +165,27 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                 self.assertEqual(search_ids("walrus"), [])
                 self.assertEqual(search_ids("penguin"), ["edited"])
 
+    def test_reindexing_keeps_only_current_messages_while_the_upgrade_waits_for_disk(self):
+        def disk_usage(_path):
+            return shutil._ntuple_diskusage(100 * 2**30, 100 * 2**30 - 10 * 2**20, 10 * 2**20)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions, patch.object(shutil, "disk_usage", disk_usage):
+                path = sessions / "edited.jsonl"
+                with redirect_stderr(io.StringIO()):
+                    write_codex_session(path, "edited", [("user", "draft walrus plan")])
+                    archive_catalog.archive_catalog_index()
+                    write_codex_session(path, "edited", [("user", "final penguin plan")])
+                    archive_catalog.archive_catalog_index()
+
+                self.assertEqual(catalog_value("SELECT value FROM catalog_meta WHERE key = 'layout_version'"), [])
+                self.assertEqual(
+                    catalog_contents(),
+                    ([("codex:edited", 0, "final penguin plan")], ["final", "penguin", "plan"]),
+                )
+                self.assertEqual(search_ids("walrus"), [])
+
     def test_a_vanished_session_moves_its_messages_to_the_absent_export(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
