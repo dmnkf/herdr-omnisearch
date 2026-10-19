@@ -623,6 +623,38 @@ def archive_catalog_export_sessions(conn, session_keys) -> None:
             handle.write(json.dumps(record) + "\n")
 
 
+def archive_catalog_prune(conn) -> None:
+    # Runs every pass, so rows left by older versions or other writers converge too.
+    absent = [
+        row["session_key"]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT m.session_key
+            FROM catalog_messages m
+            JOIN catalog_sessions s ON s.session_key = m.session_key
+            WHERE s.is_present = 0
+            ORDER BY m.session_key
+            """
+        )
+    ]
+    # The source file is gone, so the export is the only copy of these messages.
+    archive_catalog_export_sessions(conn, absent)
+    for session_key in absent:
+        archive_catalog_delete_messages(conn, "session_key = ?", (session_key,))
+    archive_catalog_delete_messages(
+        conn,
+        """
+        id IN (
+            SELECT m.id
+            FROM catalog_messages m
+            JOIN catalog_sessions s ON s.session_key = m.session_key
+            WHERE m.indexed_generation != s.message_generation
+        )
+        """,
+        (),
+    )
+
+
 def archive_catalog_upgrade_layout(conn) -> None:
     row = conn.execute("SELECT value FROM catalog_meta WHERE key = 'layout_version'").fetchone()
     if row and int(row[0]) >= ARCHIVE_CATALOG_LAYOUT_VERSION:
@@ -747,7 +779,6 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                 for path, row in existing.items()
                 if row["agent"] in selected and row["agent"] not in unlisted and path not in source_paths
             }
-            absent_keys = []
             for stale_path in sorted(stale_paths):
                 old = existing[stale_path]
                 if int(old["is_present"] or 0):
@@ -755,12 +786,7 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                         "UPDATE catalog_sessions SET is_present = 0 WHERE session_key = ?",
                         (old["session_key"],),
                     )
-                    absent_keys.append(old["session_key"])
                     removed += 1
-            # The source file is gone, so the export is the only copy of these messages.
-            archive_catalog_export_sessions(conn, absent_keys)
-            for session_key in absent_keys:
-                archive_catalog_delete_messages(conn, "session_key = ?", (session_key,))
 
             for old in existing.values():
                 mapped_label = (
@@ -909,6 +935,7 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             message_count += indexed_messages
 
         with conn:
+            archive_catalog_prune(conn)
             conn.execute(
                 """
                 INSERT INTO catalog_meta (key, value) VALUES ('last_indexed_at', ?)

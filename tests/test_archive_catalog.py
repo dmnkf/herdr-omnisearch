@@ -144,6 +144,52 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                 finally:
                     conn.close()
 
+    def test_rows_an_older_version_left_behind_are_pruned_on_the_next_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                write_codex_session(sessions / "kept.jsonl", "kept", [("user", "kept giraffe")])
+                write_codex_session(sessions / "gone.jsonl", "gone", [("user", "lingering badger")])
+                archive_catalog.archive_catalog_index()
+                (sessions / "gone.jsonl").unlink()
+                conn = storage.archive_catalog_connect()
+                try:
+                    with conn:
+                        conn.execute("UPDATE catalog_sessions SET is_present = 0 WHERE session_key = 'codex:gone'")
+                        generation = conn.execute(
+                            "SELECT message_generation FROM catalog_sessions WHERE session_key = 'codex:kept'"
+                        ).fetchone()[0]
+                        cursor = conn.execute(
+                            """
+                            INSERT INTO catalog_messages (
+                                message_key, session_key, ordinal, role, message_at, message_epoch,
+                                content, indexed_generation
+                            ) VALUES ('stale-key', 'codex:kept', 0, 'user', '', 0, 'stale walrus', ?)
+                            """,
+                            (generation - 1,),
+                        )
+                        conn.execute(
+                            "INSERT INTO catalog_message_fts (rowid, content) VALUES (?, 'stale walrus')",
+                            (cursor.lastrowid,),
+                        )
+                finally:
+                    conn.close()
+
+                self.assertEqual(archive_catalog.archive_catalog_index()[:3], (0, 1, 0))
+
+                self.assertEqual(
+                    catalog_contents(),
+                    ([("codex:kept", 0, "kept giraffe")], ["giraffe", "kept"]),
+                )
+                self.assertEqual(search_ids("walrus"), [])
+                self.assertEqual(
+                    [
+                        [message["content"] for message in record["messages"]]
+                        for record in read_absent_export(root)
+                    ],
+                    [["lingering badger"]],
+                )
+
     def test_upgrading_an_old_catalog_keeps_only_searchable_messages(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
