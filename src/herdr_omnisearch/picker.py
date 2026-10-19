@@ -38,9 +38,6 @@ from .archive_catalog import (
 from .render import format_result, machine_prefix
 from .navigate import focus_archive_catalog_result, focus_archive_row, focus_result, focus_row, row_client
 
-ARCHIVE_PICKER_DEBOUNCE_MS = 100
-
-
 ARCHIVE_PICKER_MIN_QUERY_CHARS = 3
 
 
@@ -707,11 +704,8 @@ def execute_action(stdscr, args, row, action):
     return None, f"unknown action: {name}", False
 
 
-def pending_keys(stdscr, idle_ms=0):
-    if idle_ms:
-        stdscr.timeout(idle_ms)
-    else:
-        stdscr.nodelay(True)
+def pending_keys(stdscr):
+    stdscr.nodelay(True)
     try:
         while True:
             try:
@@ -986,13 +980,8 @@ def curses_picker(stdscr, args, after_first_frame=None) -> int:
                     **picker_chrome(args, query, mode),
                     mode=mode,
                 )
-            idle_ms = (
-                ARCHIVE_PICKER_DEBOUNCE_MS
-                if getattr(args, "archive", False)
-                else 0
-            )
             interrupted = False
-            queued_keys = pending_keys(stdscr, idle_ms)
+            queued_keys = pending_keys(stdscr)
             try:
                 for queued_key in queued_keys:
                     if queued_key == "\x03":

@@ -1049,15 +1049,30 @@ class CliTests(unittest.TestCase):
         self.assertEqual(picker.picker_title(args, "asa"), "Herdr ArchiveSearch | all dates")
         self.assertIn(" to ", picker.picker_title(args, ""))
 
-    def test_pending_keys_uses_idle_timeout_and_restores_blocking(self):
+    def test_archive_typing_searches_each_batch_of_keys_without_waiting(self):
+        config = settings.default_config()
+        config["archive_enabled"] = True
+        queries = []
         screen = Mock()
-        screen.get_wch.side_effect = ["s", picker.curses.error()]
+        screen.get_wch.side_effect = ["d", "e", "p", picker.curses.error(), "\x03"]
 
-        self.assertEqual(list(picker.pending_keys(screen, 100)), ["s"])
-        self.assertEqual(
-            [item.args for item in screen.timeout.call_args_list],
-            [(100,), (-1,)],
-        )
+        def rows(args, query, snippets=False):
+            queries.append(query)
+            return []
+
+        with patch.object(settings, "CONFIG_CACHE", config), patch.object(
+            picker, "archive_catalog_state", return_value=(4, 1)
+        ), patch.object(picker.curses, "wrapper", side_effect=lambda draw: draw(screen)), patch.object(
+            picker.curses, "noecho"
+        ), patch.object(picker.curses, "cbreak"), patch.object(picker.curses, "curs_set"), patch.object(
+            picker, "init_curses_colors"
+        ), patch.object(picker, "render_picker"), patch.object(picker, "picker_rows", side_effect=rows):
+            code = picker.archive_pick(self.archive_picker_args(background_refresh=False))
+
+        self.assertEqual(code, 130)
+        self.assertEqual(queries, ["", "dep"])
+        screen.nodelay.assert_called_once_with(True)
+        self.assertEqual([item.args for item in screen.timeout.call_args_list], [(-1,)])
 
     def test_archive_catalog_is_incremental_and_searches_all_dates(self):
         with tempfile.TemporaryDirectory() as tmp:
