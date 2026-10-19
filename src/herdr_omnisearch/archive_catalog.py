@@ -7,12 +7,13 @@ import os
 import re
 import sqlite3
 import time
-from datetime import datetime, timedelta
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .settings import app_config, cli_command, data_dir
+from .settings import app_config, cli_command, data_dir, ensure_private_directory
 from .storage import (
-    archive_catalog_absent_path,
+    archive_catalog_absent_dir,
     archive_catalog_connect,
     compact_index,
     connect,
@@ -588,7 +589,7 @@ def archive_catalog_delete_messages(conn, condition: str, params) -> None:
     conn.execute(f"DELETE FROM catalog_messages WHERE {condition}", params)
 
 
-def archive_catalog_export_sessions(conn, session_keys) -> None:
+def archive_catalog_export_sessions(conn, session_keys):
     session_keys = [
         session_key
         for session_key in session_keys
@@ -598,29 +599,66 @@ def archive_catalog_export_sessions(conn, session_keys) -> None:
         ).fetchone()
     ]
     if not session_keys:
-        return
-    fd = os.open(archive_catalog_absent_path(), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
-    with os.fdopen(fd, "ab") as raw, gzip.open(raw, "at", encoding="utf-8") as handle:
-        for session_key in session_keys:
-            session = conn.execute(
-                "SELECT * FROM catalog_sessions WHERE session_key = ?",
-                (session_key,),
-            ).fetchone()
-            messages = conn.execute(
-                """
-                SELECT message_key, ordinal, role, message_at, message_epoch, content,
-                       indexed_generation
-                FROM catalog_messages
-                WHERE session_key = ?
-                ORDER BY indexed_generation ASC, ordinal ASC
-                """,
-                (session_key,),
-            ).fetchall()
-            record = {
-                "session": dict(session),
-                "messages": [dict(message) for message in messages],
-            }
-            handle.write(json.dumps(record) + "\n")
+        return None
+    directory = ensure_private_directory(archive_catalog_absent_dir(), "archive catalog export")
+    # Exports only run under the catalog lock, so a leftover partial file belongs to a dead run.
+    for leftover in directory.glob("*.tmp"):
+        leftover.unlink(missing_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    path = directory / f"{stamp}-{os.getpid()}.jsonl.gz"
+    partial = path.with_name(path.name + ".tmp")
+    fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as raw:
+            with gzip.open(raw, "wt", encoding="utf-8") as handle:
+                for session_key in session_keys:
+                    session = conn.execute(
+                        "SELECT * FROM catalog_sessions WHERE session_key = ?",
+                        (session_key,),
+                    ).fetchone()
+                    messages = conn.execute(
+                        """
+                        SELECT message_key, ordinal, role, message_at, message_epoch, content,
+                               indexed_generation
+                        FROM catalog_messages
+                        WHERE session_key = ?
+                        ORDER BY indexed_generation ASC, ordinal ASC
+                        """,
+                        (session_key,),
+                    ).fetchall()
+                    record = {
+                        "session": dict(session),
+                        "messages": [dict(message) for message in messages],
+                    }
+                    handle.write(json.dumps(record) + "\n")
+            raw.flush()
+            os.fsync(raw.fileno())
+        os.rename(partial, path)
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+@contextmanager
+def archive_catalog_absent_transaction(conn, session_keys):
+    # The export is the only copy once the deletes commit, and a failed commit must not leave a duplicate.
+    export = None
+    try:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            export = archive_catalog_export_sessions(conn, session_keys)
+            yield
+    except BaseException:
+        if export is not None:
+            export.unlink(missing_ok=True)
+        raise
 
 
 def archive_catalog_prune(conn) -> None:
@@ -637,38 +675,34 @@ def archive_catalog_prune(conn) -> None:
             """
         )
     ]
-    # The source file is gone, so the export is the only copy of these messages.
-    archive_catalog_export_sessions(conn, absent)
-    for session_key in absent:
-        archive_catalog_delete_messages(conn, "session_key = ?", (session_key,))
-    archive_catalog_delete_messages(
-        conn,
-        """
-        id IN (
-            SELECT m.id
-            FROM catalog_messages m
-            JOIN catalog_sessions s ON s.session_key = m.session_key
-            WHERE m.indexed_generation != s.message_generation
+    with archive_catalog_absent_transaction(conn, absent):
+        for session_key in absent:
+            archive_catalog_delete_messages(conn, "session_key = ?", (session_key,))
+        archive_catalog_delete_messages(
+            conn,
+            """
+            id IN (
+                SELECT m.id
+                FROM catalog_messages m
+                JOIN catalog_sessions s ON s.session_key = m.session_key
+                WHERE m.indexed_generation != s.message_generation
+            )
+            """,
+            (),
         )
-        """,
-        (),
-    )
 
 
 def archive_catalog_upgrade_layout(conn) -> None:
     row = conn.execute("SELECT value FROM catalog_meta WHERE key = 'layout_version'").fetchone()
     if row and int(row[0]) >= ARCHIVE_CATALOG_LAYOUT_VERSION:
         return
-    with conn:
-        archive_catalog_export_sessions(
-            conn,
-            [
-                session["session_key"]
-                for session in conn.execute(
-                    "SELECT session_key FROM catalog_sessions WHERE is_present = 0 ORDER BY session_key"
-                )
-            ],
+    absent = [
+        session["session_key"]
+        for session in conn.execute(
+            "SELECT session_key FROM catalog_sessions WHERE is_present = 0 ORDER BY session_key"
         )
+    ]
+    with archive_catalog_absent_transaction(conn, absent):
         conn.execute(
             """
             DELETE FROM catalog_messages
@@ -934,8 +968,8 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             changed += 1
             message_count += indexed_messages
 
+        archive_catalog_prune(conn)
         with conn:
-            archive_catalog_prune(conn)
             conn.execute(
                 """
                 INSERT INTO catalog_meta (key, value) VALUES ('last_indexed_at', ?)

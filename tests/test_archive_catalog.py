@@ -71,9 +71,40 @@ def catalog_contents():
     return messages, terms
 
 
-def read_absent_export(root):
-    with gzip.open(root / "state" / "archive-catalog-absent.jsonl.gz", "rt", encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle]
+def absent_export_dir(root):
+    return root / "state" / "archive-catalog-absent"
+
+
+def read_absent_exports(root):
+    return [
+        [json.loads(line) for line in gzip.decompress(path.read_bytes()).decode("utf-8").splitlines()]
+        for path in sorted(absent_export_dir(root).glob("*.jsonl.gz"))
+    ]
+
+
+@contextmanager
+def failing_sql(fragment):
+    real_connect = sqlite3.connect
+
+    class FailingConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if fragment in sql:
+                raise sqlite3.OperationalError("database or disk is full")
+            return super().execute(sql, *args)
+
+    def connect(*args, **kwargs):
+        return real_connect(*args, factory=FailingConnection, **kwargs)
+
+    with patch.object(sqlite3, "connect", connect):
+        yield
+
+
+def catalog_value(sql):
+    conn = storage.archive_catalog_connect()
+    try:
+        return [tuple(row) for row in conn.execute(sql)]
+    finally:
+        conn.close()
 
 
 def search_ids(query):
@@ -120,7 +151,7 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                     ([("codex:kept", 0, "kept giraffe")], ["giraffe", "kept"]),
                 )
                 self.assertEqual(search_ids("otter"), [])
-                export = read_absent_export(root)
+                [export] = read_absent_exports(root)
                 self.assertEqual(
                     [(record["session"]["session_key"], record["session"]["is_present"]) for record in export],
                     [("codex:gone", 0)],
@@ -129,9 +160,11 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                     [(message["ordinal"], message["role"], message["content"]) for message in export[0]["messages"]],
                     [(0, "user", "vanishing otter question"), (1, "assistant", "otter answer")],
                 )
+                [export_file] = absent_export_dir(root).iterdir()
+                self.assertRegex(export_file.name, r"^\d{8}T\d{12}Z-\d+\.jsonl\.gz$")
                 self.assertEqual(
-                    oct((root / "state" / "archive-catalog-absent.jsonl.gz").stat().st_mode & 0o777),
-                    "0o600",
+                    (oct(absent_export_dir(root).stat().st_mode & 0o777), oct(export_file.stat().st_mode & 0o777)),
+                    ("0o700", "0o600"),
                 )
                 conn = storage.archive_catalog_connect()
                 try:
@@ -184,10 +217,10 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                 self.assertEqual(search_ids("walrus"), [])
                 self.assertEqual(
                     [
-                        [message["content"] for message in record["messages"]]
-                        for record in read_absent_export(root)
+                        [[message["content"] for message in record["messages"]] for record in export]
+                        for export in read_absent_exports(root)
                     ],
-                    [["lingering badger"]],
+                    [[["lingering badger"]]],
                 )
 
     def test_upgrading_an_old_catalog_keeps_only_searchable_messages(self):
@@ -266,13 +299,15 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                         ["approved", "beta", "migration", "notes", "penguin", "plan", "release"],
                     ),
                 )
-                export = read_absent_export(root)
                 self.assertEqual(
                     [
-                        (record["session"]["session_key"], [message["content"] for message in record["messages"]])
-                        for record in export
+                        [
+                            (record["session"]["session_key"], [message["content"] for message in record["messages"]])
+                            for record in export
+                        ]
+                        for export in read_absent_exports(root)
                     ],
-                    [("codex:gone", ["orphaned otter notes"])],
+                    [[("codex:gone", ["orphaned otter notes"])]],
                 )
                 conn = storage.archive_catalog_connect()
                 try:
@@ -293,7 +328,72 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                     conn.close()
 
                 archive_catalog.archive_catalog_index()
-                self.assertEqual(len(read_absent_export(root)), 1)
+                self.assertEqual(len(read_absent_exports(root)), 1)
+
+    def test_each_export_is_a_standalone_gzip_and_a_killed_export_is_cleared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                for name in ("kept", "first", "second"):
+                    write_codex_session(sessions / f"{name}.jsonl", name, [("user", f"{name} heron note")])
+                archive_catalog.archive_catalog_index()
+                (sessions / "first.jsonl").unlink()
+                archive_catalog.archive_catalog_index()
+                killed = absent_export_dir(root) / "20261019T000000000000Z-1.jsonl.gz.tmp"
+                killed.write_bytes(gzip.compress(b'{"session": {"session_key": "codex:killed"}}\n' * 50)[:40])
+                (sessions / "second.jsonl").unlink()
+                archive_catalog.archive_catalog_index()
+
+                files = sorted(absent_export_dir(root).iterdir())
+                self.assertEqual([path.suffix for path in files], [".gz", ".gz"])
+                self.assertEqual(
+                    [
+                        [json.loads(line)["session"]["session_key"] for line in gzip.decompress(path.read_bytes()).splitlines()]
+                        for path in files
+                    ],
+                    [["codex:first"], ["codex:second"]],
+                )
+                self.assertEqual(
+                    [
+                        json.loads(line)["session"]["session_key"]
+                        for line in gzip.decompress(b"".join(path.read_bytes() for path in files)).splitlines()
+                    ],
+                    ["codex:first", "codex:second"],
+                )
+
+    def test_a_failed_delete_after_the_export_leaves_no_export_and_keeps_the_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                write_codex_session(sessions / "kept.jsonl", "kept", [("user", "kept giraffe")])
+                write_codex_session(sessions / "gone.jsonl", "gone", [("user", "orphaned otter notes")])
+                archive_catalog.archive_catalog_index()
+                conn = storage.archive_catalog_connect()
+                with conn:
+                    conn.execute("DELETE FROM catalog_meta WHERE key = 'layout_version'")
+                    conn.execute("UPDATE catalog_sessions SET is_present = 0 WHERE session_key = 'codex:gone'")
+                conn.close()
+                (sessions / "gone.jsonl").unlink()
+
+                with failing_sql("DELETE FROM catalog_messages"), self.assertRaises(sqlite3.OperationalError):
+                    archive_catalog.archive_catalog_index()
+
+                self.assertEqual(list(absent_export_dir(root).iterdir()), [])
+                self.assertEqual(
+                    catalog_value("SELECT session_key, content FROM catalog_messages ORDER BY session_key"),
+                    [("codex:gone", "orphaned otter notes"), ("codex:kept", "kept giraffe")],
+                )
+                self.assertEqual(catalog_value("SELECT value FROM catalog_meta WHERE key = 'layout_version'"), [])
+
+                archive_catalog.archive_catalog_index()
+                self.assertEqual(
+                    [[record["session"]["session_key"] for record in export] for export in read_absent_exports(root)],
+                    [["codex:gone"]],
+                )
+                self.assertEqual(
+                    catalog_value("SELECT session_key, content FROM catalog_messages ORDER BY session_key"),
+                    [("codex:kept", "kept giraffe")],
+                )
 
     def test_a_catalog_that_loses_most_of_its_messages_is_vacuumed(self):
         with tempfile.TemporaryDirectory() as tmp:

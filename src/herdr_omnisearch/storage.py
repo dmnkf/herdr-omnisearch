@@ -38,8 +38,8 @@ def archive_catalog_db_path() -> Path:
     return data_dir() / "archive-catalog.sqlite3"
 
 
-def archive_catalog_absent_path() -> Path:
-    return archive_catalog_db_path().expanduser().parent / "archive-catalog-absent.jsonl.gz"
+def archive_catalog_absent_dir() -> Path:
+    return archive_catalog_db_path().expanduser().parent / "archive-catalog-absent"
 
 
 def needs_database_repair(path: Path, legacy: Path) -> bool:

@@ -243,8 +243,15 @@ Plugin installations store their SQLite indexes here:
 ```
 
 When an archived session's history file disappears, its catalog messages move
-to `archive-catalog-absent.jsonl.gz` next to the catalog, one JSON line per
-session, and no longer appear in search.
+to the `archive-catalog-absent/` directory next to the catalog and no longer
+appear in search. Each export is its own gzip file there, named
+`<UTC timestamp>-<pid>.jsonl.gz`, with one JSON line per session.
+Files ending in `.tmp` are unfinished exports; ignore them. To read every
+export:
+
+```sh
+zcat ~/.local/state/herdr/plugins/herdr.omnisearch/archive-catalog-absent/*.jsonl.gz
+```
 
 Standalone CLI installations use
 `~/.local/share/herdr-omnisearch/index.sqlite3`. Existing standalone indexes
