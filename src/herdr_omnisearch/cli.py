@@ -472,7 +472,74 @@ def cmd_purge(args) -> int:
     return 0
 
 
-def main(argv=None) -> int:
+def add_pick_parser(sub):
+    p = sub.add_parser("pick", help="search and focus selected Herdr target")
+    p.add_argument("query", nargs="*", default=[])
+    p.add_argument("--limit", type=int, default=80)
+    p.add_argument("--lines", type=int, default=DEFAULT_LINES)
+    p.add_argument("--status")
+    p.add_argument("--agent")
+    p.add_argument("--refresh", dest="refresh", action="store_true", default=True)
+    p.add_argument("--no-refresh", dest="refresh", action="store_false")
+    p.add_argument("--background-refresh", action="store_true")
+    p.add_argument("--stale-seconds", type=int, default=10)
+    p.add_argument("--include-empty", action="store_true")
+    p.add_argument("--include-wrappers", action="store_true")
+    p.add_argument("--all-sessions", action="store_true", help="include rows from every Herdr session")
+    p.add_argument("--local-only", action="store_true", help="leave out rows synced from saved machines")
+    picker = p.add_mutually_exclusive_group()
+    picker.add_argument("--native", action="store_true", help="force the native terminal picker")
+    picker.add_argument("--fzf", action="store_true", help="use fzf instead of the native picker")
+    p.add_argument("--verbose", action="store_true")
+    p.set_defaults(func=pick)
+
+
+def add_archive_pick_parser(sub):
+    p = sub.add_parser("archive-pick", help="search old sessions and focus or resume selected agent")
+    p.add_argument("query", nargs="*", default=[])
+    p.add_argument("--limit", type=int, default=40)
+    p.add_argument("--agent")
+    p.add_argument("--agents", default="")
+    p.add_argument("--window-days", type=int, help="days held in the active archive window")
+    p.add_argument("--window-offset", type=int, default=0, help="windows before the newest window")
+    p.add_argument("--refresh", dest="refresh", action="store_true", default=False)
+    p.add_argument("--no-refresh", dest="refresh", action="store_false")
+    p.add_argument("--background-refresh", action="store_true")
+    p.add_argument("--stale-seconds", type=int, default=3600)
+    picker = p.add_mutually_exclusive_group()
+    picker.add_argument("--native", action="store_true", help="force the native terminal picker")
+    picker.add_argument("--fzf", action="store_true", help="use fzf instead of the native picker")
+    p.add_argument("--verbose", action="store_true")
+    p.set_defaults(func=archive_pick)
+
+
+PICKER_PARSERS = {"pick": add_pick_parser, "archive-pick": add_archive_pick_parser}
+
+
+class PickerParseError(Exception):
+    pass
+
+
+class PickerParser(argparse.ArgumentParser):
+    """A parser for one picker command that hands help and errors to the full parser."""
+
+    def error(self, message):
+        raise PickerParseError(message)
+
+    def print_help(self, file=None):
+        raise PickerParseError("help")
+
+
+def parse_picker_args(argv):
+    parser = PickerParser(prog="herdr-omnisearch")
+    PICKER_PARSERS[argv[0]](parser.add_subparsers(dest="cmd", required=True))
+    try:
+        return parser.parse_args(argv)
+    except PickerParseError:
+        return None
+
+
+def build_parser():
     parser = argparse.ArgumentParser(prog="herdr-omnisearch")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -524,42 +591,8 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_archive_search)
 
-    p = sub.add_parser("pick", help="search and focus selected Herdr target")
-    p.add_argument("query", nargs="*", default=[])
-    p.add_argument("--limit", type=int, default=80)
-    p.add_argument("--lines", type=int, default=DEFAULT_LINES)
-    p.add_argument("--status")
-    p.add_argument("--agent")
-    p.add_argument("--refresh", dest="refresh", action="store_true", default=True)
-    p.add_argument("--no-refresh", dest="refresh", action="store_false")
-    p.add_argument("--background-refresh", action="store_true")
-    p.add_argument("--stale-seconds", type=int, default=10)
-    p.add_argument("--include-empty", action="store_true")
-    p.add_argument("--include-wrappers", action="store_true")
-    p.add_argument("--all-sessions", action="store_true", help="include rows from every Herdr session")
-    p.add_argument("--local-only", action="store_true", help="leave out rows synced from saved machines")
-    picker = p.add_mutually_exclusive_group()
-    picker.add_argument("--native", action="store_true", help="force the native terminal picker")
-    picker.add_argument("--fzf", action="store_true", help="use fzf instead of the native picker")
-    p.add_argument("--verbose", action="store_true")
-    p.set_defaults(func=pick)
-
-    p = sub.add_parser("archive-pick", help="search old sessions and focus or resume selected agent")
-    p.add_argument("query", nargs="*", default=[])
-    p.add_argument("--limit", type=int, default=40)
-    p.add_argument("--agent")
-    p.add_argument("--agents", default="")
-    p.add_argument("--window-days", type=int, help="days held in the active archive window")
-    p.add_argument("--window-offset", type=int, default=0, help="windows before the newest window")
-    p.add_argument("--refresh", dest="refresh", action="store_true", default=False)
-    p.add_argument("--no-refresh", dest="refresh", action="store_false")
-    p.add_argument("--background-refresh", action="store_true")
-    p.add_argument("--stale-seconds", type=int, default=3600)
-    picker = p.add_mutually_exclusive_group()
-    picker.add_argument("--native", action="store_true", help="force the native terminal picker")
-    picker.add_argument("--fzf", action="store_true", help="use fzf instead of the native picker")
-    p.add_argument("--verbose", action="store_true")
-    p.set_defaults(func=archive_pick)
+    add_pick_parser(sub)
+    add_archive_pick_parser(sub)
 
     p = sub.add_parser("focus", help="focus a stable search result id")
     p.add_argument("stable_id")
@@ -610,8 +643,14 @@ def main(argv=None) -> int:
     p = sub.add_parser("purge", help="remove the local OmniSearch index")
     p.add_argument("--yes", action="store_true", help="confirm permanent index removal")
     p.set_defaults(func=cmd_purge)
+    return parser
 
-    args = parser.parse_args(argv)
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    args = parse_picker_args(argv) if argv and argv[0] in PICKER_PARSERS else None
+    if args is None:
+        args = build_parser().parse_args(argv)
     try:
         return args.func(args)
     except KeyboardInterrupt:

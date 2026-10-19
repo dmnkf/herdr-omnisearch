@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import sqlite3
@@ -6,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from argparse import Namespace
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -122,6 +124,69 @@ class CliTests(unittest.TestCase):
         self.assertEqual(manifest.count('placement = "popup"'), 2)
         self.assertNotIn('placement = "overlay"', manifest)
         self.assertEqual(manifest.count('plugin pane open --plugin herdr.omnisearch --entrypoint'), 2)
+
+    def parsed_by_main(self, argv):
+        seen = []
+
+        def record(args):
+            seen.append(args)
+            return 0
+
+        with patch.object(cli, "pick", record), patch.object(cli, "archive_pick", record):
+            self.assertEqual(cli.main(list(argv)), 0)
+            self.assertEqual(seen, [cli.build_parser().parse_args(list(argv))])
+        return vars(seen[0])
+
+    def test_picker_command_lines_parse_like_the_full_parser(self):
+        live = self.parsed_by_main(
+            ["pick", "--native", "--no-refresh", "--background-refresh", "--stale-seconds", "10", "--lines", "500"]
+        )
+        live.pop("func")
+        self.assertEqual(live, {
+            "cmd": "pick", "query": [], "limit": 80, "lines": 500, "status": None, "agent": None,
+            "refresh": False, "background_refresh": True, "stale_seconds": 10, "include_empty": False,
+            "include_wrappers": False, "all_sessions": False, "local_only": False, "native": True,
+            "fzf": False, "verbose": False,
+        })
+        archive = self.parsed_by_main(
+            ["archive-pick", "--native", "--no-refresh", "--background-refresh", "--stale-seconds", "300"]
+        )
+        archive.pop("func")
+        self.assertEqual(archive, {
+            "cmd": "archive-pick", "query": [], "limit": 40, "agent": None, "agents": "",
+            "window_days": None, "window_offset": 0, "refresh": False, "background_refresh": True,
+            "stale_seconds": 300, "native": True, "fzf": False, "verbose": False,
+        })
+        for argv in (
+            ["pick"],
+            ["pick", "deploy", "@workbox", "--lim", "5", "--fzf", "--all-sessions"],
+            ["pick", "--refresh", "--include-empty", "--include-wrappers", "--status", "idle", "--", "-x"],
+            ["archive-pick", "booking", "--window-days", "3", "--window-offset=2", "--agent", "codex"],
+            ["archive-pick", "--refresh", "--agents", "claude,codex", "--verbose"],
+        ):
+            with self.subTest(argv=argv):
+                self.parsed_by_main(argv)
+
+    def test_picker_help_and_errors_match_the_full_parser(self):
+        def outcome(parse, argv):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit) as exit_:
+                parse(list(argv))
+            return exit_.exception.code, stdout.getvalue(), stderr.getvalue()
+
+        for argv, code in (
+            (["pick", "-h"], 0),
+            (["archive-pick", "--help"], 0),
+            (["pick", "--native", "--fzf"], 2),
+            (["pick", "--bogus"], 2),
+            (["archive-pick", "--limit", "many"], 2),
+            (["archive-pick", "--lines", "500"], 2),
+        ):
+            with self.subTest(argv=argv):
+                result = outcome(cli.main, argv)
+                self.assertEqual(result, outcome(cli.build_parser().parse_args, argv))
+                self.assertEqual(result[0], code)
+                self.assertIn("herdr-omnisearch", result[1] + result[2])
 
     def test_managed_picker_can_force_native_mode_without_tty_detection(self):
         args = Namespace(
