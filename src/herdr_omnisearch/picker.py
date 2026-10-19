@@ -49,12 +49,20 @@ def pick(args) -> int:
         count = index_session(args.lines, args.include_empty, args.include_wrappers)
         if args.verbose:
             print(f"indexed {count} chunks", file=sys.stderr)
-    elif args.background_refresh:
-        maybe_background_index(args.lines, args.include_empty, args.include_wrappers, args.stale_seconds)
-    if merges_machines(args) and (args.refresh or args.background_refresh):
-        maybe_background_sync(min(args.stale_seconds, machines_config()["sync_seconds"]))
+
+    def refresh_in_background():
+        if args.background_refresh and not args.refresh:
+            maybe_background_index(args.lines, args.include_empty, args.include_wrappers, args.stale_seconds)
+        if merges_machines(args) and (args.refresh or args.background_refresh):
+            maybe_background_sync(min(args.stale_seconds, machines_config()["sync_seconds"]))
+
+    return open_picker(args, refresh_in_background)
+
+
+def open_picker(args, refresh_in_background) -> int:
     if args.native or (not args.fzf and sys.stdin.isatty() and sys.stdout.isatty()):
-        return curses.wrapper(lambda stdscr: curses_picker(stdscr, args))
+        return curses.wrapper(lambda stdscr: curses_picker(stdscr, args, refresh_in_background))
+    refresh_in_background()
     return fzf_picker(args)
 
 
@@ -75,18 +83,24 @@ def archive_pick(args) -> int:
                 f"{removed} removed sessions ({message_count} messages)",
                 file=sys.stderr,
             )
-    elif args.background_refresh:
-        maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
+    refresh_later = args.background_refresh and not args.refresh
     count, _last = archive_catalog_state()
     if not count:
+        if refresh_later:
+            # The empty-catalog message can only say the build is running once it holds the lock.
+            maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
+            refresh_later = False
         args.initial_message = (
             "Building the archive catalog in the background..."
             if lock_is_held(data_dir() / "archive-catalog.lock")
             else "Archive catalog is empty; refresh the archive index"
         )
-    if args.native or (not args.fzf and sys.stdin.isatty() and sys.stdout.isatty()):
-        return curses.wrapper(lambda stdscr: curses_picker(stdscr, args))
-    return fzf_picker(args)
+
+    def refresh_in_background():
+        if refresh_later:
+            maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
+
+    return open_picker(args, refresh_in_background)
 
 
 def fzf_picker(args) -> int:
@@ -756,7 +770,7 @@ def picker_interpretation(args, query, cache) -> str:
     return cache[query]
 
 
-def curses_picker(stdscr, args) -> int:
+def curses_picker(stdscr, args, after_first_frame=None) -> int:
     init_curses_colors()
     curses.noecho()
     curses.cbreak()
@@ -800,6 +814,9 @@ def curses_picker(stdscr, args) -> int:
             message=message,
             interpretation=picker_interpretation(args, query, interpretations),
         )
+        if after_first_frame is not None:
+            after_first_frame()
+            after_first_frame = None
         message = ""
         key = stdscr.get_wch()
 

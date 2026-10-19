@@ -205,30 +205,93 @@ class CliTests(unittest.TestCase):
         wrapper.assert_called_once()
         fzf_picker.assert_not_called()
 
-    def test_managed_archive_picker_refreshes_the_catalog_in_the_background(self):
-        args = Namespace(
-            refresh=False,
-            background_refresh=True,
-            native=True,
-            fzf=False,
-            agents="",
-            stale_seconds=300,
-            window_days=None,
-            window_offset=0,
-            verbose=False,
+    def run_picker_on_screen(self, run, args, events, keys=("\x03",)):
+        screen = Mock()
+        screen.get_wch.side_effect = list(keys)
+        with patch.object(picker.curses, "wrapper", side_effect=lambda draw: draw(screen)), patch.object(
+            picker.curses, "noecho"
+        ), patch.object(picker.curses, "cbreak"), patch.object(picker.curses, "curs_set"), patch.object(
+            picker, "init_curses_colors"
+        ), patch.object(
+            picker, "render_picker", side_effect=lambda *a, **k: events.append("frame")
+        ), patch.object(picker, "picker_rows", return_value=[]):
+            return run(args)
+
+    def archive_picker_args(self, **overrides):
+        values = dict(
+            query=[], limit=40, agent=None, agents="", refresh=False, background_refresh=True,
+            stale_seconds=300, window_days=None, window_offset=0, native=True, fzf=False, verbose=False,
         )
+        values.update(overrides)
+        return Namespace(**values)
+
+    def test_managed_archive_picker_refreshes_the_catalog_after_its_first_frame(self):
         config = settings.default_config()
         config["archive_enabled"] = True
+        events = []
         with patch.object(settings, "CONFIG_CACHE", config), patch.object(
-            picker, "maybe_background_archive_catalog_index"
-        ) as background, patch.object(
-            picker, "archive_catalog_state", return_value=(4, 1)
-        ), patch.object(
-            picker.curses, "wrapper", return_value=0
-        ):
-            self.assertEqual(picker.archive_pick(args), 0)
+            picker, "maybe_background_archive_catalog_index",
+            side_effect=lambda *a: events.append(("archive refresh", *a)),
+        ), patch.object(picker, "archive_catalog_state", return_value=(4, 1)):
+            code = self.run_picker_on_screen(picker.archive_pick, self.archive_picker_args(), events)
+            self.assertEqual(code, 130)
+            self.assertEqual(events, ["frame", ("archive refresh", "", 300)])
 
-        background.assert_called_once_with("", 300)
+            events.clear()
+            self.run_picker_on_screen(picker.archive_pick, self.archive_picker_args(background_refresh=False), events)
+            self.assertEqual(events, ["frame"])
+
+            events.clear()
+            with patch.object(picker, "archive_catalog_index", return_value=(0, 0, 0, 0)):
+                self.run_picker_on_screen(picker.archive_pick, self.archive_picker_args(refresh=True), events)
+            self.assertEqual(events, ["frame"])
+
+    def test_empty_archive_catalog_starts_its_build_before_saying_so(self):
+        config = settings.default_config()
+        config["archive_enabled"] = True
+        events = []
+        args = self.archive_picker_args()
+        with patch.object(settings, "CONFIG_CACHE", config), patch.object(
+            picker, "maybe_background_archive_catalog_index",
+            side_effect=lambda *a: events.append(("archive refresh", *a)),
+        ), patch.object(picker, "archive_catalog_state", return_value=(0, 0)), patch.object(
+            picker, "lock_is_held", side_effect=lambda path: events.append("lock checked") or True
+        ):
+            self.run_picker_on_screen(picker.archive_pick, args, events)
+        self.assertEqual(events, [("archive refresh", "", 300), "lock checked", "frame"])
+        self.assertEqual(args.initial_message, "Building the archive catalog in the background...")
+
+    def test_live_picker_refreshes_after_its_first_frame(self):
+        def live_args(**overrides):
+            values = dict(
+                query=[], limit=80, lines=500, status=None, agent=None, refresh=False, background_refresh=True,
+                stale_seconds=10, include_empty=False, include_wrappers=False, all_sessions=False,
+                local_only=False, native=True, fzf=False, verbose=False,
+            )
+            values.update(overrides)
+            return Namespace(**values)
+
+        events = []
+        with patch.object(settings, "CONFIG_CACHE", settings.default_config()), patch.object(
+            picker, "maybe_background_index", side_effect=lambda *a: events.append(("index", *a))
+        ), patch.object(
+            picker, "maybe_background_sync", side_effect=lambda *a: events.append(("sync", *a))
+        ), patch.object(picker, "index_session", side_effect=lambda *a: events.append(("foreground index", *a)) or 3):
+            for overrides, expected in (
+                ({}, ["frame", ("index", 500, False, False, 10), ("sync", 10)]),
+                ({"local_only": True}, ["frame", ("index", 500, False, False, 10)]),
+                ({"refresh": True}, [("foreground index", 500, False, False), "frame", ("sync", 10)]),
+                ({"background_refresh": False}, ["frame"]),
+            ):
+                with self.subTest(overrides=overrides):
+                    events.clear()
+                    self.assertEqual(self.run_picker_on_screen(picker.pick, live_args(**overrides), events), 130)
+                    self.assertEqual(events, expected)
+
+            events.clear()
+            with patch.object(picker, "fzf_picker", side_effect=lambda args: events.append("fzf") or 0):
+                self.assertEqual(picker.pick(live_args(native=False, fzf=True)), 0)
+            self.assertEqual(events, [("index", 500, False, False, 10), ("sync", 10), "fzf"])
 
     def test_index_uses_native_agent_identity_and_read(self):
         with tempfile.TemporaryDirectory() as tmp:
