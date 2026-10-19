@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -119,11 +120,29 @@ class CliTests(unittest.TestCase):
         self.assertIn('on = "pane.created"', manifest)
         self.assertIn('"archive-catalog-start"', manifest)
         self.assertIn('"archive-catalog-index"', manifest)
-        self.assertIn('$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch', manifest)
         self.assertEqual(manifest.count("--native"), 2)
         self.assertEqual(manifest.count('placement = "popup"'), 2)
         self.assertNotIn('placement = "overlay"', manifest)
         self.assertEqual(manifest.count('plugin pane open --plugin herdr.omnisearch --entrypoint'), 2)
+
+    def test_manifest_pane_commands_start_the_pickers_from_any_directory(self):
+        manifest = (ROOT / "herdr-plugin.toml").read_text(encoding="utf-8")
+        panes = {}
+        for block in manifest.split("[[panes]]")[1:]:
+            pane_id = re.search(r'^id = "(.+)"$', block, re.M).group(1)
+            panes[pane_id] = json.loads(re.search(r"^command = (\[.*\])$", block, re.M).group(1))
+        self.assertEqual(sorted(panes), ["archive", "live"])
+        env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        env["HERDR_PLUGIN_ROOT"] = str(ROOT)
+        with tempfile.TemporaryDirectory() as tmp:
+            for pane_id, usage in (("live", "usage: herdr-omnisearch pick"), ("archive", "usage: herdr-omnisearch archive-pick")):
+                with self.subTest(pane=pane_id):
+                    shell, flag, script = panes[pane_id]
+                    result = subprocess.run(
+                        [shell, flag, script + " --help"], cwd=tmp, env=env, capture_output=True, text=True, timeout=30
+                    )
+                    self.assertEqual((result.returncode, result.stderr), (0, ""))
+                    self.assertTrue(result.stdout.startswith(usage), result.stdout)
 
     def parsed_by_main(self, argv):
         seen = []

@@ -57,13 +57,14 @@ id = "doctor"
 title = "Check OmniSearch health"
 command = ["bin/herdr-omnisearch", "doctor"]
 
+# Panes start Python directly; the bin launcher adds a shell and a dirname fork to every open.
 [[panes]]
 id = "live"
 title = "OmniSearch"
 placement = "popup"
 width = "100%"
 height = "100%"
-command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch\" pick --native --no-refresh --background-refresh --stale-seconds 10 --lines 500"]
+command = ["sh", "-c", "export PYTHONPATH=\"$HERDR_PLUGIN_ROOT/src${PYTHONPATH:+:$PYTHONPATH}\"; exec python3 \"$HERDR_PLUGIN_ROOT/src/herdr_omnisearch/__main__.py\" pick --native --no-refresh --background-refresh --stale-seconds 10 --lines 500"]
 
 [[panes]]
 id = "archive"
@@ -71,7 +72,7 @@ title = "Archive Search"
 placement = "popup"
 width = "100%"
 height = "100%"
-command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-omnisearch\" archive-pick --native --no-refresh --background-refresh --stale-seconds 300"]
+command = ["sh", "-c", "export PYTHONPATH=\"$HERDR_PLUGIN_ROOT/src${PYTHONPATH:+:$PYTHONPATH}\"; exec python3 \"$HERDR_PLUGIN_ROOT/src/herdr_omnisearch/__main__.py\" archive-pick --native --no-refresh --background-refresh --stale-seconds 300"]
 
 [[events]]
 on = "workspace.created"
