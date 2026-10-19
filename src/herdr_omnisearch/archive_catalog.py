@@ -5,7 +5,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
+import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -15,6 +17,7 @@ from .settings import app_config, cli_command, data_dir, ensure_private_director
 from .storage import (
     archive_catalog_absent_dir,
     archive_catalog_connect,
+    archive_catalog_db_path,
     compact_index,
     connect,
     exclusive_lock,
@@ -82,6 +85,8 @@ ARCHIVE_CATALOG_LAYOUT_VERSION = 1
 
 
 ARCHIVE_CATALOG_LEGACY_TABLES = ("catalog_fts", "catalog_terms", "catalog_token_trigrams")
+ARCHIVE_CATALOG_UPGRADE_HEADROOM_BYTES = 64 * 1024 * 1024
+SQLITE_SECURE_DELETE_MODES = {0: "OFF", 1: "ON", 2: "FAST"}
 
 
 def is_archive_noise(text: str) -> bool:
@@ -696,32 +701,47 @@ def archive_catalog_upgrade_layout(conn) -> None:
     row = conn.execute("SELECT value FROM catalog_meta WHERE key = 'layout_version'").fetchone()
     if row and int(row[0]) >= ARCHIVE_CATALOG_LAYOUT_VERSION:
         return
+    catalog = archive_catalog_db_path().expanduser()
+    needed = catalog.stat().st_size + ARCHIVE_CATALOG_UPGRADE_HEADROOM_BYTES
+    free = shutil.disk_usage(catalog.parent).free
+    if free < needed:
+        print(
+            f"archive catalog cleanup skipped: {free // 2**20} MB free, needs {needed // 2**20} MB",
+            file=sys.stderr,
+        )
+        return
     absent = [
         session["session_key"]
         for session in conn.execute(
             "SELECT session_key FROM catalog_sessions WHERE is_present = 0 ORDER BY session_key"
         )
     ]
-    with archive_catalog_absent_transaction(conn, absent):
-        conn.execute(
-            """
-            DELETE FROM catalog_messages
-            WHERE session_key IN (SELECT session_key FROM catalog_sessions WHERE is_present = 0)
-            """
-        )
-        conn.execute(
-            """
-            DELETE FROM catalog_messages
-            WHERE indexed_generation != (
-                SELECT s.message_generation
-                FROM catalog_sessions s
-                WHERE s.session_key = catalog_messages.session_key
+    secure_delete = conn.execute("PRAGMA secure_delete").fetchone()[0]
+    # VACUUM follows, so zeroing the freed pages would only grow the WAL.
+    conn.execute("PRAGMA secure_delete = OFF")
+    try:
+        with archive_catalog_absent_transaction(conn, absent):
+            conn.execute(
+                """
+                DELETE FROM catalog_messages
+                WHERE session_key IN (SELECT session_key FROM catalog_sessions WHERE is_present = 0)
+                """
             )
-            """
-        )
-        conn.execute("INSERT INTO catalog_message_fts (catalog_message_fts) VALUES ('rebuild')")
-        for table in ARCHIVE_CATALOG_LEGACY_TABLES:
-            conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.execute(
+                """
+                DELETE FROM catalog_messages
+                WHERE indexed_generation != (
+                    SELECT s.message_generation
+                    FROM catalog_sessions s
+                    WHERE s.session_key = catalog_messages.session_key
+                )
+                """
+            )
+            conn.execute("INSERT INTO catalog_message_fts (catalog_message_fts) VALUES ('rebuild')")
+            for table in ARCHIVE_CATALOG_LEGACY_TABLES:
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+    finally:
+        conn.execute(f"PRAGMA secure_delete = {SQLITE_SECURE_DELETE_MODES[secure_delete]}")
     try:
         conn.execute("VACUUM")
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -781,7 +801,10 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             live_conn.close()
 
     conn = archive_catalog_connect()
-    archive_catalog_upgrade_layout(conn)
+    try:
+        archive_catalog_upgrade_layout(conn)
+    except (sqlite3.Error, OSError) as exc:
+        print(f"archive catalog cleanup failed: {exc}", file=sys.stderr)
     existing = {
         row["path"]: dict(row)
         for row in conn.execute(

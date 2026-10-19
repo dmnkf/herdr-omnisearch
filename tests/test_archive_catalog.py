@@ -1,13 +1,15 @@
 import gzip
+import io
 import json
 import os
 import random
 import re
+import shutil
 import sqlite3
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -97,6 +99,20 @@ def failing_sql(fragment):
 
     with patch.object(sqlite3, "connect", connect):
         yield
+
+
+def make_legacy_catalog(root, sessions):
+    write_codex_session(sessions / "kept.jsonl", "kept", [("user", "kept giraffe")])
+    write_codex_session(sessions / "gone.jsonl", "gone", [("user", "orphaned otter notes")])
+    archive_catalog.archive_catalog_index()
+    legacy = sqlite3.connect(root / "state" / "archive-catalog.sqlite3")
+    with legacy:
+        legacy.execute("DELETE FROM catalog_meta WHERE key = 'layout_version'")
+        legacy.execute("UPDATE catalog_sessions SET is_present = 0 WHERE session_key = 'codex:gone'")
+        legacy.execute("CREATE TABLE catalog_terms (token TEXT PRIMARY KEY)")
+        legacy.executemany("INSERT INTO catalog_terms (token) VALUES (?)", ((f"legacy{index}" * 4,) for index in range(2000)))
+    legacy.close()
+    (sessions / "gone.jsonl").unlink()
 
 
 def catalog_value(sql):
@@ -375,9 +391,12 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                 conn.close()
                 (sessions / "gone.jsonl").unlink()
 
-                with failing_sql("DELETE FROM catalog_messages"), self.assertRaises(sqlite3.OperationalError):
-                    archive_catalog.archive_catalog_index()
+                stderr = io.StringIO()
+                with failing_sql("DELETE FROM catalog_messages"), redirect_stderr(stderr):
+                    with self.assertRaises(sqlite3.OperationalError):
+                        archive_catalog.archive_catalog_index()
 
+                self.assertEqual(stderr.getvalue(), "archive catalog cleanup failed: database or disk is full\n")
                 self.assertEqual(list(absent_export_dir(root).iterdir()), [])
                 self.assertEqual(
                     catalog_value("SELECT session_key, content FROM catalog_messages ORDER BY session_key"),
@@ -394,6 +413,47 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                     catalog_value("SELECT session_key, content FROM catalog_messages ORDER BY session_key"),
                     [("codex:kept", "kept giraffe")],
                 )
+
+    def test_a_failing_upgrade_still_indexes_and_exports_the_absent_session_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                make_legacy_catalog(root, sessions)
+                write_codex_session(sessions / "fresh.jsonl", "fresh", [("user", "fresh pelican idea")])
+                stderr = io.StringIO()
+                with failing_sql("('rebuild')"), redirect_stderr(stderr):
+                    self.assertEqual(archive_catalog.archive_catalog_index()[:3], (1, 1, 0))
+
+                self.assertEqual(stderr.getvalue(), "archive catalog cleanup failed: database or disk is full\n")
+                self.assertEqual(search_ids("pelican"), ["fresh"])
+                self.assertEqual(
+                    [[record["session"]["session_key"] for record in export] for export in read_absent_exports(root)],
+                    [["codex:gone"]],
+                )
+                self.assertEqual(catalog_value("SELECT value FROM catalog_meta WHERE key = 'layout_version'"), [])
+                self.assertEqual(catalog_value("SELECT COUNT(*) FROM catalog_terms"), [(2000,)])
+
+    def test_a_nearly_full_disk_skips_the_upgrade_but_still_indexes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                make_legacy_catalog(root, sessions)
+                write_codex_session(sessions / "fresh.jsonl", "fresh", [("user", "fresh pelican idea")])
+                asked = []
+
+                def disk_usage(path):
+                    asked.append(Path(path))
+                    return shutil._ntuple_diskusage(100 * 2**30, 100 * 2**30 - 10 * 2**20, 10 * 2**20)
+
+                stderr = io.StringIO()
+                with patch.object(shutil, "disk_usage", disk_usage), redirect_stderr(stderr):
+                    self.assertEqual(archive_catalog.archive_catalog_index()[:3], (1, 1, 0))
+
+                self.assertEqual(asked, [root / "state"])
+                self.assertEqual(stderr.getvalue(), "archive catalog cleanup skipped: 10 MB free, needs 64 MB\n")
+                self.assertEqual(search_ids("pelican"), ["fresh"])
+                self.assertEqual(catalog_value("SELECT value FROM catalog_meta WHERE key = 'layout_version'"), [])
+                self.assertEqual(catalog_value("SELECT COUNT(*) FROM catalog_terms"), [(2000,)])
 
     def test_a_catalog_that_loses_most_of_its_messages_is_vacuumed(self):
         with tempfile.TemporaryDirectory() as tmp:
