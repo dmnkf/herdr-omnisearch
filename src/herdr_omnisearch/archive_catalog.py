@@ -740,21 +740,15 @@ def archive_catalog_upgrade_layout(conn) -> None:
             conn.execute("INSERT INTO catalog_message_fts (catalog_message_fts) VALUES ('rebuild')")
             for table in ARCHIVE_CATALOG_LEGACY_TABLES:
                 conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.execute(
+                """
+                INSERT INTO catalog_meta (key, value) VALUES ('layout_version', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (str(ARCHIVE_CATALOG_LAYOUT_VERSION),),
+            )
     finally:
         conn.execute(f"PRAGMA secure_delete = {SQLITE_SECURE_DELETE_MODES[secure_delete]}")
-    try:
-        conn.execute("VACUUM")
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.OperationalError:
-        return
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO catalog_meta (key, value) VALUES ('layout_version', ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (str(ARCHIVE_CATALOG_LAYOUT_VERSION),),
-        )
 
 
 def archive_catalog_index(agents: str = ""):

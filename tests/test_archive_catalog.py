@@ -455,6 +455,25 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                 self.assertEqual(catalog_value("SELECT value FROM catalog_meta WHERE key = 'layout_version'"), [])
                 self.assertEqual(catalog_value("SELECT COUNT(*) FROM catalog_terms"), [(2000,)])
 
+    def test_a_failed_vacuum_keeps_the_upgrade_and_the_next_run_only_vacuums(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                make_legacy_catalog(root, sessions)
+                with failing_sql("VACUUM"):
+                    self.assertEqual(archive_catalog.archive_catalog_index()[:3], (0, 1, 0))
+
+                self.assertEqual(catalog_value("SELECT value FROM catalog_meta WHERE key = 'layout_version'"), [("1",)])
+                self.assertNotEqual(catalog_value("PRAGMA freelist_count"), [(0,)])
+                legacy = sqlite3.connect(root / "state" / "archive-catalog.sqlite3")
+                with legacy:
+                    legacy.execute("CREATE TABLE catalog_terms (token TEXT PRIMARY KEY)")
+                legacy.close()
+
+                archive_catalog.archive_catalog_index()
+                self.assertEqual(catalog_value("SELECT name FROM sqlite_master WHERE name = 'catalog_terms'"), [("catalog_terms",)])
+                self.assertEqual(catalog_value("PRAGMA freelist_count"), [(0,)])
+
     def test_a_catalog_that_loses_most_of_its_messages_is_vacuumed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
