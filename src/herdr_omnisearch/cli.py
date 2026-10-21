@@ -521,8 +521,6 @@ class PickerParseError(Exception):
 
 
 class PickerParser(argparse.ArgumentParser):
-    """A parser for one picker command that hands help and errors to the full parser."""
-
     def error(self, message):
         raise PickerParseError(message)
 

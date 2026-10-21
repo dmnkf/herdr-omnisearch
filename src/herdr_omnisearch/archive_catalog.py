@@ -406,8 +406,6 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
     elif slug:
         title = slug.replace("-", " ")
     elif agent == "omp":
-        # omp saves sessions as <timestamp>_<id>.jsonl; strip the timestamp
-        # prefix when the id had to fall back to the filename stem.
         if "_" in session_id:
             session_id = session_id.split("_")[-1]
     started_epoch = archive_path_timestamp(agent, path)
@@ -640,7 +638,6 @@ def archive_catalog_export_sessions(conn, session_keys):
     if not session_keys:
         return None
     directory = ensure_private_directory(archive_catalog_absent_dir(), "archive catalog export")
-    # Exports only run under the catalog lock, so a leftover partial file belongs to a dead run.
     for leftover in directory.glob("*.tmp"):
         leftover.unlink(missing_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -687,7 +684,6 @@ def archive_catalog_export_sessions(conn, session_keys):
 
 @contextmanager
 def archive_catalog_absent_transaction(conn, session_keys):
-    # The export is the only copy once the deletes commit, and a failed commit must not leave a duplicate.
     export = None
     try:
         with conn:
@@ -706,8 +702,6 @@ def archive_catalog_absent_transaction(conn, session_keys):
 
 
 def archive_catalog_prune(conn) -> None:
-    # Runs every pass, so rows left by older versions or other writers converge too.
-    # Absent sessions keep every version for their export, which commits apart so its failure cannot block this.
     with conn:
         archive_catalog_delete_messages(
             conn,
@@ -758,7 +752,7 @@ def archive_catalog_upgrade_layout(conn) -> bool:
         )
     ]
     secure_delete = conn.execute("PRAGMA secure_delete").fetchone()[0]
-    # VACUUM follows, so zeroing the freed pages would only grow the WAL.
+    # Zeroing the deleted rows would double the WAL on a full disk, and the closing VACUUM drops them anyway.
     conn.execute("PRAGMA secure_delete = OFF")
     try:
         with archive_catalog_absent_transaction(conn, absent):
@@ -855,7 +849,6 @@ def _archive_catalog_index_unlocked(agents: str = ""):
     }
     listed = {agent for agent, _path in sources}
     for agent in sorted(selected - unlisted - listed):
-        # An empty listing is far more often an unmounted folder or a config typo than a wiped history.
         if any(row["agent"] == agent and int(row["is_present"] or 0) for row in existing.values()):
             print(f"archive catalog kept {agent} sessions: no history files listed", file=sys.stderr)
             unlisted.add(agent)
@@ -1034,7 +1027,6 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             changed += 1
             message_count += indexed_messages
 
-        # Before the upgrade the prune would do its bulk delete with secure_delete on and no disk check.
         if layout_current:
             try:
                 archive_catalog_prune(conn)

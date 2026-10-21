@@ -57,7 +57,7 @@ id = "doctor"
 title = "Check OmniSearch health"
 command = ["bin/herdr-omnisearch", "doctor"]
 
-# Panes start Python directly; the bin launcher adds a shell and a dirname fork to every open.
+# Panes skip bin/herdr-omnisearch, whose extra shell and dirname fork cost every open.
 [[panes]]
 id = "live"
 title = "OmniSearch"

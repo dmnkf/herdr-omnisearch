@@ -305,7 +305,6 @@ agents = omp
         self.assertEqual(turn_asst["role"], "assistant")
         self.assertEqual(turn_asst["content"], "All 10 tests passed.")
 
-        # Non-message type ignored
         model_change = {
             "type": "model_change",
             "timestamp": "2026-10-06T12:00:00.000Z",
@@ -346,7 +345,6 @@ agents = omp
                     )
                 conn.close()
 
-                # With config setting agents = omp, claude should be excluded
                 with patch.dict(os.environ, {"HERDR_OMNISEARCH_CONFIG": str(Path(tmpdir) / "empty.ini")}):
                     with patch.dict(settings.app_config(), {"archive_agents": ["omp"]}):
                         results = archive_catalog.archive_catalog_search("", 10)

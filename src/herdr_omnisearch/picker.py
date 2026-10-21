@@ -84,7 +84,6 @@ def archive_pick(args) -> int:
     count, _last = archive_catalog_state()
     if not count:
         if refresh_later:
-            # The empty-catalog message can only say the build is running once it holds the lock.
             maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
             refresh_later = False
         args.initial_message = (
