@@ -880,13 +880,6 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                 for path, row in existing.items()
                 if row["agent"] in selected and row["agent"] not in unlisted and path not in source_paths
             }
-            if not agents:
-                disabled_paths = {
-                    path
-                    for path, row in existing.items()
-                    if row["agent"] not in selected
-                }
-                stale_paths.update(disabled_paths)
             for stale_path in sorted(stale_paths):
                 old = existing[stale_path]
                 if int(old["is_present"] or 0):
@@ -1284,26 +1277,29 @@ def archive_catalog_result(stable_id: str):
     return archive_catalog_result_row(row) if row else None
 
 
+def archive_catalog_agent_clause(agent, params) -> str:
+    if agent:
+        params["agent"] = agent
+        return "s.agent = :agent"
+    enabled = app_config()["archive_agents"]
+    names = [f"enabled_agent_{index}" for index in range(len(enabled))]
+    params.update(zip(names, enabled))
+    return f"s.agent IN ({', '.join(':' + name for name in names)})"
+
+
 def archive_catalog_max_window_offset(agent, window_days: int, *, now=None) -> int:
+    params = {}
+    agent_clause = archive_catalog_agent_clause(agent, params)
     conn = archive_catalog_connect()
     try:
-        if agent:
-            row = conn.execute(
-                """
-                SELECT MIN(started_epoch)
-                FROM catalog_sessions
-                WHERE agent = ? AND COALESCE(is_present, 1) = 1
-                """,
-                (agent,),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                """
-                SELECT MIN(started_epoch)
-                FROM catalog_sessions
-                WHERE COALESCE(is_present, 1) = 1
-                """
-            ).fetchone()
+        row = conn.execute(
+            f"""
+            SELECT MIN(s.started_epoch)
+            FROM catalog_sessions s
+            WHERE {agent_clause} AND COALESCE(s.is_present, 1) = 1
+            """,
+            params,
+        ).fetchone()
     finally:
         conn.close()
     oldest = int(row[0] or 0) if row else 0
@@ -1405,18 +1401,12 @@ def archive_catalog_search(
     text, filters = parse_filters(query)
     if agent:
         filters["agent"] = agent
-    clauses = ["COALESCE(s.is_wrapper, 0) = 0", "COALESCE(s.is_present, 1) = 1"]
     params = {"limit": limit}
-    if filters.get("agent"):
-        clauses.append("s.agent = :agent")
-        params["agent"] = filters["agent"]
-    else:
-        active_agents = list(app_config()["archive_agents"])
-        if active_agents:
-            placeholders = ", ".join(f":active_agent_{i}" for i in range(len(active_agents)))
-            clauses.append(f"s.agent IN ({placeholders})")
-            for i, a in enumerate(active_agents):
-                params[f"active_agent_{i}"] = a
+    clauses = [
+        "COALESCE(s.is_wrapper, 0) = 0",
+        "COALESCE(s.is_present, 1) = 1",
+        archive_catalog_agent_clause(filters.get("agent"), params),
+    ]
     if filters.get("cwd"):
         clauses.append("COALESCE(s.cwd, '') LIKE :cwd")
         params["cwd"] = f"%{filters['cwd']}%"

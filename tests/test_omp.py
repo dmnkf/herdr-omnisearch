@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 import sys
@@ -10,7 +11,96 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
-from herdr_omnisearch import archive_catalog, navigate, settings
+from herdr_omnisearch import archive_catalog, navigate, settings, storage
+
+NOW = 1792584000
+
+
+def write_jsonl(path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+
+def write_codex_session(path, session_id, started, text):
+    write_jsonl(path, [
+        {"timestamp": started, "type": "session_meta", "payload": {"id": session_id, "cwd": f"/projects/{session_id}"}},
+        {"timestamp": started, "type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}],
+        }},
+        {"timestamp": started, "type": "response_item", "payload": {
+            "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": f"done with {text}"}],
+        }},
+    ])
+
+
+def write_omp_session(path, session_id, started, text):
+    write_jsonl(path, [
+        {"type": "session", "version": 3, "id": session_id, "timestamp": started, "cwd": f"/projects/{session_id}"},
+        {"type": "message", "id": "m1", "timestamp": started, "message": {
+            "role": "user", "content": [{"type": "text", "text": text}],
+        }},
+        {"type": "message", "id": "m2", "timestamp": started, "message": {
+            "role": "assistant", "content": [{"type": "text", "text": f"done with {text}"}],
+        }},
+    ])
+
+
+@contextmanager
+def archive_config(root, agents="codex, omp", codex_enabled=True, omp_enabled=True):
+    config = root / "config.ini"
+    config.write_text(
+        f"""
+[archive]
+enabled = true
+agents = {agents}
+
+[archive.codex]
+enabled = {str(codex_enabled).lower()}
+sessions = {root / "codex" / "*.jsonl"}
+thread_names = {root / "missing.jsonl"}
+
+[archive.omp]
+enabled = {str(omp_enabled).lower()}
+sessions = {root / "omp" / "**" / "*.jsonl"}
+""",
+        encoding="utf-8",
+    )
+    environment = {
+        "HERDR_OMNISEARCH_CONFIG": str(config),
+        "HERDR_PLUGIN_STATE_DIR": str(root / "state"),
+        "HERDR_OMNISEARCH_CATALOG_DB": str(root / "state" / "archive-catalog.sqlite3"),
+    }
+    settings.CONFIG_CACHE = None
+    try:
+        with patch.dict(os.environ, environment):
+            yield
+    finally:
+        settings.CONFIG_CACHE = None
+
+
+def catalog_rows():
+    conn = storage.archive_catalog_connect()
+    try:
+        return [
+            tuple(row)
+            for row in conn.execute(
+                """
+                SELECT s.session_key, s.is_present, COUNT(m.id)
+                FROM catalog_sessions s LEFT JOIN catalog_messages m ON m.session_key = s.session_key
+                GROUP BY s.session_key ORDER BY s.session_key
+                """
+            )
+        ]
+    finally:
+        conn.close()
+
+
+def absent_exports():
+    return sorted(path.name for path in storage.archive_catalog_absent_dir().glob("*"))
+
+
+def visible_sessions(query=""):
+    return [row["session_key"] for row in archive_catalog.archive_catalog_search(query, 10)]
 
 
 class OmpArchiveTests(unittest.TestCase):
@@ -244,59 +334,51 @@ agents = omp
                         agents = [r["agent"] for r in results]
                         self.assertEqual(agents, ["omp"])
 
-    def test_archive_catalog_index_marks_disabled_agents_not_present(self):
-        from herdr_omnisearch import storage
+    def test_a_disabled_agent_keeps_its_sessions_and_only_hides_them(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            with patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": tmpdir}):
-                conn = storage.archive_catalog_connect()
-                with conn:
-                    for agent in ("claude", "omp"):
-                        conn.execute(
-                            """
-                            INSERT INTO catalog_sessions (
-                                session_key, agent, session_id, path, source_size,
-                                source_mtime_ns, indexed_at, is_present
-                            ) VALUES (?, ?, ?, ?, 1, 1, 1, 1)
-                            """,
-                            (f"{agent}:session", agent, "session", f"/{agent}.jsonl"),
-                        )
-                conn.close()
+            write_codex_session(root / "codex" / "one.jsonl", "codex-one", "2026-08-04T12:00:00Z", "codex giraffe")
+            write_omp_session(root / "omp" / "one.jsonl", "omp-one", "2026-01-10T12:00:00Z", "omp otter")
+            both_indexed = [("codex:codex-one", 1, 2), ("omp:omp-one", 1, 2)]
 
-                cfg = settings.default_config()
-                cfg["archive_enabled"] = True
-                cfg["archive_agents"] = ["omp"]
-                with patch.object(settings, "CONFIG_CACHE", cfg), patch.object(
-                    archive_catalog, "archive_paths", return_value=[Path("/omp.jsonl")]
-                ), patch.object(
-                    archive_catalog,
-                    "archive_file_metadata",
-                    return_value={
-                        "agent": "omp",
-                        "session_id": "session",
-                        "title": "Title",
-                        "cwd": "/tmp",
-                        "path": "/omp.jsonl",
-                        "started_at": "2026-10-06T12:00:00Z",
-                        "updated_at": "2026-10-06T12:00:00Z",
-                        "is_subagent": False,
-                    },
-                ), patch.object(archive_catalog, "archive_source_items", return_value=[]):
-                    archive_catalog.archive_catalog_index()
+            with archive_config(root):
+                self.assertEqual(archive_catalog.archive_catalog_index(), (2, 0, 0, 4))
+                self.assertEqual(catalog_rows(), both_indexed)
+                self.assertEqual(visible_sessions(), ["codex:codex-one", "omp:omp-one"])
+                self.assertEqual(archive_catalog.archive_catalog_max_window_offset(None, 14, now=NOW), 20)
 
-                conn = storage.archive_catalog_connect()
-                try:
-                    active = {
-                        row[0]
-                        for row in conn.execute(
-                            "SELECT agent FROM catalog_sessions WHERE is_present = 1"
-                        ).fetchall()
-                    }
-                finally:
-                    conn.close()
+            with archive_config(root, omp_enabled=False):
+                indexed = archive_catalog.archive_catalog_index()
+                self.assertEqual((absent_exports(), catalog_rows()), ([], both_indexed))
+                self.assertEqual(indexed, (0, 1, 0, 0))
+                self.assertEqual(visible_sessions(), ["codex:codex-one"])
+                self.assertEqual(visible_sessions("otter"), [])
+                self.assertEqual(archive_catalog.archive_catalog_max_window_offset(None, 14, now=NOW), 5)
 
-                self.assertEqual(active, {"omp"})
+            with archive_config(root, agents="codex"):
+                indexed = archive_catalog.archive_catalog_index()
+                self.assertEqual((absent_exports(), catalog_rows()), ([], both_indexed))
+                self.assertEqual(indexed, (0, 1, 0, 0))
+                self.assertEqual(visible_sessions(), ["codex:codex-one"])
 
+            with archive_config(root):
+                self.assertEqual(visible_sessions("otter"), ["omp:omp-one"])
+                self.assertEqual(archive_catalog.archive_catalog_max_window_offset(None, 14, now=NOW), 20)
+                self.assertEqual(archive_catalog.archive_catalog_index(), (0, 2, 0, 0))
+                self.assertEqual(catalog_rows(), both_indexed)
+
+    def test_disabling_every_agent_hides_every_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_codex_session(root / "codex" / "one.jsonl", "codex-one", "2026-08-04T12:00:00Z", "codex giraffe")
+            with archive_config(root):
+                archive_catalog.archive_catalog_index()
+            with archive_config(root, codex_enabled=False, omp_enabled=False):
+                self.assertEqual(settings.app_config()["archive_agents"], [])
+                self.assertEqual(visible_sessions(), [])
+                self.assertEqual(visible_sessions("giraffe"), [])
+                self.assertEqual(archive_catalog.archive_catalog_max_window_offset(None, 14, now=NOW), 0)
+                self.assertEqual(catalog_rows(), [("codex:codex-one", 1, 2)])
 
 if __name__ == "__main__":
     unittest.main()
