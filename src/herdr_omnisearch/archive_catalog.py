@@ -727,10 +727,7 @@ def archive_catalog_result(stable_id: str):
 
 
 def archive_catalog_agent_clause(agent, params) -> str:
-    if agent:
-        params["agent"] = agent
-        return "s.agent = :agent"
-    enabled = app_config()["archive_agents"]
+    enabled = [name for name in app_config()["archive_agents"] if not agent or name == agent]
     names = [f"enabled_agent_{index}" for index in range(len(enabled))]
     params.update(zip(names, enabled))
     return f"s.agent IN ({', '.join(':' + name for name in names)})"

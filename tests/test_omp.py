@@ -456,6 +456,13 @@ thread_names =
                 self.assertEqual(visible_sessions("otter"), [])
                 self.assertEqual(archive_catalog.archive_catalog_max_window_offset(None, 14, now=NOW), 5)
 
+            with archive_config(root, omp_enabled=False):
+                self.assertEqual(visible_sessions("a:omp"), [])
+                self.assertEqual(visible_sessions("a:omp otter"), [])
+                self.assertEqual(archive_catalog.archive_catalog_search("", 10, agent="omp"), [])
+                self.assertEqual(archive_catalog.archive_catalog_max_window_offset("omp", 14, now=NOW), 0)
+                self.assertEqual(visible_sessions("a:codex"), ["codex:codex-one"])
+
             with archive_config(root, agents="codex"):
                 indexed = archive_catalog.archive_catalog_index()
                 self.assertEqual((absent_exports(), catalog_rows()), ([], both_indexed))
@@ -464,6 +471,8 @@ thread_names =
 
             with archive_config(root):
                 self.assertEqual(visible_sessions("otter"), ["omp:omp-one"])
+                self.assertEqual(visible_sessions("a:omp"), ["omp:omp-one"])
+                self.assertEqual(archive_catalog.archive_catalog_max_window_offset("omp", 14, now=NOW), 20)
                 self.assertEqual(archive_catalog.archive_catalog_max_window_offset(None, 14, now=NOW), 20)
                 self.assertEqual(archive_catalog.archive_catalog_index(), (0, 2, 0, 0))
                 self.assertEqual(catalog_rows(), both_indexed)
