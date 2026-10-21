@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add oh-my-pi (`omp`) conversation archive search and indexing.
+- Support toggling individual archive agent integrations on or off with
+  `enabled = true|false` under their respective `[archive.<agent>]` sections.
+
 ## 0.11.2 - 2026-09-25
 
 - Open the pickers faster. The `open-live` and `open-archive` actions now call

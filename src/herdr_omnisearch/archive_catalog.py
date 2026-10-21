@@ -378,6 +378,26 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
                 slug = item.get("slug") or slug
                 if session_id and (cwd or slug):
                     break
+            elif agent == "omp":
+                if path.name.startswith("__") or re.search(r"\d{4}-\d{2}-\d{2}T", path.parent.name):
+                    is_subagent = True
+                item_type = item.get("type")
+                if item_type == "session":
+                    session_id = item.get("id") or session_id
+                    cwd = item.get("cwd") or cwd
+                    title = item.get("title") or title
+                    if item.get("parentSessionId") or item.get("parentId") or item.get("is_subagent"):
+                        is_subagent = True
+                    if title and cwd and session_id:
+                        break
+                elif item_type == "title":
+                    title = item.get("title") or title
+                elif item_type == "message" and not title:
+                    msg = item.get("message") or {}
+                    if msg.get("role") == "user":
+                        candidate = extract_message_text(msg.get("content"))
+                        if not is_archive_noise(candidate):
+                            title = title_from_text(candidate, "")
             else:
                 return None
     except OSError:
@@ -386,6 +406,11 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
         title = title or thread_names.get(session_id) or ""
     elif slug:
         title = slug.replace("-", " ")
+    elif agent == "omp":
+        # omp saves sessions as <timestamp>_<id>.jsonl; strip the timestamp
+        # prefix when the id had to fall back to the filename stem.
+        if "_" in session_id:
+            session_id = session_id.split("_")[-1]
     started_epoch = archive_path_timestamp(agent, path)
     started_at = datetime.fromtimestamp(started_epoch).isoformat() if started_epoch else ""
     return {
@@ -417,6 +442,10 @@ def archive_catalog_turn(agent: str, item):
     elif agent == "claude" and item.get("type") in ("user", "assistant"):
         message = item.get("message") or {}
         role = message.get("role") or item.get("type") or ""
+        content = message.get("content")
+    elif agent == "omp" and item.get("type") == "message":
+        message = item.get("message") or {}
+        role = message.get("role") or ""
         content = message.get("content")
     elif is_opencode_source(agent):
         role = item.get("role") or ""
@@ -851,6 +880,13 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                 for path, row in existing.items()
                 if row["agent"] in selected and row["agent"] not in unlisted and path not in source_paths
             }
+            if not agents:
+                disabled_paths = {
+                    path
+                    for path, row in existing.items()
+                    if row["agent"] not in selected
+                }
+                stale_paths.update(disabled_paths)
             for stale_path in sorted(stale_paths):
                 old = existing[stale_path]
                 if int(old["is_present"] or 0):
@@ -1374,6 +1410,13 @@ def archive_catalog_search(
     if filters.get("agent"):
         clauses.append("s.agent = :agent")
         params["agent"] = filters["agent"]
+    else:
+        active_agents = list(app_config()["archive_agents"])
+        if active_agents:
+            placeholders = ", ".join(f":active_agent_{i}" for i in range(len(active_agents)))
+            clauses.append(f"s.agent IN ({placeholders})")
+            for i, a in enumerate(active_agents):
+                params[f"active_agent_{i}"] = a
     if filters.get("cwd"):
         clauses.append("COALESCE(s.cwd, '') LIKE :cwd")
         params["cwd"] = f"%{filters['cwd']}%"
