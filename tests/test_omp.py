@@ -46,11 +46,8 @@ def write_omp_session(path, session_id, started, text):
     ])
 
 
-@contextmanager
 def archive_config(root, agents="codex, omp", codex_enabled=True, omp_enabled=True):
-    config = root / "config.ini"
-    config.write_text(
-        f"""
+    return archive_ini(root, f"""
 [archive]
 enabled = true
 agents = {agents}
@@ -63,9 +60,13 @@ thread_names = {root / "missing.jsonl"}
 [archive.omp]
 enabled = {str(omp_enabled).lower()}
 sessions = {root / "omp" / "**" / "*.jsonl"}
-""",
-        encoding="utf-8",
-    )
+""")
+
+
+@contextmanager
+def archive_ini(root, text):
+    config = root / "config.ini"
+    config.write_text(text, encoding="utf-8")
     environment = {
         "HERDR_OMNISEARCH_CONFIG": str(config),
         "HERDR_PLUGIN_STATE_DIR": str(root / "state"),
@@ -102,6 +103,10 @@ def absent_exports():
 
 def visible_sessions(query=""):
     return [row["session_key"] for row in archive_catalog.archive_catalog_search(query, 10)]
+
+
+def found_sessions(query):
+    return [(row["agent"], row["session_id"], row["title"]) for row in archive_catalog.archive_catalog_search(query, 10)]
 
 
 class OmpArchiveTests(unittest.TestCase):
@@ -322,6 +327,68 @@ agents = omp
             cwd, cmd = navigate.archive_resume_command(row)
             self.assertEqual(cwd, tmpdir)
             self.assertEqual(cmd, ["omp", "--resume", "01a11299-0c14-7570-b262-def032d07f72"])
+
+    def test_a_custom_section_is_read_by_its_kind(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_jsonl(root / "work" / "project" / "one.jsonl", [
+                {"type": "user", "sessionId": "work-one", "cwd": "/projects/work", "slug": "cookie-domain-fix",
+                 "timestamp": "2026-08-04T12:00:00Z", "message": {"role": "user", "content": "fix the cookie domain"}},
+                {"type": "assistant", "sessionId": "work-one", "timestamp": "2026-08-04T12:00:01Z",
+                 "message": {"role": "assistant", "content": [{"type": "text", "text": "cookie domain fixed"}]}},
+            ])
+            write_codex_session(root / "lab" / "one.jsonl", "lab-one", "2026-08-04T12:00:00Z", "feed the giraffe")
+            write_jsonl(root / "lab-names.jsonl", [{"id": "lab-one", "thread_name": "Giraffe enclosure"}])
+            with archive_ini(root, f"""
+[archive]
+enabled = true
+agents = work, lab
+
+[archive.work]
+kind = claude
+sessions = {root / "work" / "*" / "*.jsonl"}
+
+[archive.lab]
+kind = codex
+sessions = {root / "lab" / "*.jsonl"}
+thread_names = {root / "lab-names.jsonl"}
+"""):
+                self.assertEqual(archive_catalog.archive_catalog_index(), (2, 0, 0, 4))
+                self.assertEqual(found_sessions("cookie"), [("work", "work-one", "cookie domain fix")])
+                self.assertEqual(found_sessions("giraffe"), [("lab", "lab-one", "Giraffe enclosure")])
+
+    def test_a_built_in_section_with_an_unknown_kind_keeps_its_format(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_omp_session(root / "omp" / "one.jsonl", "omp-one", "2026-08-04T12:00:00Z", "omp otter")
+            with archive_ini(root, f"""
+[archive]
+enabled = true
+agents = omp
+
+[archive.omp]
+kind = omp-nightly
+launcher = shell
+sessions = {root / "omp" / "*.jsonl"}
+"""):
+                self.assertEqual(archive_catalog.archive_catalog_index(), (1, 0, 0, 2))
+                self.assertEqual(found_sessions("otter"), [("omp", "omp-one", "omp otter")])
+
+    def test_an_empty_thread_names_setting_reads_no_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_codex_session(root / "codex" / "one.jsonl", "codex-one", "2026-08-04T12:00:00Z", "codex giraffe")
+            with archive_ini(root, f"""
+[archive]
+enabled = true
+agents = codex
+
+[archive.codex]
+sessions = {root / "codex" / "*.jsonl"}
+thread_names =
+"""):
+                self.assertEqual(archive_catalog.archive_catalog_index(), (1, 0, 0, 2))
+                self.assertEqual(found_sessions("giraffe"), [("codex", "codex-one", "codex giraffe")])
 
     def test_archive_catalog_search_filters_by_active_agents(self):
         from herdr_omnisearch import storage

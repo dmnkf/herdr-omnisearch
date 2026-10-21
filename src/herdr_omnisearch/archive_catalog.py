@@ -454,7 +454,7 @@ def _archive_catalog_index_unlocked(agents: str = ""):
         reset_opencode_run,
     )
     selected = selected_archive_sources(agents)
-    thread_names = load_codex_thread_names() if "codex" in selected else {}
+    thread_names = {agent: load_codex_thread_names(agent) for agent in selected}
     reset_opencode_run()
     sources = []
     # Agents whose history cannot be listed this run keep their catalog rows as they are.
@@ -570,7 +570,7 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             ):
                 unchanged += 1
                 continue
-            base_metadata = archive_file_metadata(agent, path, thread_names)
+            base_metadata = archive_file_metadata(agent, path, thread_names[agent])
             if not base_metadata:
                 continue
             session_key = old["session_key"] if old else f"{agent}:{base_metadata['session_id']}"
@@ -592,7 +592,7 @@ def _archive_catalog_index_unlocked(agents: str = ""):
             document = archive_catalog_document(
                 agent,
                 path,
-                thread_names,
+                thread_names[agent],
                 message_sink=store_turn,
                 metadata=base_metadata,
             )

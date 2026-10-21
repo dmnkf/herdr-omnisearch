@@ -103,10 +103,11 @@ def extract_message_text(content) -> str:
     return "\n".join(piece for piece in pieces if piece)
 
 
-def load_codex_thread_names():
-    path = Path(app_config()["archive"].get("codex", {}).get("thread_names", "")).expanduser()
+def load_codex_thread_names(agent: str):
+    value = app_config()["archive"].get(agent, {}).get("thread_names")
+    path = Path(value).expanduser() if value else None
     names = {}
-    if not path or not path.exists():
+    if path is None or not path.exists():
         return names
     for item in iter_archive_records(path):
         session_id = item.get("id")
@@ -333,7 +334,8 @@ UNKNOWN_FORMAT = ArchiveFormat(no_metadata, no_turn)
 
 
 def archive_format(agent: str) -> ArchiveFormat:
-    return ARCHIVE_FORMATS.get("opencode" if is_opencode_source(agent) else agent, UNKNOWN_FORMAT)
+    kind = app_config()["archive"].get(agent, {}).get("kind")
+    return ARCHIVE_FORMATS.get(kind) or ARCHIVE_FORMATS.get(agent, UNKNOWN_FORMAT)
 
 
 def archive_path_timestamp(agent: str, path: Path) -> float:
