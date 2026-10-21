@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -258,6 +259,20 @@ agents = omp
                     "__advisor.jsonl": True,
                 },
             )
+
+    def test_archive_path_timestamp_reads_omp_names_as_utc_and_codex_names_as_local(self):
+        try:
+            with patch.dict(os.environ, {"TZ": "Europe/Zurich"}):
+                time.tzset()
+                omp = archive_catalog.archive_path_timestamp(
+                    "omp", Path("2026-10-06T11-59-00-000Z_01a11299-0c14-7570-b262-def032d07f72.jsonl")
+                )
+                codex = archive_catalog.archive_path_timestamp(
+                    "codex", Path("rollout-2026-10-06T13-59-00-0199b7a2-5c3e-7d40-9f1a-2b6c8e4d0a11.jsonl")
+                )
+        finally:
+            time.tzset()
+        self.assertEqual((omp, codex), (1791287940, 1791287940))
 
     def test_archive_catalog_turn_parsing(self):
         user_item = {

@@ -295,10 +295,12 @@ def archive_path_timestamp(agent: str, path: Path) -> float:
     session = OPENCODE_SOURCES.get(str(path))
     if session is not None:
         return session["created_ms"] / 1000
-    match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})", path.name)
+    match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})(-\d{3}Z)?", path.name)
     if match:
         try:
-            return datetime.strptime(match.group(1), "%Y-%m-%dT%H-%M-%S").timestamp()
+            started = datetime.strptime(match.group(1), "%Y-%m-%dT%H-%M-%S")
+            # Codex names its files in local time; omp's milliseconds-and-Z names are UTC.
+            return (started.replace(tzinfo=timezone.utc) if match.group(2) else started).timestamp()
         except ValueError:
             pass
     try:
