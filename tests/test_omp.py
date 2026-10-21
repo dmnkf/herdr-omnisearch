@@ -239,6 +239,23 @@ agents = omp
             self.assertEqual(meta["title"], "Refactor database migrations")
             self.assertEqual(meta["session_id"], "session-xyz")
 
+    def test_omp_session_ids_keep_the_header_id_and_strip_only_the_filename_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir) / "--work_app--"
+            write_jsonl(folder / "2026-10-06T11-59-00-000Z_01a1.jsonl", [
+                {"type": "session", "id": "01a1_fork_2", "cwd": "/work", "timestamp": "2026-10-06T11:59:00Z"},
+            ])
+            write_jsonl(folder / "2026-10-06T12-30-00-000Z_01b2.jsonl", [
+                {"type": "session", "cwd": "/work", "timestamp": "2026-10-06T12:30:00Z"},
+            ])
+            self.assertEqual(
+                [
+                    archive_sources.archive_file_metadata("omp", path, {})["session_id"]
+                    for path in sorted(folder.glob("*.jsonl"))
+                ],
+                ["01a1_fork_2", "01b2"],
+            )
+
     def test_archive_file_metadata_marks_nested_transcripts_as_subagents(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             project = Path(tmpdir) / "--work--app--"

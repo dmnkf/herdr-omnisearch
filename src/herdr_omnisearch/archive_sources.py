@@ -278,7 +278,7 @@ def omp_turn(item):
 
 
 def omp_metadata(path: Path, _thread_names):
-    session_id, title, cwd = path.stem, "", ""
+    session_id, title, cwd = "", "", ""
     # omp writes a subagent's transcript into the folder named after its parent session's file.
     is_subagent = path.name.startswith("__") or Path(f"{path.parent}.jsonl").is_file()
     for item in iter_archive_records(path):
@@ -287,13 +287,14 @@ def omp_metadata(path: Path, _thread_names):
             session_id = item.get("id") or session_id
             cwd = item.get("cwd") or cwd
             title = item.get("title") or title
-            if title and cwd and session_id:
+            if title and cwd:
                 break
         elif item_type == "title":
             title = item.get("title") or title
         elif not title:
             title = user_message_title(omp_turn(item))
-    return {"session_id": session_id.split("_")[-1], "title": title, "cwd": cwd, "is_subagent": is_subagent}
+    session_id = session_id or path.stem.rsplit("_", 1)[-1]
+    return {"session_id": session_id, "title": title, "cwd": cwd, "is_subagent": is_subagent}
 
 
 def opencode_turn(item):
