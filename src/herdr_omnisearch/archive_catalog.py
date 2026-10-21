@@ -345,7 +345,8 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
     title = ""
     cwd = ""
     slug = ""
-    is_subagent = False
+    # omp writes a subagent's transcript into the folder named after its parent session's file.
+    is_subagent = agent == "omp" and (path.name.startswith("__") or Path(f"{path.parent}.jsonl").is_file())
     try:
         for item in iter_archive_records(path):
             if agent == "codex":
@@ -379,15 +380,11 @@ def archive_file_metadata(agent: str, path: Path, thread_names):
                 if session_id and (cwd or slug):
                     break
             elif agent == "omp":
-                if path.name.startswith("__") or re.search(r"\d{4}-\d{2}-\d{2}T", path.parent.name):
-                    is_subagent = True
                 item_type = item.get("type")
                 if item_type == "session":
                     session_id = item.get("id") or session_id
                     cwd = item.get("cwd") or cwd
                     title = item.get("title") or title
-                    if item.get("parentSessionId") or item.get("parentId") or item.get("is_subagent"):
-                        is_subagent = True
                     if title and cwd and session_id:
                         break
                 elif item_type == "title":

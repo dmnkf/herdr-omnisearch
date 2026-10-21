@@ -233,27 +233,31 @@ agents = omp
             self.assertEqual(meta["title"], "Refactor database migrations")
             self.assertEqual(meta["session_id"], "session-xyz")
 
-    def test_archive_file_metadata_detects_subagent(self):
+    def test_archive_file_metadata_marks_nested_transcripts_as_subagents(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Subagent in a parent folder with timestamp (e.g. parent session folder)
-            parent_dir = Path(tmpdir) / "2026-10-06T10-00-00-000Z_parent"
-            parent_dir.mkdir()
-            subagent_file = parent_dir / "CodeScout.jsonl"
-            with open(subagent_file, "w") as f:
-                f.write(json.dumps({"type": "session", "id": "sub-1", "cwd": "/tmp"}) + "\n")
+            project = Path(tmpdir) / "--work--app--"
+            parent = "2026-10-06T10-00-00-000Z_parent"
+            transcripts = [
+                f"{parent}.jsonl",
+                f"{parent}/0-CodeScout.jsonl",
+                f"{parent}/0-CodeScout/0-Reviewer.jsonl",
+                "__advisor.jsonl",
+            ]
+            for name in transcripts:
+                write_omp_session(project / name, Path(name).stem, "2026-10-06T10:00:00Z", "hello")
 
-            meta = archive_catalog.archive_file_metadata("omp", subagent_file, {})
-            self.assertIsNotNone(meta)
-            self.assertTrue(meta["is_subagent"])
-
-            # Advisor subagent file
-            advisor_file = Path(tmpdir) / "__advisor.jsonl"
-            with open(advisor_file, "w") as f:
-                f.write(json.dumps({"type": "session", "id": "adv-1", "cwd": "/tmp"}) + "\n")
-
-            meta_adv = archive_catalog.archive_file_metadata("omp", advisor_file, {})
-            self.assertIsNotNone(meta_adv)
-            self.assertTrue(meta_adv["is_subagent"])
+            self.assertEqual(
+                {
+                    name: archive_catalog.archive_file_metadata("omp", project / name, {})["is_subagent"]
+                    for name in transcripts
+                },
+                {
+                    f"{parent}.jsonl": False,
+                    f"{parent}/0-CodeScout.jsonl": True,
+                    f"{parent}/0-CodeScout/0-Reviewer.jsonl": True,
+                    "__advisor.jsonl": True,
+                },
+            )
 
     def test_archive_catalog_turn_parsing(self):
         user_item = {
