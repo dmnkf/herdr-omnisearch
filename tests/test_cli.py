@@ -22,6 +22,7 @@ os.environ.setdefault("HERDR_PLUGIN_STATE_DIR", tempfile.mkdtemp(prefix="herdr-o
 
 from herdr_omnisearch import (  # noqa: E402
     archive_catalog,
+    archive_sources,
     cli,
     live_index,
     navigate,
@@ -970,7 +971,7 @@ class CliTests(unittest.TestCase):
                 + b'{"id":"last"}\n'
             )
 
-            records = list(archive_catalog.iter_archive_records(path, max_record_bytes=64))
+            records = list(archive_sources.iter_archive_records(path, max_record_bytes=64))
 
         self.assertEqual([record["id"] for record in records], ["first", "last"])
 
@@ -994,7 +995,7 @@ class CliTests(unittest.TestCase):
             ]
             path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
 
-            metadata = archive_catalog.archive_file_metadata("codex", path, {})
+            metadata = archive_sources.archive_file_metadata("codex", path, {})
 
         self.assertEqual(metadata["session_id"], "session-id")
         self.assertEqual(metadata["title"], "Target migration")
@@ -1695,7 +1696,7 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(archive_catalog.archive_catalog_search("legacy-artifact-marker", 10), [])
                 self.assertEqual(archive_catalog.archive_catalog_search("shell-artifact-marker", 10), [])
                 self.assertEqual(archive_catalog.archive_catalog_search("approval-artifact-marker", 10), [])
-                self.assertTrue(archive_catalog.is_archive_noise('{"outcome":"allow"}'))
+                self.assertTrue(archive_sources.is_archive_noise('{"outcome":"allow"}'))
                 for prefix in (
                     "<turn_aborted>",
                     "<task-notification>",
@@ -1710,8 +1711,8 @@ class CliTests(unittest.TestCase):
                     "<system-reminder>",
                     "<subagent_notification>",
                 ):
-                    self.assertTrue(archive_catalog.is_archive_noise(prefix + "control payload"))
-                self.assertFalse(archive_catalog.is_archive_noise("<proposed_plan>Keep this useful plan"))
+                    self.assertTrue(archive_sources.is_archive_noise(prefix + "control payload"))
+                self.assertFalse(archive_sources.is_archive_noise("<proposed_plan>Keep this useful plan"))
 
     def test_scoped_archive_catalog_refresh_preserves_other_agents(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1739,7 +1740,7 @@ class CliTests(unittest.TestCase):
                             (f"{agent}:session", agent, "session", f"/{agent}.jsonl"),
                         )
                 conn.close()
-                with patch.object(archive_catalog, "archive_paths", return_value=[root / "other-codex.jsonl"]):
+                with patch.object(archive_sources, "archive_paths", return_value=[root / "other-codex.jsonl"]):
                     archive_catalog.archive_catalog_index("codex")
                 conn = storage.archive_catalog_connect()
                 try:

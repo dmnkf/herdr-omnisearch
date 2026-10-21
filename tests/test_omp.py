@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
-from herdr_omnisearch import archive_catalog, navigate, settings, storage
+from herdr_omnisearch import archive_catalog, archive_sources, navigate, settings, storage
 
 NOW = 1792584000
 
@@ -195,7 +195,7 @@ agents = omp
                 for rec in records:
                     f.write(json.dumps(rec) + "\n")
 
-            meta = archive_catalog.archive_file_metadata("omp", file_path, {})
+            meta = archive_sources.archive_file_metadata("omp", file_path, {})
             self.assertIsNotNone(meta)
             self.assertEqual(meta["agent"], "omp")
             self.assertEqual(meta["session_id"], "01a11299-0c14-7570-b262-def032d07f72")
@@ -229,7 +229,7 @@ agents = omp
                 for rec in records:
                     f.write(json.dumps(rec) + "\n")
 
-            meta = archive_catalog.archive_file_metadata("omp", file_path, {})
+            meta = archive_sources.archive_file_metadata("omp", file_path, {})
             self.assertIsNotNone(meta)
             self.assertEqual(meta["title"], "Refactor database migrations")
             self.assertEqual(meta["session_id"], "session-xyz")
@@ -249,7 +249,7 @@ agents = omp
 
             self.assertEqual(
                 {
-                    name: archive_catalog.archive_file_metadata("omp", project / name, {})["is_subagent"]
+                    name: archive_sources.archive_file_metadata("omp", project / name, {})["is_subagent"]
                     for name in transcripts
                 },
                 {
@@ -264,10 +264,10 @@ agents = omp
         try:
             with patch.dict(os.environ, {"TZ": "Europe/Zurich"}):
                 time.tzset()
-                omp = archive_catalog.archive_path_timestamp(
+                omp = archive_sources.archive_path_timestamp(
                     "omp", Path("2026-10-06T11-59-00-000Z_01a11299-0c14-7570-b262-def032d07f72.jsonl")
                 )
-                codex = archive_catalog.archive_path_timestamp(
+                codex = archive_sources.archive_path_timestamp(
                     "codex", Path("rollout-2026-10-06T13-59-00-0199b7a2-5c3e-7d40-9f1a-2b6c8e4d0a11.jsonl")
                 )
         finally:
@@ -286,7 +286,7 @@ agents = omp
                 ],
             },
         }
-        turn = archive_catalog.archive_catalog_turn("omp", user_item)
+        turn = archive_sources.archive_catalog_turn("omp", user_item)
         self.assertIsNotNone(turn)
         self.assertEqual(turn["role"], "user")
         self.assertEqual(turn["content"], "Run unit tests")
@@ -300,7 +300,7 @@ agents = omp
                 "content": [{"type": "text", "text": "All 10 tests passed."}],
             },
         }
-        turn_asst = archive_catalog.archive_catalog_turn("omp", assistant_item)
+        turn_asst = archive_sources.archive_catalog_turn("omp", assistant_item)
         self.assertIsNotNone(turn_asst)
         self.assertEqual(turn_asst["role"], "assistant")
         self.assertEqual(turn_asst["content"], "All 10 tests passed.")
@@ -310,7 +310,7 @@ agents = omp
             "timestamp": "2026-10-06T12:00:00.000Z",
             "model": "gpt-5",
         }
-        self.assertIsNone(archive_catalog.archive_catalog_turn("omp", model_change))
+        self.assertIsNone(archive_sources.archive_catalog_turn("omp", model_change))
 
     def test_archive_resume_command_omp(self):
         with tempfile.TemporaryDirectory() as tmpdir:
