@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.1 - 2026-10-21
+
+- Read an archive section with a name of your own by its `kind`. A section
+  such as `[archive.work]` with `kind = claude` and its own `sessions` used to
+  index nothing; it is now cataloged as Claude history. A section with
+  `kind = codex` also reads its own `thread_names` file, and an empty
+  `thread_names =` no longer stops the index run.
+- Keep the omp session id from the session header as written, so
+  `omp --resume` gets the id omp recorded even when it contains `_`. Only an id
+  taken from the file name still drops its `<timestamp>_` prefix.
+- Hide a turned-off agent from explicit agent filters too. `a:codex` in the
+  archive picker and `archive-pick --agent codex` no longer list the sessions
+  of an agent with `enabled = false` or one left out of `agents =`, the same as
+  a search without a filter.
+- Move archive transcript parsing and catalog maintenance into their own
+  modules. Indexing, search and the catalog behave as before.
+
 ## 0.12.0 - 2026-10-21
 
 - Add oh-my-pi (`omp`) to archive search. Its sessions under
