@@ -144,50 +144,30 @@ def app_config():
         if agents:
             cfg["archive_agents"] = agents
 
-    for agent in list(cfg["archive"]):
-        section = f"archive.{agent}"
-        if not parser.has_section(section):
+    for section in parser.sections():
+        if not section.startswith("archive."):
             continue
+        agent = section.split(".", 1)[1]
+        source = cfg["archive"].setdefault(
+            agent,
+            {"sessions": [], "resume": "", "launcher": "agent", "kind": agent.strip().lower(), "start_timeout_ms": 60000},
+        )
         sessions = split_config_list(parser.get(section, "sessions", fallback=""))
         if sessions:
-            cfg["archive"][agent]["sessions"] = sessions
-        if parser.has_option(section, "thread_names"):
-            cfg["archive"][agent]["thread_names"] = parser.get(section, "thread_names")
-        if parser.has_option(section, "resume"):
-            cfg["archive"][agent]["resume"] = parser.get(section, "resume")
-        if parser.has_option(section, "launcher"):
-            cfg["archive"][agent]["launcher"] = parser.get(section, "launcher").strip().lower()
-        if parser.has_option(section, "kind"):
-            cfg["archive"][agent]["kind"] = parser.get(section, "kind").strip().lower()
+            source["sessions"] = sessions
+        for key in ("thread_names", "resume"):
+            if parser.has_option(section, key):
+                source[key] = parser.get(section, key)
+        for key in ("launcher", "kind"):
+            if parser.has_option(section, key):
+                source[key] = parser.get(section, key).strip().lower()
         if parser.has_option(section, "start_timeout_ms"):
-            cfg["archive"][agent]["start_timeout_ms"] = max(
-                1000, parser.getint(section, "start_timeout_ms")
-            )
+            source["start_timeout_ms"] = max(1000, parser.getint(section, "start_timeout_ms"))
         if parser.has_option(section, "enabled"):
-            cfg["archive"][agent]["enabled"] = parser.getboolean(section, "enabled")
+            source["enabled"] = parser.getboolean(section, "enabled")
         for key in ("database", "export"):
             if parser.has_option(section, key):
-                cfg["archive"][agent][key] = parser.get(section, key).strip()
-
-    for section in parser.sections():
-        if section.startswith("archive.") and section.split(".", 1)[1] not in cfg["archive"]:
-            agent = section.split(".", 1)[1]
-            cfg["archive"][agent] = {
-                "sessions": split_config_list(parser.get(section, "sessions", fallback="")),
-                "resume": parser.get(section, "resume", fallback=""),
-                "launcher": parser.get(section, "launcher", fallback="agent").strip().lower(),
-                "kind": parser.get(section, "kind", fallback=agent).strip().lower(),
-                "start_timeout_ms": max(
-                    1000, parser.getint(section, "start_timeout_ms", fallback=60000)
-                ),
-            }
-            if parser.has_option(section, "thread_names"):
-                cfg["archive"][agent]["thread_names"] = parser.get(section, "thread_names")
-            for key in ("database", "export"):
-                if parser.has_option(section, key):
-                    cfg["archive"][agent][key] = parser.get(section, key).strip()
-            if parser.has_option(section, "enabled"):
-                cfg["archive"][agent]["enabled"] = parser.getboolean(section, "enabled")
+                source[key] = parser.get(section, key).strip()
 
     cfg["archive_agents"] = [
         agent for agent in cfg["archive_agents"]
