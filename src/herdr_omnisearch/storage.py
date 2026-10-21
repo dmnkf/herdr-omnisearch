@@ -298,10 +298,8 @@ def reset_index_file() -> None:
             pass
 
 
-def compact_index(conn, min_free_bytes=None) -> None:
+def compact_index(conn, min_free_bytes=COMPACT_MIN_FREE_BYTES) -> None:
     """Reclaim free pages once they pile up; a busy database is left for next time."""
-    if min_free_bytes is None:
-        min_free_bytes = COMPACT_MIN_FREE_BYTES
     try:
         page_size = conn.execute("PRAGMA page_size").fetchone()[0]
         pages = conn.execute("PRAGMA page_count").fetchone()[0]

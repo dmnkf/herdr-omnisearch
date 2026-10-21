@@ -763,7 +763,7 @@ def picker_interpretation(args, query, cache) -> str:
     return cache[query]
 
 
-def curses_picker(stdscr, args, after_first_frame=None) -> int:
+def curses_picker(stdscr, args, after_first_frame) -> int:
     init_curses_colors()
     curses.noecho()
     curses.cbreak()

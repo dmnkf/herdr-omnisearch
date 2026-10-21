@@ -451,8 +451,7 @@ class MachineTests(unittest.TestCase):
             return sum(os.path.getsize(path + suffix) for suffix in ("", "-wal") if os.path.exists(path + suffix))
 
         before = on_disk()
-        with patch.object(storage, "COMPACT_MIN_FREE_BYTES", 1024):
-            storage.compact_index(conn)
+        storage.compact_index(conn, min_free_bytes=1024)
         conn.close()
         self.assertLess(on_disk(), before / 2)
         self.assertTrue(live_index.search_index("deploy", 10))
