@@ -533,6 +533,49 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                         [[("codex:gone", ["orphaned otter notes"])]],
                     )
 
+    def test_a_session_another_writer_marks_absent_as_the_prune_begins_is_exported_before_its_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                write_codex_session(sessions / "kept.jsonl", "kept", [("user", "kept giraffe")])
+                write_codex_session(sessions / "late.jsonl", "late", [("user", "late lemur notes")])
+                archive_catalog.archive_catalog_index()
+                real_connect = sqlite3.connect
+                writes = []
+
+                class RacedConnection(sqlite3.Connection):
+                    def execute(self, sql, *args):
+                        if sql == "BEGIN IMMEDIATE" and not writes:
+                            other = real_connect(root / "state" / "archive-catalog.sqlite3")
+                            with other:
+                                writes.append(other.execute(
+                                    "UPDATE catalog_sessions SET is_present = 0 WHERE session_key = 'codex:late'"
+                                ).rowcount)
+                            other.close()
+                        return super().execute(sql, *args)
+
+                def connect(*args, **kwargs):
+                    return real_connect(*args, factory=RacedConnection, **kwargs)
+
+                with patch.object(sqlite3, "connect", connect):
+                    archive_catalog.archive_catalog_index()
+
+                self.assertEqual(writes, [1])
+                self.assertEqual(
+                    catalog_value("SELECT session_key, content FROM catalog_messages ORDER BY session_key"),
+                    [("codex:kept", "kept giraffe")],
+                )
+                self.assertEqual(
+                    [
+                        [
+                            (record["session"]["session_key"], [message["content"] for message in record["messages"]])
+                            for record in export
+                        ]
+                        for export in read_absent_exports(root)
+                    ],
+                    [[("codex:late", ["late lemur notes"])]],
+                )
+
     def test_a_failing_export_still_prunes_superseded_rows_and_finishes_the_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
