@@ -19,9 +19,14 @@ jobs:
           # actions/setup-python has no CPython 3.9 build for Apple Silicon.
           - os: macos-latest
             python-version: "3.9"
+          # Nor for Ubuntu 26.04, which ubuntu-latest became in October 2026.
+          - os: ubuntu-latest
+            python-version: "3.9"
         include:
           # CPython 3.9 needs an Intel runner; there is no arm64 build.
           - os: macos-15-intel
+            python-version: "3.9"
+          - os: ubuntu-24.04
             python-version: "3.9"
     steps:
       - uses: actions/checkout@v4
