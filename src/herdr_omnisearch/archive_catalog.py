@@ -607,10 +607,8 @@ def archive_catalog_fuzzy_query(conn, query_terms, *, exclude_exact=False):
         )
         if not candidates:
             return ""
-        quoted = []
-        for token, _score in candidates:
-            quoted.append('"' + token.replace('"', '""') + '"')
-        groups.append("(" + " OR ".join(quoted) + ")")
+        words = [token for token, _score in candidates]
+        groups.append("(" + " OR ".join('"' + word.replace('"', '""') + '"' for word in words) + ")")
     return " ".join(groups)
 
 
@@ -836,6 +834,59 @@ def archive_catalog_workspace_matches(conn, clauses, params, query_terms, limit)
     return hydrated
 
 
+def archive_catalog_session_matches(conn, text, query_terms, clauses, params, candidate_limit, limit=None):
+    def run_message_search(search):
+        sql = f"""
+            SELECT m.id, m.session_key, s.updated_epoch, bm25(catalog_message_fts) AS rank
+            FROM catalog_message_fts
+            JOIN catalog_messages m ON m.id = catalog_message_fts.rowid
+            JOIN catalog_sessions s ON s.session_key = m.session_key
+            WHERE catalog_message_fts MATCH :search
+              AND m.indexed_generation = s.message_generation
+              AND {' AND '.join(clauses)}
+            ORDER BY rank ASC, m.message_epoch DESC, s.updated_epoch DESC
+            LIMIT :candidate_limit
+        """
+        return conn.execute(
+            sql,
+            {**params, "search": search, "candidate_limit": candidate_limit},
+        ).fetchall()
+
+    exact = archive_catalog_fts_query(text)
+    matched = run_message_search(exact) if exact else []
+    if not matched:
+        fuzzy = archive_catalog_fuzzy_query(conn, query_terms, exclude_exact=True)
+        if fuzzy and fuzzy != exact:
+            matched = run_message_search(fuzzy)
+    best = {}
+    counts = {}
+    for row in matched:
+        best.setdefault(row["session_key"], row)
+        counts[row["session_key"]] = counts.get(row["session_key"], 0) + 1
+    ranked = sorted(best.values(), key=lambda row: (float(row["rank"] or 0.0), -int(row["updated_epoch"] or 0)))[:limit]
+    if not ranked:
+        return []
+    # Two queries: carrying message text through every candidate row cost 4 ms per keystroke.
+    ids = {f"match{index}": row["id"] for index, row in enumerate(ranked)}
+    details = {
+        row["match_id"]: {key: row[key] for key in row.keys() if key != "match_id"}
+        for row in conn.execute(
+            f"""
+            SELECT s.*, m.id AS match_id, m.ordinal AS match_ordinal, m.role AS match_role,
+                   m.message_at AS match_at, m.content AS match_content
+            FROM catalog_messages m
+            JOIN catalog_sessions s ON s.session_key = m.session_key
+            WHERE m.id IN ({', '.join(f':{name}' for name in ids)})
+            """,
+            ids,
+        )
+    }
+    return [
+        {**details[row["id"]], "rank": row["rank"], "match_count": counts[row["session_key"]]}
+        for row in ranked
+    ]
+
+
 def archive_catalog_search(
     query: str,
     limit: int,
@@ -879,58 +930,9 @@ def archive_catalog_search(
                 query_terms,
                 limit,
             )
-            exact = archive_catalog_fts_query(text)
             candidate_limit = min(400, max(limit * 10, 100))
-
-            def run_message_search(search):
-                sql = f"""
-                    SELECT s.*, m.ordinal AS match_ordinal, m.role AS match_role,
-                           m.message_at AS match_at, m.content AS match_content,
-                           bm25(catalog_message_fts) AS rank
-                    FROM catalog_message_fts
-                    JOIN catalog_messages m ON m.id = catalog_message_fts.rowid
-                    JOIN catalog_sessions s ON s.session_key = m.session_key
-                    WHERE catalog_message_fts MATCH :search
-                      AND m.indexed_generation = s.message_generation
-                      AND {' AND '.join(clauses)}
-                    ORDER BY rank ASC, m.message_epoch DESC, s.updated_epoch DESC
-                    LIMIT :candidate_limit
-                """
-                return conn.execute(
-                    sql,
-                    {**params, "search": search, "candidate_limit": candidate_limit},
-                ).fetchall()
-
-            matched = run_message_search(exact) if exact else []
-            if not matched:
-                fuzzy = archive_catalog_fuzzy_query(
-                    conn,
-                    query_terms,
-                    exclude_exact=True,
-                )
-                if fuzzy and fuzzy != exact:
-                    matched = run_message_search(fuzzy)
-            grouped = {}
-            for row in matched:
-                session_key = row["session_key"]
-                current = grouped.get(session_key)
-                if current is None:
-                    current = dict(row)
-                    current["match_count"] = 1
-                    grouped[session_key] = current
-                else:
-                    current["match_count"] += 1
-            ranked = list(grouped.values())
-            ranked.sort(
-                key=lambda row: (
-                    float(row.get("rank") or 0.0),
-                    -int(row.get("updated_epoch") or 0),
-                )
-            )
-            message_rows = [
-                archive_catalog_result_row(row, conn, query_terms)
-                for row in ranked[:limit]
-            ]
+            ranked = archive_catalog_session_matches(conn, text, query_terms, clauses, params, candidate_limit, limit)
+            message_rows = [archive_catalog_result_row(row, conn, query_terms) for row in ranked]
             rows = list(workspace_rows)
             seen_sessions = {row["session_key"] for row in rows}
             rows.extend(
