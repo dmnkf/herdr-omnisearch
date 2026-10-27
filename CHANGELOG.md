@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.1 - 2026-10-27
+
+- Rank an agent pane whose name matches what you type first, ahead of panes
+  that only show the words on screen. Hyphenated names match their parts, so
+  `coverage fix` finds the pane named `wbe-data-model-coverage-fix`.
+
 ## 0.13.0 - 2026-10-27
 
 - Find a live agent pane by anything said in its session, not only by what its
