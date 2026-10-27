@@ -618,6 +618,11 @@ def archive_catalog_matched_tokens(content: str, query_terms):
         if query_term in content_terms:
             matched.append(query_term)
             continue
+        prefixed = [candidate for candidate in content_terms if candidate.startswith(query_term)]
+        # A prefix scores 0.96, which no edit-distance match of a term this short can reach.
+        if prefixed and len(query_term) + fuzzy_distance_limit(query_term) < 24:
+            matched.append(max(prefixed))
+            continue
         candidates = [
             (score_token_candidate(query_term, candidate), candidate)
             for candidate in content_terms
