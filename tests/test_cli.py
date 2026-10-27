@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -312,6 +312,73 @@ class CliTests(unittest.TestCase):
             with patch.object(picker, "fzf_picker", side_effect=lambda args: events.append("fzf") or 0):
                 self.assertEqual(picker.pick(live_args(native=False, fzf=True)), 0)
             self.assertEqual(events, [("index", 500, False, False, 10), ("sync", 10), "fzf"])
+
+    def live_session_env(self, root, agent_records, screens=None):
+        class SessionHerdrClient(FakeHerdrClient):
+            def snapshot(self):
+                snapshot = super().snapshot()
+                pane = snapshot["panes"][0]
+                snapshot["panes"] = [
+                    {**pane, "pane_id": record["pane_id"], "label": "", "agent": record["agent"]}
+                    for record in agent_records
+                ]
+                return snapshot
+
+            def pane_read(self, pane_id, lines):
+                return (screens or {}).get(pane_id) or super().pane_read(pane_id, lines)
+
+        class SessionAgentCLI(FakeHerdrCLI):
+            def agent_list(self):
+                return agent_records
+
+        sessions = root / "codex"
+        sessions.mkdir()
+        config = settings.default_config()
+        config["archive_enabled"] = True
+        config["archive_agents"] = ["codex"]
+        config["archive"]["codex"]["sessions"] = [str(sessions / "*.jsonl")]
+        config["archive"]["codex"]["thread_names"] = str(root / "missing.jsonl")
+        environment = {
+            "HERDR_OMNISEARCH_DB": str(root / "index.sqlite3"),
+            "HERDR_OMNISEARCH_CATALOG_DB": str(root / "archive-catalog.sqlite3"),
+            "CLAUDE_CONFIG_DIR": str(root / "claude"),
+        }
+        stack = ExitStack()
+        stack.enter_context(patch.dict(os.environ, environment, clear=False))
+        stack.enter_context(patch.object(settings, "CONFIG_CACHE", config))
+        stack.enter_context(patch.object(live_index, "HerdrClient", SessionHerdrClient))
+        stack.enter_context(patch.object(live_index, "HerdrCLI", SessionAgentCLI))
+        return stack, sessions
+
+    def test_live_rows_are_named_after_the_agent_session(self):
+        record = {
+            "pane_id": "w1:p1",
+            "agent": "claude",
+            "agent_session": {"agent": "claude", "kind": "id", "value": "cc-live"},
+            "agent_status": "idle",
+            "terminal_title_stripped": "Herder workspace tracking panel",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "claude" / "sessions"
+            registry.mkdir(parents=True)
+            (registry / "4242.json").write_text(
+                json.dumps({"pid": 4242, "sessionId": "cc-live", "name": "wbe-data-model-coverage-fix"}),
+                encoding="utf-8",
+            )
+            (registry / "4243.json").write_text("{not json", encoding="utf-8")
+            stack, _sessions = self.live_session_env(root, [record])
+            with stack:
+                live_index.index_session(50, False, False)
+                titled = live_index.grouped_search_index("coverage", 10)
+                record.pop("terminal_title_stripped")
+                live_index.index_session(50, False, False)
+                untitled = live_index.grouped_search_index("coverage", 10)
+        self.assertEqual(
+            [(row["pane_id"], row["pane_label"]) for row in titled],
+            [("workspace:w1", "Project"), ("w1:p1", "Herder workspace tracking panel")],
+        )
+        self.assertEqual(untitled[1]["pane_label"], "wbe-data-model-coverage-fix")
 
     def test_index_uses_native_agent_identity_and_read(self):
         with tempfile.TemporaryDirectory() as tmp:

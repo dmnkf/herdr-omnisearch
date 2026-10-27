@@ -1,3 +1,4 @@
+import os
 import re
 import sqlite3
 import time
@@ -80,7 +81,25 @@ def merge_agent_records(panes, agents):
     return merged
 
 
-def metadata_text(pane, workspace_label: str) -> str:
+def claude_session_names():
+    import json
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "sessions"
+    names = {}
+    for path in root.glob("*.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("sessionId") and record.get("name"):
+            names[record["sessionId"]] = record["name"]
+    return names
+
+
+def pane_title(pane, session_name: str) -> str:
+    return pane.get("label") or pane.get("terminal_title_stripped") or pane.get("name") or session_name or ""
+
+
+def metadata_text(pane, workspace_label: str, session_name: str = "") -> str:
     agent_session_id = pane_agent_session_id(pane)
     fields = [
         f"workspace {workspace_label}",
@@ -89,6 +108,9 @@ def metadata_text(pane, workspace_label: str) -> str:
         f"pane_id {pane.get('pane_id', '')}",
         f"terminal_id {pane.get('terminal_id', '')}",
         f"label {pane.get('label', '')}",
+        f"title {pane.get('terminal_title_stripped', '')}",
+        f"name {pane.get('name', '')}",
+        f"session_name {session_name}",
         f"agent {pane_agent(pane)}",
         f"agent_session {agent_session_id}",
         f"status {pane.get('agent_status', '')}",
@@ -197,10 +219,12 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
         for token in set(index_tokens(body)):
             doc_tokens.append((token, digest))
 
+    session_names = claude_session_names()
     for pane, workspace_label in indexable_panes:
         pane_id = pane["pane_id"]
         agent_session_id = pane_agent_session_id(pane)
-        meta = metadata_text(pane, workspace_label)
+        session_name = session_names.get(agent_session_id, "")
+        meta = metadata_text(pane, workspace_label, session_name)
         recent = pane_recent_text(client, pane, lines)
         chunks = chunk_text(recent)
         if include_empty or not chunks:
@@ -220,7 +244,7 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
                     "tab_id": pane.get("tab_id", ""),
                     "pane_id": pane_id,
                     "terminal_id": pane.get("terminal_id", ""),
-                    "pane_label": pane.get("label", ""),
+                    "pane_label": pane_title(pane, session_name),
                     "agent": pane_agent(pane),
                     "agent_session_id": agent_session_id,
                     "agent_status": pane.get("agent_status", ""),
