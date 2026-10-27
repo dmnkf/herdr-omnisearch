@@ -887,6 +887,30 @@ def archive_catalog_session_matches(conn, text, query_terms, clauses, params, ca
     ]
 
 
+def archive_catalog_live_matches(text: str, sessions):
+    query_terms = list(dict.fromkeys(tokens(text)))
+    wanted = set(sessions)
+    if not query_terms or not wanted or not app_config()["archive_enabled"]:
+        return []
+    session_ids = sorted({session_id for _agent, session_id in wanted})
+    params = {f"live{index}": session_id for index, session_id in enumerate(session_ids)}
+    placeholders = ", ".join(f":{name}" for name in params)
+    clauses = [f"s.session_id IN ({placeholders})", archive_catalog_agent_clause(None, params)]
+    conn = archive_catalog_connect()
+    try:
+        ranked = archive_catalog_session_matches(conn, text, query_terms, clauses, params, 400)
+    finally:
+        conn.close()
+    matches = []
+    for row in ranked:
+        session = (row["agent"], row["session_id"])
+        if session in wanted:
+            content = row["match_content"] or ""
+            snippet = fuzzy_snippet(content, archive_catalog_matched_tokens(content, query_terms))
+            matches.append((session, f"{row['match_role']}: {snippet}"))
+    return matches
+
+
 def archive_catalog_search(
     query: str,
     limit: int,

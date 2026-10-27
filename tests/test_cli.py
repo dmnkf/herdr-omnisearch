@@ -313,6 +313,17 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(picker.pick(live_args(native=False, fzf=True)), 0)
             self.assertEqual(events, [("index", 500, False, False, 10), ("sync", 10), "fzf"])
 
+        archive_config = settings.default_config()
+        archive_config["archive_enabled"] = True
+        events = []
+        with patch.object(settings, "CONFIG_CACHE", archive_config), patch.object(
+            picker, "maybe_background_index", side_effect=lambda *a: events.append(("index", *a))
+        ), patch.object(
+            picker, "maybe_background_archive_catalog_index", side_effect=lambda *a: events.append(("archive refresh", *a))
+        ), patch.object(picker, "maybe_background_sync", side_effect=lambda *a: events.append(("sync", *a))):
+            self.run_picker_on_screen(picker.pick, live_args(local_only=True), events)
+        self.assertEqual(events, ["frame", ("index", 500, False, False, 10), ("archive refresh", "", 60)])
+
     def live_session_env(self, root, agent_records, screens=None):
         class SessionHerdrClient(FakeHerdrClient):
             def snapshot(self):
@@ -379,6 +390,49 @@ class CliTests(unittest.TestCase):
             [("workspace:w1", "Project"), ("w1:p1", "Herder workspace tracking panel")],
         )
         self.assertEqual(untitled[1]["pane_label"], "wbe-data-model-coverage-fix")
+
+    def test_live_picker_finds_a_pane_by_its_session_transcript(self):
+        records = [
+            {
+                "pane_id": "w1:p1",
+                "agent": "codex",
+                "agent_session": {"agent": "codex", "kind": "id", "value": "cdx-live"},
+                "agent_status": "idle",
+            },
+            {
+                "pane_id": "w1:p2",
+                "agent": "codex",
+                "agent_session": {"agent": "codex", "kind": "id", "value": "cdx-other"},
+                "agent_status": "idle",
+            },
+        ]
+        transcript = [
+            {"timestamp": "2026-10-27T12:00:00Z", "type": "session_meta", "payload": {"id": "cdx-live", "cwd": "/tmp/project"}},
+            {"timestamp": "2026-10-27T12:00:01Z", "type": "response_item", "payload": {
+                "type": "message", "role": "user", "content": [{"type": "input_text", "text": "migrate the walrus schema"}],
+            }},
+        ]
+        args = Namespace(limit=10, status=None, agent=None, all_sessions=False, local_only=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stack, sessions = self.live_session_env(root, records, {"w1:p1": "migrate next", "w1:p2": "walrus on screen"})
+            with stack:
+                (sessions / "rollout-cdx-live.jsonl").write_text(
+                    "".join(json.dumps(line) + "\n" for line in transcript), encoding="utf-8"
+                )
+                archive_catalog.archive_catalog_index()
+                live_index.index_session(50, False, False)
+                screen_only = live_index.grouped_search_index("schema", 10)
+                schema = picker.picker_rows(args, "schema", snippets=True)
+                walrus = picker.picker_rows(args, "walrus", snippets=True)
+                migrate = picker.picker_rows(args, "migrate", snippets=True)
+                with redirect_stdout(io.StringIO()) as out:
+                    cli.cmd_search(Namespace(query=["schema"], json=True, **vars(args)))
+        self.assertEqual(screen_only, [])
+        self.assertEqual([(row["pane_id"], row["snippet"]) for row in schema[1:]], [("w1:p1", "user: migrate the walrus schema")])
+        self.assertEqual([(row["pane_id"], row["match_count"]) for row in walrus[1:]], [("w1:p2", 1), ("w1:p1", 1)])
+        self.assertEqual([(row["pane_id"], row["match_count"], row["snippet"]) for row in migrate[1:]], [("w1:p1", 1, "migrate next")])
+        self.assertEqual([row["pane_id"] for row in json.loads(out.getvalue())], ["workspace:w1", "w1:p1"])
 
     def test_index_uses_native_agent_identity_and_read(self):
         with tempfile.TemporaryDirectory() as tmp:

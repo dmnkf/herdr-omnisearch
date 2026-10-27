@@ -45,6 +45,7 @@ from .machines import (
 from .storage import try_exclusive_lock
 from .archive_catalog import (
     archive_catalog_index,
+    archive_catalog_live_matches,
     archive_catalog_result,
     archive_catalog_search,
     archive_catalog_state,
@@ -144,6 +145,7 @@ def cmd_search(args) -> int:
         agent=args.agent,
         all_sessions=args.all_sessions,
         machines=not args.local_only and machines_config()["enabled"],
+        session_matcher=archive_catalog_live_matches,
     )
     if args.json:
         print(json.dumps(rows, indent=2))

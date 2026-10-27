@@ -28,6 +28,7 @@ from .live_index import (
 from .machines import machine_statuses, maybe_background_sync, machines_config
 from .archive_catalog import (
     archive_catalog_index,
+    archive_catalog_live_matches,
     archive_catalog_max_window_offset,
     archive_catalog_search,
     archive_catalog_state,
@@ -39,6 +40,7 @@ from .render import format_result, machine_prefix
 from .navigate import focus_archive_catalog_result, focus_archive_row, focus_result, focus_row, row_client
 
 ARCHIVE_PICKER_MIN_QUERY_CHARS = 3
+LIVE_CATALOG_STALE_SECONDS = 60
 
 
 def pick(args) -> int:
@@ -50,6 +52,8 @@ def pick(args) -> int:
     def refresh_in_background():
         if args.background_refresh and not args.refresh:
             maybe_background_index(args.lines, args.include_empty, args.include_wrappers, args.stale_seconds)
+            if app_config()["archive_enabled"]:
+                maybe_background_archive_catalog_index("", max(args.stale_seconds, LIVE_CATALOG_STALE_SECONDS))
         if merges_machines(args) and (args.refresh or args.background_refresh):
             maybe_background_sync(min(args.stale_seconds, machines_config()["sync_seconds"]))
 
@@ -481,6 +485,7 @@ def picker_rows(args, query, *, snippets=False):
         snippets=snippets,
         all_sessions=getattr(args, "all_sessions", False),
         machines=merges_machines(args),
+        session_matcher=archive_catalog_live_matches,
     )
     if any(is_machine_row(row) for row in rows):
         annotate_machine_rows(rows)

@@ -552,18 +552,22 @@ def search_index(
     all_sessions=False,
     machines=False,
     machine_id=None,
+    session_matcher=None,
 ):
     conn = connect()
     try:
         return search_connection(
             conn, query, limit, status=status, agent=agent, snippets=snippets,
             all_sessions=all_sessions, machines=machines, machine_id=machine_id,
+            session_matcher=session_matcher,
         )
     finally:
         conn.close()
 
 
-def search_connection(conn, query, limit, *, status, agent, snippets, all_sessions, machines, machine_id):
+def search_connection(
+    conn, query, limit, *, status, agent, snippets, all_sessions, machines, machine_id, session_matcher=None,
+):
     typed_text, _typed_filters = parse_filters(query)
     query, filters, facet_words = interpret_query(conn, query, machines=machines)
     fetch_limit = limit
@@ -638,11 +642,34 @@ def search_connection(conn, query, limit, *, status, agent, snippets, all_sessio
             if row["stable_id"] not in seen:
                 rows.append(row)
                 seen[row["stable_id"]] = row
+    if session_matcher and query_terms and not machine_id:
+        rows.extend(session_match_rows(conn, query, clauses, params, rows, session_matcher))
     for row in rows:
         row["_facet_hits"] = row_facet_hits(row, facet_words)
     mark_space_matches(rows, typed_text)
     rows.sort(key=lambda row: (-row["_facet_hits"], space_sort_weight(row), float(row.get("rank") or 0)))
     return rows[:limit]
+
+
+def session_match_rows(conn, text, clauses, params, rows, session_matcher):
+    where = [*clauses, "d.machine_id = ''", "d.chunk_index = 0", "COALESCE(d.agent_session_id, '') <> ''"]
+    panes = {
+        (row["agent"], row["agent_session_id"]): dict(row)
+        for row in conn.execute(f"SELECT d.* FROM docs d WHERE {' AND '.join(where)}", params)
+    }
+    if not panes:
+        return []
+    matched = {(row.get("herdr_session"), row["pane_id"]) for row in rows}
+    found = []
+    for position, (session, snippet) in enumerate(session_matcher(text, list(panes))):
+        row = panes.get(session)
+        if row is None or (row["herdr_session"], row["pane_id"]) in matched:
+            continue
+        # Direct hits rank below zero, so transcript-only panes sort after them in catalog order.
+        row["rank"] = float(position)
+        row["snippet"] = snippet
+        found.append(row)
+    return found
 
 
 def fuzzy_search(conn, query: str, clauses, params, limit: int, *, snippets=True):
@@ -886,6 +913,7 @@ def grouped_search_index(
     snippets=True,
     all_sessions=False,
     machines=False,
+    session_matcher=None,
 ):
     # Each machine gets its own limit so a busy host cannot crowd the others out.
     owners = synced_machine_ids() if machines else []
@@ -901,6 +929,7 @@ def grouped_search_index(
                 all_sessions=all_sessions,
                 machines=machines,
                 machine_id=owner,
+                session_matcher=session_matcher,
             )
         )
     grouped = {}
