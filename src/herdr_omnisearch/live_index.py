@@ -99,7 +99,7 @@ def pane_title(pane, session_name: str) -> str:
     return pane.get("label") or pane.get("terminal_title_stripped") or pane.get("name") or session_name or ""
 
 
-def metadata_text(pane, workspace_label: str, session_name: str = "") -> str:
+def metadata_text(pane, workspace_label: str, session_name: str) -> str:
     agent_session_id = pane_agent_session_id(pane)
     fields = [
         f"workspace {workspace_label}",
