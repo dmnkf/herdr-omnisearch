@@ -193,7 +193,7 @@ def has_prefix_token(conn, term: str) -> bool:
 
 
 def label_match_score(label: str, query_terms) -> int:
-    label_terms = set(tokens(label or ""))
+    label_terms = set(index_tokens(label or ""))
     if not label_terms or not query_terms:
         return 0
     score = 0
@@ -208,7 +208,7 @@ def mark_space_matches(rows, query: str):
     if not query_terms:
         return
     for row in rows:
-        label = row.get("workspace_label") or row.get("space_label") or ""
+        label = f"{row.get('workspace_label') or row.get('space_label') or ''} {row.get('pane_label') or ''}"
         score = label_match_score(label, query_terms)
         if score:
             row["_space_match_score"] = score

@@ -391,6 +391,35 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(untitled[1]["pane_label"], "wbe-data-model-coverage-fix")
 
+    def test_a_pane_named_like_the_query_ranks_above_one_that_only_shows_the_words(self):
+        records = [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "agent_session": {"agent": "claude", "kind": "id", "value": "cc-shows"},
+                "agent_status": "idle",
+            },
+            {
+                "pane_id": "w1:p2",
+                "agent": "claude",
+                "agent_session": {"agent": "claude", "kind": "id", "value": "cc-named"},
+                "agent_status": "idle",
+                "terminal_title_stripped": "Herder workspace tracking panel",
+            },
+        ]
+        screens = {"w1:p1": "workspace tracking and coverage fix notes, more workspace tracking", "w1:p2": "idle"}
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, _sessions = self.live_session_env(Path(tmp), records, screens)
+            with stack:
+                live_index.index_session(50, False, False)
+                plain = live_index.grouped_search_index("workspace tracking", 10)
+                records[0]["terminal_title_stripped"] = "Verify rating fix"
+                records[1]["terminal_title_stripped"] = "wbe-data-model-coverage-fix"
+                live_index.index_session(50, False, False)
+                compound = live_index.grouped_search_index("coverage fix", 10)
+        self.assertEqual([row["pane_id"] for row in plain], ["workspace:w1", "w1:p2", "w1:p1"])
+        self.assertEqual([row["pane_id"] for row in compound], ["workspace:w1", "w1:p2", "w1:p1"])
+
     def test_live_picker_finds_a_pane_by_its_session_transcript(self):
         records = [
             {
