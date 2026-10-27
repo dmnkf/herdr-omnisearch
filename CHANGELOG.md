@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.13.2 - 2026-10-27
+
+- Keep typing fast while a word is half typed. Choosing the word to highlight
+  in each snippet scored every word of the matching message by edit distance;
+  a word that starts with what you typed now wins without that, since no
+  edit-distance match can outscore it. On a real catalog the slowest keystroke
+  dropped from about 50 ms to 14 ms in live search and from about 70 ms to
+  15 ms in archive search. Results are unchanged.
+
 ## 0.13.1 - 2026-10-27
 
 - Rank an agent pane whose name matches what you type first, ahead of panes
