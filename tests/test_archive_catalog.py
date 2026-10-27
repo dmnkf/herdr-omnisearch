@@ -753,6 +753,20 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                     writer.close()
 
 
+class TypoSearchTests(unittest.TestCase):
+    def test_a_typo_among_several_words_still_finds_the_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                write_codex_session(sessions / "catalog.jsonl", "catalog", [("user", "omnisearch catalogs cleanup")])
+                write_codex_session(sessions / "deploy.jsonl", "deploy", [("user", "sql deploy checklist")])
+                write_codex_session(sessions / "other.jsonl", "other", [("user", "ominsearch catalogs elsewhere")])
+                archive_catalog.archive_catalog_index()
+                self.assertEqual(search_ids("omnisearch catalgo"), ["catalog"])
+                self.assertEqual(search_ids("sql checklsit"), ["deploy"])
+                self.assertEqual(search_ids("checklsit"), ["deploy"])
+
+
 def clean_text_before_0_12(value):
     value = value.replace("\r\n", "\n").replace("\r", "\n")
     value = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", value)

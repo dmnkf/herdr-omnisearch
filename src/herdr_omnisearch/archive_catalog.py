@@ -605,11 +605,10 @@ def archive_catalog_fuzzy_query(conn, query_terms, *, exclude_exact=False):
             limit=24,
             exclude={term} if exclude_exact else None,
         )
-        if not candidates:
-            return ""
-        words = [token for token, _score in candidates]
+        words = [token for token, _score in candidates] or [term]
         groups.append("(" + " OR ".join('"' + word.replace('"', '""') + '"' for word in words) + ")")
-    return " ".join(groups)
+    # FTS5 joins bare phrases implicitly but rejects bracketed groups side by side.
+    return " AND ".join(groups)
 
 
 def archive_catalog_matched_tokens(content: str, query_terms):
@@ -855,7 +854,8 @@ def archive_catalog_session_matches(conn, text, query_terms, clauses, params, ca
     exact = archive_catalog_fts_query(text)
     matched = run_message_search(exact) if exact else []
     if not matched:
-        fuzzy = archive_catalog_fuzzy_query(conn, query_terms, exclude_exact=True)
+        # A lone word already failed as typed; among several, a correctly spelled one has to stay.
+        fuzzy = archive_catalog_fuzzy_query(conn, query_terms, exclude_exact=len(query_terms) == 1)
         if fuzzy and fuzzy != exact:
             matched = run_message_search(fuzzy)
     best = {}
