@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.0 - 2026-10-27
+
+- Find a live agent pane by anything said in its session, not only by what its
+  screen shows. The live picker and `herdr-omnisearch search` also search the
+  archive catalog for the sessions running in your panes, show the matching
+  line, and focus that pane on Enter. Panes whose screen or name matches still
+  come first. Opening the live picker refreshes the catalog when it is more
+  than a minute old. This needs archive indexing turned on.
+- Show each agent pane under its own name. A pane without a Herdr label was
+  listed by its id, such as `wM:p6`, so two agents in one workspace looked the
+  same. Rows now show the terminal title, the Herdr agent name, or the name
+  Claude Code keeps in `~/.claude/sessions/<pid>.json`, and all three are
+  searchable.
+- Fix archive search failing on several words with a typo, such as
+  `omnisearch catalgo`. The fallback query was invalid, and it also swapped
+  correctly spelled words for near misses. A word shorter than four letters no
+  longer makes the fallback give up.
+- Fetch message text only for the archive sessions a search shows, which takes
+  about a fifth off each archive search.
+
 ## 0.12.1 - 2026-10-21
 
 - Read an archive section with a name of your own by its `kind`. A section

@@ -40,7 +40,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To install a specific release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.12.1
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.13.0
 ```
 
 GitHub plugin installation does not change `~/.config/herdr/config.toml`. Add
@@ -89,6 +89,14 @@ herdr plugin pane open --plugin herdr.omnisearch --entrypoint archive
 ```
 
 ### Live search
+
+Live search matches what each pane shows. Agent panes also match on their name:
+the terminal title, the Herdr agent name, and the name Claude Code keeps in
+`~/.claude/sessions/<pid>.json`. With archive
+indexing on, they match on their whole conversation too: live search looks up
+the sessions running in your panes in the archive catalog, and opening the live
+picker refreshes the catalog when it is more than a minute old. Panes that match
+only in their conversation are listed after panes whose screen or name matches.
 
 The watcher keeps the live index current. To rebuild it manually:
 
@@ -506,8 +514,8 @@ The live index intentionally skips unmapped `unknown` panes by default. Use `--i
 
 The live index reads only the terminal rows Herdr already retains for a pane
 and never scrolls it. Full-screen agents such as Claude Code therefore
-contribute roughly one screen of text to live search; their complete
-conversation history is what archive search covers.
+contribute roughly one screen of text from the pane itself; the rest of their
+conversation reaches live search through the archive catalog.
 
 Selecting an archived session is an explicit focus operation. When a new space
 is needed, OmniSearch creates one workspace and starts the resume command in its
