@@ -82,8 +82,9 @@ def launched_program(argv) -> str:
         if stem in INTERPRETERS:
             after_interpreter = True
             continue
-        # A shell leaves the program unclear; after an interpreter only a script file is one, never an option.
-        if stem in SHELLS or (after_interpreter and program_name(word) == stem):
+        # A shell leaves the program unclear; after an interpreter only a script file is one, and an option
+        # (`--require=/opt/preload.js`) may carry a script of its own.
+        if stem in SHELLS or (after_interpreter and (word.startswith("-") or program_name(word) == stem)):
             return ""
         return stem
     return ""

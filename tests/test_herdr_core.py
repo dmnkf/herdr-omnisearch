@@ -267,6 +267,8 @@ class HerdrCoreTests(unittest.TestCase):
             "t45": ["bash"],
             "t46": ["node", "--require", "/opt/preload.js", "/opt/other.js"],
             "t47": ["ls", "/repo"],
+            "t48": ["node", "/opt/preload.js"],
+            "t49": ["node", "/opt/loader.mjs"],
         }
         terminals = [
             terminal(address, labels={"herdr.space": "sp1", "herdr.tab": address, "where": "web / 1"},
@@ -280,6 +282,8 @@ class HerdrCoreTests(unittest.TestCase):
             'claude=["env", "/bin/bash", "-lc", "claude"]',
             'pi=["node", "--require", "/opt/preload.js", "/opt/pi.js"]',
             'codex=["codex", "-C", "/repo"]',
+            'codex=["node", "--require=/opt/preload.js", "/opt/codex-hub2.js"]',
+            'pi=["node", "--import=/opt/loader.mjs", "/opt/pi.js"]',
         ]
         with tempfile.TemporaryDirectory() as tmp:
             stack, _codex = self.core(Path(tmp), terminals, screens={address: "prompt" for address in commands})
