@@ -95,7 +95,10 @@ export default class OmniSearch extends View {
         try {
           known = await knownAgents({ on: machine });
         } catch {}
-        settle(Object.fromEntries(known.filter((a) => a.installed).map((a) => [a.key, a.run])));
+        const launchers = Object.fromEntries(known.filter((a) => a.installed).map((a) => [a.key, a.run]));
+        settle(launchers);
+        // Also an answer that came after the wait gave up, for the next resume.
+        this.launchers.set(machine, Promise.resolve(launchers));
       });
     }
     return this.launchers.get(machine);
@@ -120,8 +123,10 @@ export default class OmniSearch extends View {
   refresh(cx) {
     for (const machine of this.targets()) {
       cx.spawn(async (cx) => {
+        // Agents the app starts through a launcher of their own are known by that program's name.
+        const launchers = Object.entries(await this.launchersOn(machine, cx)).flatMap(([agent, run]) => ["--launcher", `${agent}=${run[0]}`]);
         try {
-          this.refreshErrors.set(machine, answer(await exec(CLI, ["app-search", "--refresh", "--limit", "0"], { on: machine })).error);
+          this.refreshErrors.set(machine, answer(await exec(CLI, ["app-search", "--refresh", "--limit", "0", ...launchers], { on: machine })).error);
         } catch (e) {
           // A timeout or a lost connection; a missing command shows when its search fails too.
           this.refreshErrors.set(machine, `refresh failed: ${e?.message ?? e}`);

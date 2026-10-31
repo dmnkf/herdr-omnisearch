@@ -336,6 +336,31 @@ test("a launcher lookup that never answers falls back to OmniSearch's resume com
   assert.deepEqual(state.ran, [["space.new", { folder: "/x", argv: ["codex", "resume", "s1"] }]]);
 });
 
+test("a refresh tells the machine the launchers the app starts its agents with", async () => {
+  const state = app({ answers: { here: ok([]) }, launchers: { here: [{ key: "codex", run: ["codex-hub", "--profile", "work"], installed: true }, { key: "pi", run: ["pi"], installed: false }] } });
+  await open(state);
+  assert.deepEqual(state.calls.find((call) => call.args.includes("--refresh")).args, ["app-search", "--refresh", "--limit", "0", "--launcher", "codex=codex-hub"]);
+});
+
+test("a launcher list that came after the wait gave up is used for the next resume", async () => {
+  let answer;
+  const session = { kind: "session", id: "c1", agent: "codex", session_id: "s1", title: "t", space_name: "", updated: 0, snippet: "", folder: "/x", argv: ["codex", "resume", "s1"], address: null };
+  const state = app({ answers: { here: (args) => ok(args.includes("--archive") ? [session] : []) } });
+  state.knownAgents = () => new Promise((resolve) => (answer = resolve));
+  const drain = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const view = new OmniSearch();
+  const c = cx();
+  view.init({}, c);
+  c.timers.filter((timer) => timer.ms === 5000).forEach((timer) => timer(c));
+  answer([{ key: "codex", run: ["codex-hub"], installed: true }]);
+  await drain();
+  key(view, c, "tab");
+  await drain();
+  globalThis.__input.fire("submit", c);
+  await drain();
+  assert.deepEqual(state.ran, [["space.new", { folder: "/x", argv: ["codex-hub", "resume", "s1"] }]]);
+});
+
 test("a session without a resume command warns instead of starting anything", async () => {
   const session = { kind: "session", id: "a1", agent: "pi", session_id: "s-3", title: "t", space_name: "", updated: 0, snippet: "", folder: "/x", argv: null, address: null };
   const state = app({ answers: { here: (args) => ok(args.includes("--archive") ? [session] : []) } });
