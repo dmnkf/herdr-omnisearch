@@ -7,6 +7,7 @@ from pathlib import Path
 from .herdr_cli import HerdrCLI
 from .herdr_socket import HerdrClient, HerdrError, socket_is_alive
 from .settings import (
+    CORE_SESSION_PREFIX,
     app_config,
     cli_command,
     data_dir,
@@ -17,7 +18,6 @@ from .settings import (
 from .storage import (
     compact_index,
     connect,
-    db_path,
     index_is_bloated,
     reset_index_file,
     lock_is_held,
@@ -81,18 +81,18 @@ def merge_agent_records(panes, agents):
     return merged
 
 
-def claude_session_names():
+def claude_sessions():
     import json
     root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "sessions"
-    names = {}
+    records = []
     for path in root.glob("*.json"):
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if isinstance(record, dict) and record.get("sessionId") and record.get("name"):
-            names[record["sessionId"]] = record["name"]
-    return names
+        if isinstance(record, dict) and record.get("sessionId"):
+            records.append(record)
+    return records
 
 
 def pane_title(pane, session_name: str) -> str:
@@ -160,18 +160,28 @@ def should_skip_pane(pane, workspace_label: str, *, include_wrappers: bool) -> b
 
 
 def index_session(lines: int, include_empty: bool, include_wrappers: bool, snapshot=None) -> int:
-    import hashlib
     client = HerdrClient()
-    agent_cli = HerdrCLI(herdr_bin())
     snapshot = snapshot or client.snapshot()
-    workspaces_payload = snapshot.get("workspaces", [])
+    panes = merge_agent_records(snapshot.get("panes", []), HerdrCLI(herdr_bin()).agent_list())
+    session_key, session_socket = herdr_session_identity()
+    return store_session(
+        session_key,
+        session_socket,
+        snapshot.get("workspaces", []),
+        panes,
+        lambda pane: pane_recent_text(client, pane, lines),
+        include_empty=include_empty,
+        include_wrappers=include_wrappers,
+    )
+
+
+def store_session(session_key, session_socket, workspaces_payload, panes, read_pane, *, include_empty, include_wrappers, db=None) -> int:
+    """Replace one session's rows with its workspaces and panes, read_pane giving each pane's text."""
+    import hashlib
     workspace_labels = {
         workspace["workspace_id"]: workspace.get("label") or workspace["workspace_id"]
         for workspace in workspaces_payload
     }
-    panes = merge_agent_records(snapshot.get("panes", []), agent_cli.agent_list())
-
-    session_key, session_socket = herdr_session_identity()
     now = int(time.time())
     docs = []
     doc_tokens = []
@@ -219,13 +229,13 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
         for token in set(index_tokens(body)):
             doc_tokens.append((token, digest))
 
-    session_names = claude_session_names()
+    session_names = {record["sessionId"]: record["name"] for record in claude_sessions() if record.get("name")}
     for pane, workspace_label in indexable_panes:
         pane_id = pane["pane_id"]
         agent_session_id = pane_agent_session_id(pane)
         session_name = session_names.get(agent_session_id, "")
         meta = metadata_text(pane, workspace_label, session_name)
-        recent = pane_recent_text(client, pane, lines)
+        recent = read_pane(pane)
         chunks = chunk_text(recent)
         if include_empty or not chunks:
             chunks = chunks or ["[empty pane]\n" + meta]
@@ -260,13 +270,13 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
             for token in indexed_tokens:
                 doc_tokens.append((token, digest))
 
-    conn = connect()
+    conn = connect(db)
     if index_is_bloated(conn):
         # The live index is a cache of what panes show; rebuilding it takes a
         # second, while cleaning up a bloated file in place can take minutes.
         conn.close()
-        reset_index_file()
-        conn = connect()
+        reset_index_file(db)
+        conn = connect(db)
     with conn:
         # Replace only this session's rows so concurrent Herdr sessions on the
         # same machine never clobber each other. Rows without a session are
@@ -355,8 +365,9 @@ def reap_dead_sessions(conn, current_key: str) -> int:
         """
         SELECT DISTINCT herdr_session, socket_path FROM docs
         WHERE machine_id = '' AND herdr_session IS NOT NULL AND herdr_session != ?
+          AND herdr_session NOT LIKE ?
         """,
-        (current_key,),
+        (current_key, f"{CORE_SESSION_PREFIX}%"),
     ).fetchall()
     dead = [
         row["herdr_session"]
@@ -410,11 +421,11 @@ def maybe_background_index(lines: int, include_empty: bool, include_wrappers: bo
     spawn_locked_background(cmd, lock_fd)
 
 
-def scope_clause(all_sessions: bool, machines: bool, params) -> str:
-    """Rows visible to a search: this session, all local sessions, and optionally synced machines."""
-    if all_sessions:
+def scope_clause(all_sessions: bool, machines: bool, params, session=None) -> str:
+    """Rows visible to a search: one session, all local sessions, and optionally synced machines."""
+    if all_sessions and not session:
         return "1 = 1" if machines else "d.machine_id = ''"
-    params["herdr_session"] = herdr_session_key()
+    params["herdr_session"] = session or herdr_session_key()
     local = "(d.machine_id = '' AND d.herdr_session = :herdr_session)"
     return f"(d.machine_id <> '' OR {local})" if machines else local
 
@@ -427,7 +438,7 @@ FACET_CACHE = {}
 
 def known_facets(conn, *, machines=True):
     """Machine, agent and workspace names in the index, keyed lowercase."""
-    key = (str(db_path()), bool(machines))
+    key = (conn.execute("PRAGMA database_list").fetchone()["file"], bool(machines))
     cached = FACET_CACHE.get(key)
     now = time.monotonic()
     if cached and now - cached[0] < FACET_CACHE_SECONDS:
@@ -553,20 +564,22 @@ def search_index(
     machines=False,
     machine_id=None,
     session_matcher=None,
+    session=None,
+    db=None,
 ):
-    conn = connect()
+    conn = connect(db)
     try:
         return search_connection(
             conn, query, limit, status=status, agent=agent, snippets=snippets,
             all_sessions=all_sessions, machines=machines, machine_id=machine_id,
-            session_matcher=session_matcher,
+            session_matcher=session_matcher, session=session,
         )
     finally:
         conn.close()
 
 
 def search_connection(
-    conn, query, limit, *, status, agent, snippets, all_sessions, machines, machine_id, session_matcher=None,
+    conn, query, limit, *, status, agent, snippets, all_sessions, machines, machine_id, session_matcher=None, session=None,
 ):
     typed_text, _typed_filters = parse_filters(query)
     query, filters, facet_words = interpret_query(conn, query, machines=machines)
@@ -578,7 +591,7 @@ def search_connection(
     query_terms = tokens(query)
 
     params = {}
-    clauses = [scope_clause(all_sessions, machines, params)]
+    clauses = [scope_clause(all_sessions, machines, params, session)]
     if machine_id is not None:
         clauses.append("d.machine_id = :machine_id")
         params["machine_id"] = machine_id
@@ -775,12 +788,12 @@ def workspace_key(row):
     return (row.get("machine_id") or "", row.get("herdr_session") or "", row.get("workspace_id") or "")
 
 
-def fetch_workspace_rows(keys):
+def fetch_workspace_rows(keys, db=None):
     keys = [key for key in dict.fromkeys(keys) if key[2]]
     if not keys:
         return {}
     placeholders = ",".join("?" for _ in keys)
-    conn = connect()
+    conn = connect(db)
     try:
         rows = conn.execute(
             f"""
@@ -827,7 +840,7 @@ def is_machine_row(row) -> bool:
     return (row.get("pane_id") or "").startswith("machine:")
 
 
-def decorate_live_tree(rows, *, machine_level=False):
+def decorate_live_tree(rows, *, machine_level=False, db=None):
     if not rows:
         return rows
     workspace_order = []
@@ -847,7 +860,7 @@ def decorate_live_tree(rows, *, machine_level=False):
         for key in workspace_order
         if key not in workspace_rows and child_rows.get(key)
     ]
-    workspace_rows.update(fetch_workspace_rows(missing_headers))
+    workspace_rows.update(fetch_workspace_rows(missing_headers, db))
 
     depth = 1 if machine_level else 0
     groups = {}
@@ -914,6 +927,8 @@ def grouped_search_index(
     all_sessions=False,
     machines=False,
     session_matcher=None,
+    session=None,
+    db=None,
 ):
     # Each machine gets its own limit so a busy host cannot crowd the others out.
     owners = synced_machine_ids() if machines else []
@@ -930,6 +945,8 @@ def grouped_search_index(
                 machines=machines,
                 machine_id=owner,
                 session_matcher=session_matcher,
+                session=session,
+                db=db,
             )
         )
     grouped = {}
@@ -965,7 +982,7 @@ def grouped_search_index(
         ranked.append(row)
     spans_machines = len({row.get("machine_id") or "" for row in ranked}) > 1
     machine_level = machines and (spans_machines or any(row.get("machine_id") for row in ranked))
-    tree = decorate_live_tree(ranked, machine_level=machine_level)
+    tree = decorate_live_tree(ranked, machine_level=machine_level, db=db)
     # Pinning only adds information when the hits are spread over machines.
     if not (spans_machines and query.strip()):
         return tree

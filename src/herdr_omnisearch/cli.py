@@ -156,6 +156,13 @@ def cmd_search(args) -> int:
     return 0
 
 
+def cmd_app_search(args) -> int:
+    import json
+    from .app_search import app_search
+    print(json.dumps(app_search(" ".join(args.query), archive=args.archive, refresh=args.refresh, limit=args.limit)))
+    return 0
+
+
 EXPORT_STALE_SECONDS = 10
 
 
@@ -558,6 +565,13 @@ def build_parser():
     p.add_argument("--local-only", action="store_true", help="leave out rows synced from saved machines")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("app-search", help="search herdr-core terminals or old sessions as JSON, for the Herdr app mod")
+    p.add_argument("query", nargs="*", default=[])
+    p.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    p.add_argument("--archive", action="store_true", help="search old sessions instead of live terminals")
+    p.add_argument("--refresh", action="store_true", help="index herdr-core's terminals first")
+    p.set_defaults(func=cmd_app_search)
 
     p = sub.add_parser("export", help="print this session's live rows as JSON for machine sync")
     p.set_defaults(func=cmd_export)

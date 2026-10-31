@@ -30,6 +30,14 @@ def db_path() -> Path:
     return path
 
 
+def app_db_path() -> Path:
+    """The Herdr app's terminals, kept apart so no Herdr plugin version prunes or lists them."""
+    override = os.environ.get("HERDR_OMNISEARCH_APP_DB")
+    if override:
+        return Path(override)
+    return data_dir() / "app-index.sqlite3"
+
+
 def archive_catalog_db_path() -> Path:
     override = os.environ.get("HERDR_OMNISEARCH_CATALOG_DB")
     if override:
@@ -193,8 +201,8 @@ def migrate_legacy_db(legacy: Path, path: Path) -> None:
             old.symlink_to(new)
 
 
-def connect():
-    path = prepare_database_path(db_path())
+def connect(path=None):
+    path = prepare_database_path(path or db_path())
     conn = None
     try:
         conn = sqlite3.connect(path)
@@ -289,8 +297,8 @@ def index_is_bloated(conn) -> bool:
     return total > 4 * referenced + 5000
 
 
-def reset_index_file() -> None:
-    path = db_path()
+def reset_index_file(path=None) -> None:
+    path = path or db_path()
     for suffix in ("", "-wal", "-shm"):
         try:
             Path(str(path) + suffix).unlink()
@@ -473,6 +481,8 @@ def spawn_locked_background(cmd, lock_fd, *, lock_env=None) -> None:
     # The child inherits lock_fd, so the flock is held for its whole
     # lifetime and releases automatically when it exits or crashes.
     env = os.environ.copy()
+    # herdr-core ends whatever carries the scope of the command that started it.
+    env.pop("HC_SCOPE", None)
     if lock_env:
         env[lock_env] = str(lock_fd)
     try:

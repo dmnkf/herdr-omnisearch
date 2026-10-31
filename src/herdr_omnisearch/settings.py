@@ -318,3 +318,11 @@ def herdr_session_identity():
 
 def herdr_session_key() -> str:
     return herdr_session_identity()[0]
+
+
+CORE_SESSION_PREFIX = "core:"
+
+
+def core_session_key() -> str:
+    """The index session of the herdr-core this process talks to; it has no Herdr socket."""
+    return CORE_SESSION_PREFIX + (os.environ.get("HC_SESSION") or "default")
