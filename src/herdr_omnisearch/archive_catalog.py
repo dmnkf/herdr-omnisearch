@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .settings import app_config, cli_command, data_dir
+from .settings import app_config, cli_command, core_session_key, data_dir
 from .storage import (
     app_db_path,
     archive_catalog_connect,
@@ -287,14 +287,14 @@ def _archive_catalog_index_unlocked(agents: str = ""):
     live_session_spaces = {}
     live_spaces = {}
     # The Herdr app's terminals keep their space names in their own index; Herdr's panes win a tie.
-    for live_db in (app_db_path(), None):
+    for live_db, session in ((app_db_path(), core_session_key()), (None, None)):
         if live_db is not None and not live_db.exists():
             continue
         live_conn = None
         try:
             live_conn = connect(live_db)
-            live_session_spaces.update(live_space_labels_by_session(live_conn))
-            live_spaces.update(live_space_labels_by_cwd(live_conn))
+            live_session_spaces.update(live_space_labels_by_session(live_conn, session))
+            live_spaces.update(live_space_labels_by_cwd(live_conn, session))
         except (sqlite3.Error, OSError):
             pass
         finally:
@@ -920,6 +920,22 @@ def archive_catalog_live_matches(text: str, sessions):
             snippet = fuzzy_snippet(content, archive_catalog_matched_tokens(content, query_terms))
             matches.append((session, f"{row['match_role']}: {snippet}"))
     return matches
+
+
+def archive_catalog_session_agents(words):
+    """The agent of each word that is one of the catalog's session ids."""
+    words = sorted({word for word in words if word})
+    if not words or not app_config()["archive_enabled"]:
+        return {}
+    params = {f"word{index}": word for index, word in enumerate(words)}
+    placeholders = ", ".join(f":{name}" for name in params)
+    clauses = [f"s.session_id IN ({placeholders})", archive_catalog_agent_clause(None, params)]
+    conn = archive_catalog_connect()
+    try:
+        rows = conn.execute(f"SELECT s.agent, s.session_id FROM catalog_sessions s WHERE {' AND '.join(clauses)}", params).fetchall()
+    finally:
+        conn.close()
+    return {row["session_id"]: row["agent"] for row in rows}
 
 
 def archive_catalog_search(

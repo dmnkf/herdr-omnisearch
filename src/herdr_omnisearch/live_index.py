@@ -1103,7 +1103,7 @@ def live_space_label_for_cwd(cwd: str, conn=None, cache=None):
     return label
 
 
-def live_space_labels_by_session(conn):
+def live_space_labels_by_session(conn, session=None):
     rows = conn.execute(
         """
         SELECT agent, agent_session_id, workspace_label, COUNT(*) AS count
@@ -1112,9 +1112,11 @@ def live_space_labels_by_session(conn):
           AND COALESCE(agent, '') <> ''
           AND COALESCE(agent_session_id, '') <> ''
           AND COALESCE(workspace_label, '') <> ''
+          AND (:session IS NULL OR herdr_session = :session)
         GROUP BY agent, agent_session_id, workspace_label
         ORDER BY agent ASC, agent_session_id ASC, count DESC, workspace_label ASC
-        """
+        """,
+        {"session": session},
     ).fetchall()
     labels = {}
     for row in rows:
@@ -1124,7 +1126,7 @@ def live_space_labels_by_session(conn):
     return labels
 
 
-def live_space_labels_by_cwd(conn):
+def live_space_labels_by_cwd(conn, session=None):
     rows = conn.execute(
         """
         SELECT cwd, workspace_label, COUNT(*) AS count
@@ -1132,9 +1134,11 @@ def live_space_labels_by_cwd(conn):
         WHERE machine_id = ''
           AND COALESCE(cwd, '') <> ''
           AND COALESCE(workspace_label, '') <> ''
+          AND (:session IS NULL OR herdr_session = :session)
         GROUP BY cwd, workspace_label
         ORDER BY cwd ASC, count DESC, workspace_label ASC
-        """
+        """,
+        {"session": session},
     ).fetchall()
     labels = {}
     for row in rows:

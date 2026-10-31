@@ -1,20 +1,16 @@
 import json
 import re
+import shlex
 import subprocess
+from pathlib import Path
 
 from .live_index import STATUS_WEIGHT, claude_sessions, store_session
-from .settings import core_session_key
+from .settings import app_config, core_session_key
 from .storage import app_db_path
 
 HC_TIMEOUT_SECONDS = 10
-AGENTS = {"claude", "codex", "opencode", "omp", "pi", "droid", "gemini", "amp"}
-REPORTED_APPS = {"claude-code": "claude"}
 CLAUDE_STATUS = {"busy": "working", "waiting": "blocked", "idle": "idle"}
 REPORTED_STATES = {"error": "blocked"}
-# How each agent's command names the session it resumes: a flag's value, or a session id after a subcommand.
-RESUME_FLAGS = {"claude": {"--resume", "-r", "--session-id"}, "opencode": {"--session", "-s"}, "omp": {"--resume"}}
-RESUME_COMMANDS = {"codex": "resume"}
-UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 TITLE_MARKS = re.compile(r"^[^\w(\[]+")
 
 
@@ -60,39 +56,59 @@ def reported_status(terminal):
     return status if isinstance(status, dict) else {}
 
 
-def terminal_agent(terminal) -> str:
-    app = reported_status(terminal).get("app")
-    if app:
-        return REPORTED_APPS.get(app, app)
-    argv = terminal.get("argv") or [""]
-    programs = ((terminal.get("foreground") or {}).get("name") or "", argv[0].rsplit("/", 1)[-1])
-    return next((program.lower() for program in programs if program.lower() in AGENTS), "")
+def agent_names():
+    """The agents OmniSearch catalogs, by program name: each agent's own and its resume command's."""
+    config = app_config()
+    names = {}
+    for agent in config["archive_agents"]:
+        names[agent] = agent
+        resume = shlex.split(config["archive"].get(agent, {}).get("resume") or "")
+        if resume:
+            names.setdefault(Path(resume[0]).name, agent)
+    return names
 
 
-def resumed_session_id(agent: str, argv) -> str:
-    flags = RESUME_FLAGS.get(agent, ())
-    for flag, value in zip(argv, argv[1:]):
-        if flag in flags and not value.startswith("-"):
-            return value
-    command = RESUME_COMMANDS.get(agent)
-    if command in argv[1:]:
-        return next((word for word in argv[argv.index(command, 1) + 1:] if UUID.fullmatch(word)), "")
-    return ""
+def command_words(terminal):
+    """Every word of what the terminal runs, and the value of each `--flag=value`."""
+    argv = [*((terminal.get("foreground") or {}).get("argv") or []), *(terminal.get("argv") or [])]
+    return [part for word in argv for part in (word, word.partition("=")[2]) if part]
 
 
-def terminal_pane(terminal, labels, sessions_by_pid):
+def live_claude_sessions():
+    """Claude Code's running sessions by its pid and its parent's: the app starts agents under a shell."""
+    records = {record["pid"]: record for record in claude_sessions() if isinstance(record.get("pid"), int)}
+    if not records:
+        return {}
+    try:
+        listing = subprocess.run(
+            ["ps", "-o", "pid=,ppid=", "-p", ",".join(map(str, records))],
+            capture_output=True, text=True, timeout=HC_TIMEOUT_SECONDS, check=False,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return records
+    parents = dict(tuple(map(int, line.split())) for line in listing.splitlines() if len(line.split()) == 2)
+    # A file left by an ended session would claim whatever process reuses its pid.
+    live = {pid: records[pid] for pid in parents if pid in records}
+    for pid, parent in parents.items():
+        if pid in records:
+            live.setdefault(parent, records[pid])
+    return live
+
+
+def terminal_pane(terminal, labels, claude, resumed, names):
+    """A terminal as a live index pane; resumed maps the catalog's session ids among its words to their agent."""
     foreground = terminal.get("foreground") or {}
-    claude = sessions_by_pid.get(foreground.get("pid")) or sessions_by_pid.get(terminal.get("pid")) or {}
     report = reported_status(terminal)
     status = REPORTED_STATES.get(report.get("state"), report.get("state"))
     if status not in STATUS_WEIGHT:
-        status = CLAUDE_STATUS.get(claude.get("status"), "unknown")
-    agent = terminal_agent(terminal)
-    session_id = (
-        claude.get("sessionId")
-        or resumed_session_id(agent, foreground.get("argv") or [])
-        or resumed_session_id(agent, terminal.get("argv") or [])
-    )
+        status = CLAUDE_STATUS.get((claude or {}).get("status"), "unknown")
+    if claude:
+        session_id, agent = claude["sessionId"], "claude"
+    else:
+        session_id = next((word for word in command_words(terminal) if word in resumed), "")
+        # The app starts an agent as `sh -c '"$@"; exec $SHELL -i' sh <agent> ...`: its name is a word further in.
+        programs = [report.get("app") or "", foreground.get("name") or "", *(Path(word).name for word in command_words(terminal))]
+        agent = resumed.get(session_id) or next((names[name] for name in programs if name in names), report.get("app") or "")
     address = terminal["address"]
     return {
         "workspace_id": labels.get("herdr.space", ""),
@@ -128,8 +144,8 @@ def store_core(spaces, panes, screens) -> int:
     )
 
 
-def index_core() -> int:
-    """Index the terminals the Herdr app shows on this machine, in the app's own index."""
+def index_core(session_agents=None) -> int:
+    """Index the terminals the Herdr app shows here; session_agents names the agent of any session id in their commands."""
     try:
         terminals = core_terminals()
     except CoreError:
@@ -137,7 +153,9 @@ def index_core() -> int:
         store_core([], [], {})
         raise
     by_address = {terminal["address"]: terminal for terminal in terminals}
-    sessions_by_pid = {record.get("pid"): record for record in claude_sessions()}
+    sessions_by_pid = live_claude_sessions()
+    resumed = session_agents([word for terminal in terminals for word in command_words(terminal)]) if session_agents else {}
+    names = agent_names()
     spaces = {}
     panes = []
     screens = {}
@@ -155,5 +173,7 @@ def index_core() -> int:
             "label": space_name or labels["herdr.space"],
             "active_tab_id": labels.get("herdr.tab", ""),
         })
-        panes.append(terminal_pane(terminal, labels, sessions_by_pid))
+        foreground = terminal.get("foreground") or {}
+        claude = sessions_by_pid.get(foreground.get("pid")) or sessions_by_pid.get(terminal.get("pid"))
+        panes.append(terminal_pane(terminal, labels, claude, resumed, names))
     return store_core(list(spaces.values()), panes, screens)

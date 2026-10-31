@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 os.environ.setdefault("HERDR_PLUGIN_STATE_DIR", tempfile.mkdtemp(prefix="herdr-omnisearch-tests-"))
 
-from herdr_omnisearch import app_search, archive_catalog, cli, herdr_core, live_index, settings, storage  # noqa: E402
+from herdr_omnisearch import app_search, archive_catalog, cli, live_index, settings, storage  # noqa: E402
 
 FAKE_HC = f"""#!{sys.executable}
 import json, os, sys
@@ -25,6 +25,10 @@ if command == "ls":
     print(json.dumps({{"terminals": [{{"address": address, "state": "live"}} for address in listed]}}))
 elif command == "get":
     print(json.dumps(terminals[rest[0]]))
+elif command == "-o":
+    for pid in sys.argv[4].split(","):
+        if pid in state["parents"]:
+            print(pid, state["parents"][pid])
 elif command == "read":
     if rest[1:] != ["--lines", "0", "--json"]:
         sys.exit("only screens may be read: history scrolls a full-screen app")
@@ -32,6 +36,18 @@ elif command == "read":
 """
 
 CODEX_SESSION = "0199aaaa-bbbb-4ccc-8ddd-eeeeffff0001"
+# How the Herdr app starts an agent on a connected machine.
+APP_LAUNCH = '"$@"; exec "${SHELL:-sh}" -i'
+
+
+def write_codex_session(path, session_id, topic):
+    transcript = [
+        {"timestamp": "2026-10-27T12:00:00Z", "type": "session_meta", "payload": {"id": session_id, "cwd": "/repo"}},
+        {"timestamp": "2026-10-27T12:00:01Z", "type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text", "text": f"migrate the {topic}"}],
+        }},
+    ]
+    path.write_text("".join(json.dumps(line) + "\n" for line in transcript), encoding="utf-8")
 
 
 def terminal(address, **fields):
@@ -57,26 +73,51 @@ TERMINALS = [
     ),
     terminal("t3", foreground={"pid": 63, "name": "claude", "argv": ["claude"]}),
     terminal("t4", labels={"herdr.space": "sp1", "herdr.tab": "tb1", "where": "web / 1"}, foreground={"name": "bash"}),
-    terminal("t5", state="finished", labels={"herdr.space": "sp1", "herdr.tab": "tb1"}, foreground={"name": "claude"}),
+    terminal("t5", state="finished", labels={"herdr.space": "sp1", "herdr.tab": "tb1"}, status={"state": "idle", "app": "claude-code"}),
     terminal("t7", labels={"herdr.space": "sp1", "herdr.tab": "tb2", "where": "web / 2"}, foreground={"name": "codex"}),
-    terminal("vps/t9", labels={"herdr.space": "sp1", "herdr.tab": "tb1", "where": "web / 1"}, foreground={"name": "claude"}),
+    terminal("vps/t9", labels={"herdr.space": "sp1", "herdr.tab": "tb1", "where": "web / 1"}, status={"state": "idle", "app": "claude-code"}),
+    terminal(
+        "t10",
+        labels={"herdr.space": "sp1", "herdr.tab": "tb5", "where": "web / 5"},
+        status={"state": "working", "app": "claude-code"},
+        pid=100,
+        argv=["sh", "-c", APP_LAUNCH, "sh", "claude"],
+        foreground={"pid": 100, "name": "sh", "argv": ["sh", "-c", APP_LAUNCH], "cwd": "/repo"},
+    ),
+    terminal(
+        "t11",
+        labels={"herdr.space": "sp1", "herdr.tab": "tb6", "where": "web / 6"},
+        pid=110,
+        argv=["sh", "-c", APP_LAUNCH, "sh", "codex", "--no-daemon"],
+        foreground={"pid": 110, "name": "sh", "argv": ["sh", "-c", APP_LAUNCH], "cwd": "/repo"},
+    ),
 ]
 SCREENS = {"t1": "the login form rejects valid emails", "t2": "waiting for approval", "t3": "not in Herdr", "t4": "$ ls",
-           "t5": "the login form, finished",
+           "t5": "the login form, finished", "t10": "planning the rollout", "t11": "codex ready",
            "vps/t9": "the login form on vps"}
 
 
 class HerdrCoreTests(unittest.TestCase):
-    def core(self, root, terminals=TERMINALS):
+    def core(self, root, terminals=TERMINALS, screens=None):
         bin_dir = root / "bin"
         bin_dir.mkdir()
-        (bin_dir / "hc").write_text(FAKE_HC, encoding="utf-8")
-        (bin_dir / "hc").chmod(0o755)
+        for program in ("hc", "ps"):
+            (bin_dir / program).write_text(FAKE_HC, encoding="utf-8")
+            (bin_dir / program).chmod(0o755)
         state = root / "hc-state.json"
-        state.write_text(json.dumps({"terminals": terminals, "screens": SCREENS, "vanished": ["t6"]}), encoding="utf-8")
+        state.write_text(json.dumps({
+            "terminals": terminals, "screens": {**SCREENS, **(screens or {})}, "vanished": ["t6"],
+            "parents": {"41": "1", "101": "100", "777": "1"},
+        }), encoding="utf-8")
         claude = root / "claude" / "sessions"
         claude.mkdir(parents=True)
-        (claude / "41.json").write_text(json.dumps({"pid": 41, "sessionId": "cl-1", "name": "fix-login", "status": "busy"}), encoding="utf-8")
+        records = [
+            {"pid": 41, "sessionId": "cl-1", "name": "fix-login", "status": "busy"},
+            {"pid": 101, "sessionId": "cl-2", "name": "rollout-plan", "status": "busy"},
+            {"pid": 110, "sessionId": "cl-gone", "name": "ended-long-ago", "status": "idle"},
+        ]
+        for record in records:
+            (claude / f"{record['pid']}.json").write_text(json.dumps(record), encoding="utf-8")
         codex = root / "codex"
         codex.mkdir()
         config = settings.default_config()
@@ -111,23 +152,23 @@ class HerdrCoreTests(unittest.TestCase):
             {"kind": "space", "space": "sp1", "name": "web"},
             {"kind": "terminal", "address": "t1", "space": "sp1", "tab": "tb1", "title": "Fix the login form",
              "agent": "claude", "status": "working", "snippet": "the login form rejects valid emails", "cwd": "/repo"},
+            {"kind": "terminal", "address": "t10", "space": "sp1", "tab": "tb5", "title": "rollout-plan",
+             "agent": "claude", "status": "working", "snippet": "planning the rollout", "cwd": "/repo"},
             {"kind": "terminal", "address": "t2", "space": "sp1", "tab": "tb1", "title": "Review the login form",
              "agent": "codex", "status": "blocked", "snippet": "waiting for approval", "cwd": "/repo"},
+            {"kind": "terminal", "address": "t11", "space": "sp1", "tab": "tb6", "title": "",
+             "agent": "codex", "status": "unknown", "snippet": "codex ready", "cwd": "/repo"},
         ]})
 
     def test_a_terminal_is_found_by_its_session_transcript_and_its_session_resumes_there(self):
-        transcript = [
-            {"timestamp": "2026-10-27T12:00:00Z", "type": "session_meta", "payload": {"id": CODEX_SESSION, "cwd": "/repo"}},
-            {"timestamp": "2026-10-27T12:00:01Z", "type": "response_item", "payload": {
-                "type": "message", "role": "user", "content": [{"type": "input_text", "text": "migrate the walrus schema"}],
-            }},
-        ]
         with tempfile.TemporaryDirectory() as tmp:
             stack, codex = self.core(Path(tmp))
             with stack:
-                (codex / "rollout.jsonl").write_text("".join(json.dumps(line) + "\n" for line in transcript), encoding="utf-8")
+                write_codex_session(codex / "rollout.jsonl", CODEX_SESSION, "walrus schema")
+                # Each refresh learns from the catalog, and each catalog run from the refreshed space names.
                 self.app_search("--refresh")
                 archive_catalog.archive_catalog_index()
+                self.app_search("--refresh")
                 live = self.app_search("walrus")
                 sessions = self.app_search("--archive", "walrus")
         self.assertEqual([(row["kind"], row.get("address"), row.get("snippet")) for row in live["rows"]],
@@ -138,6 +179,22 @@ class HerdrCoreTests(unittest.TestCase):
                          ("session", "codex", CODEX_SESSION, "web", "t2"))
         self.assertEqual(session["argv"][:2], ["codex", "resume"])
         self.assertEqual(session["argv"][-1], CODEX_SESSION)
+
+    def test_an_ended_core_names_no_catalog_session(self):
+        stale = {"workspace_id": "spOld", "tab_id": "tbOld", "pane_id": "t2", "agent": "codex",
+                 "agent_session": {"value": CODEX_SESSION}, "agent_status": "idle", "cwd": "/repo"}
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, codex = self.core(Path(tmp))
+            with stack:
+                write_codex_session(codex / "rollout.jsonl", CODEX_SESSION, "walrus schema")
+                live_index.store_session("core:ended", "", [{"workspace_id": "spOld", "label": "abandoned"}], [stale],
+                                         lambda pane: "old screen", include_empty=False, include_wrappers=False,
+                                         db=storage.app_db_path())
+                archive_catalog.archive_catalog_index()
+                self.app_search("--refresh")
+                archive_catalog.archive_catalog_index()
+                session = self.app_search("--archive", "walrus")["rows"][0]
+        self.assertEqual(session["space_name"], "web")
 
     def test_the_herdr_plugin_and_the_app_keep_separate_indexes(self):
         herdr_pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1", "agent": "claude", "agent_status": "idle"}
@@ -154,24 +211,38 @@ class HerdrCoreTests(unittest.TestCase):
         self.assertEqual([row["pane_id"] for row in herdr_rows], ["workspace:w1", "w1:p1"])
         self.assertEqual([row.get("address") for row in app_rows], [None, "t1", "t2"])
 
-    def test_a_resumed_session_is_read_from_the_resume_command(self):
-        commands = {
-            ("codex", "codex", "resume", CODEX_SESSION): CODEX_SESSION,
-            ("codex", "codex", "resume", "-C", "/repo", CODEX_SESSION): CODEX_SESSION,
-            ("codex", "codex", "resume", CODEX_SESSION, "--model", "gpt-5"): CODEX_SESSION,
-            ("codex", "codex", "-s", "workspace-write", "resume", CODEX_SESSION): CODEX_SESSION,
-            ("codex", "codex", "resume", "--last", "-C", "/repo"): "",
-            ("codex", "codex", "-s", "workspace-write"): "",
-            ("claude", "claude", "--resume", "cl-9"): "cl-9",
-            ("claude", "claude", "-r", "cl-9", "--model", "opus"): "cl-9",
-            ("claude", "claude", "--resume"): "",
-            ("claude", "claude", "resume", CODEX_SESSION): "",
-            ("opencode", "opencode", "--session", "ses_123"): "ses_123",
-            ("opencode", "opencode", "-s", "ses_123"): "ses_123",
-            ("omp", "omp", "--resume", "omp-4"): "omp-4",
-        }
-        found = {command: herdr_core.resumed_session_id(command[0], list(command[1:])) for command in commands}
-        self.assertEqual(found, commands)
+    def test_a_resumed_session_is_found_by_its_id_however_its_command_reads(self):
+        wrapped = "0199aaaa-bbbb-4ccc-8ddd-eeeeffff0002"
+        terminals = [
+            *TERMINALS,
+            terminal(
+                "t8",
+                labels={"herdr.space": "sp1", "herdr.tab": "tb3", "where": "web / 3"},
+                argv=["direct-codex", "--yolo", "-s", "workspace-write", f"--resume={wrapped}"],
+                foreground={"pid": 88, "name": "direct-codex", "argv": ["direct-codex"], "cwd": "/repo"},
+            ),
+            terminal(
+                "t9",
+                labels={"herdr.space": "sp1", "herdr.tab": "tb4", "where": "web / 4"},
+                argv=["my-codex"],
+                foreground={"pid": 99, "name": "my-codex", "argv": ["my-codex"], "cwd": "/repo"},
+            ),
+        ]
+        sessions = {CODEX_SESSION: "walrus schema", wrapped: "walrus rollout"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stack, codex = self.core(root, terminals, screens={"t8": "busy", "t9": "idle prompt"})
+            with stack:
+                settings.CONFIG_CACHE["archive"]["codex"]["resume"] = "my-codex resume {session_id}"
+                for session_id, text in sessions.items():
+                    write_codex_session(codex / f"{session_id}.jsonl", session_id, text)
+                archive_catalog.archive_catalog_index()
+                self.app_search("--refresh")
+                live = self.app_search("walrus")["rows"]
+                idle = self.app_search("idle", "prompt")["rows"]
+        self.assertEqual([(row["address"], row["agent"], row["snippet"]) for row in live if row["kind"] == "terminal"],
+                         [("t2", "codex", "user: migrate the walrus schema"), ("t8", "codex", "user: migrate the walrus rollout")])
+        self.assertEqual([(row["address"], row["agent"]) for row in idle if row["kind"] == "terminal"], [("t9", "codex")])
 
     def test_a_background_refresh_leaves_the_scope_herdr_core_ends(self):
         with tempfile.TemporaryDirectory() as tmp:

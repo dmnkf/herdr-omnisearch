@@ -1,6 +1,7 @@
 from .archive_catalog import (
     archive_catalog_live_matches,
     archive_catalog_search,
+    archive_catalog_session_agents,
     maybe_background_archive_catalog_index,
 )
 from .herdr_core import CoreError, index_core
@@ -78,7 +79,7 @@ def app_search(query: str, *, archive: bool, refresh: bool, limit: int):
     errors = []
     if refresh:
         try:
-            index_core()
+            index_core(archive_catalog_session_agents)
         except CoreError as exc:
             errors.append(str(exc))
         if app_config()["archive_enabled"]:
