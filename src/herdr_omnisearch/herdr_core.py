@@ -4,7 +4,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from .herdr_programs import INTERPRETERS, KNOWN_PROGRAMS, SHELLS
+from .herdr_programs import AGENT_PROGRAMS, INTERPRETERS, KNOWN_PROGRAMS, SHELLS
 from .live_index import STATUS_WEIGHT, claude_sessions, store_session
 from .settings import app_config, core_session_key
 from .storage import app_db_path
@@ -62,23 +62,31 @@ def reported_status(terminal):
 def agent_names(launchers=()):
     """Agents by program name: the ones OmniSearch catalogs, their resume commands', and the app's launchers."""
     config = app_config()
-    names = {agent.lower(): agent for agent in config["archive_agents"]}
+    names = {agent.lower(): agent for agent in [*config["archive_agents"], *(agent for agent, _argv in launchers)]}
     commands = [(agent, shlex.split(config["archive"].get(agent, {}).get("resume") or "")) for agent in config["archive_agents"]]
     for agent, argv in [*commands, *launchers]:
         program = launched_program(argv)
-        if program:
+        # `gh copilot` must not make every `gh` an agent: only agents and programs Herdr doesn't know.
+        if program and (program in AGENT_PROGRAMS or program not in KNOWN_PROGRAMS):
             names.setdefault(program, agent)
     return names
 
 
 def launched_program(argv) -> str:
-    """The program a launch command starts: its first word, or the script an interpreter runs; never a shell."""
-    argv = unwrap_launch(list(argv))
-    first = program_stem(argv[0]) if argv else ""
-    if first in INTERPRETERS:
-        # A script is a path or a file name; `uv run codex` names no program of its own.
-        return next((program_stem(word) for word in argv[1:] if "/" in word or program_name(word) != program_stem(word)), "")
-    return "" if first in SHELLS else first
+    """The program a launch command starts: its first word, or a script an interpreter runs straight away."""
+    after_interpreter = False
+    for word in unwrap_launch(list(argv)):
+        stem = program_stem(word)
+        if "=" in word and not word.startswith("-"):
+            continue
+        if stem in INTERPRETERS:
+            after_interpreter = True
+            continue
+        # A shell leaves the program unclear; after an interpreter only a script file is one, never an option.
+        if stem in SHELLS or (after_interpreter and program_name(word) == stem):
+            return ""
+        return stem
+    return ""
 
 
 def program_name(word: str) -> str:

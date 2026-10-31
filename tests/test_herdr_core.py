@@ -238,18 +238,49 @@ class HerdrCoreTests(unittest.TestCase):
         self.assertEqual(unknown, [])
         self.assertEqual([(row["address"], row["agent"]) for row in known if row["kind"] == "terminal"], [("t40", "codex")])
 
-    def test_a_script_launcher_is_known_by_its_script(self):
+    def test_a_launcher_that_runs_a_general_program_claims_no_other_terminal(self):
         commands = {
-            "t41": ["node", "/opt/codex-hub.js"],
-            "t42": ["python3", "/opt/claude_hub.py", "--fast"],
-            "t43": ["uv", "run", "pytest"],
+            "t50": ["gh", "pr", "view"],
+            "t51": ["gh", "copilot", "suggest"],
+            "t52": ["node", "/root/.npm/bin/gemini"],
+            "t53": ["uv", "pip", "install", "codex"],
+            "t54": ["env", "npx", "codex"],
         }
         terminals = [
             terminal(address, labels={"herdr.space": "sp1", "herdr.tab": address, "where": "web / 1"},
                      argv=argv, foreground={"pid": 0, "name": Path(argv[0]).name, "argv": argv, "cwd": "/repo"})
             for address, argv in commands.items()
         ]
-        launchers = ['codex=["node", "/opt/codex-hub.js"]', "claude=/opt/claude_hub.py", 'codex=["uv", "run", "--with", "x", "codex"]']
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, _codex = self.core(Path(tmp), terminals, screens={address: "prompt" for address in commands})
+            with stack:
+                rows = self.app_search("--refresh", "--launcher", 'copilot=["gh", "copilot"]', "--launcher", "gemini=npx")["rows"]
+        self.assertEqual(sorted((row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"),
+                         [("t52", "gemini"), ("t53", "codex")])
+
+    def test_a_script_launcher_is_known_by_its_script(self):
+        commands = {
+            "t41": ["node", "/opt/codex-hub.js"],
+            "t42": ["python3", "/opt/claude_hub.py", "--fast"],
+            "t43": ["uv", "run", "pytest"],
+            "t44": ["node", "/opt/server.js"],
+            "t45": ["bash"],
+            "t46": ["node", "--require", "/opt/preload.js", "/opt/other.js"],
+            "t47": ["ls", "/repo"],
+        }
+        terminals = [
+            terminal(address, labels={"herdr.space": "sp1", "herdr.tab": address, "where": "web / 1"},
+                     argv=argv, foreground={"pid": 0, "name": Path(argv[0]).name, "argv": argv, "cwd": "/repo"})
+            for address, argv in commands.items()
+        ]
+        launchers = [
+            'codex=["env", "NODE_OPTIONS=--max-old-space-size=4096", "/usr/bin/node", "/opt/codex-hub.js"]',
+            "claude=/opt/claude_hub.py",
+            'codex=["uv", "run", "--with", "x", "codex"]',
+            'claude=["env", "/bin/bash", "-lc", "claude"]',
+            'pi=["node", "--require", "/opt/preload.js", "/opt/pi.js"]',
+            'codex=["codex", "-C", "/repo"]',
+        ]
         with tempfile.TemporaryDirectory() as tmp:
             stack, _codex = self.core(Path(tmp), terminals, screens={address: "prompt" for address in commands})
             with stack:

@@ -26,7 +26,7 @@ This file is the brief: enough to build OmniSearch from an empty folder. The fil
   - Anything unknown is "·" in `dim`.
   - A session row shows "↺", or "●" in `working` when it is running now.
 - Opening the popup searches at once with an empty query. The live list then shows every agent terminal, the busiest first, from what each machine indexed last.
-- At the same time each machine re-reads herdr-core's terminals with `app-search --refresh --limit 0`. It also starts a background refresh of its session catalog when that is over a minute old. As each machine finishes, its own rows are searched again. A refresh that failed says why, under the list or in place of it.
+- Once that machine's launchers are known (at most 5 s), each machine re-reads herdr-core's terminals with `app-search --refresh --limit 0`. It also starts a background refresh of its session catalog when that is over a minute old. As each machine finishes, its own rows are searched again. A refresh that failed says why, under the list or in place of it.
 - Typing searches again 90 ms after the last key. Each machine shows the answer to its newest search only, so a slow answer to older words is dropped. Each machine's rows replace its old ones as they arrive, so the list never empties while you type.
 - Up and Down move the selection, stopping at the ends; Page Up and Page Down move 8 rows. The list scrolls only as far as it takes to keep the selection in view. The wheel scrolls it too.
 - Tab switches between Live and Sessions and searches the same words there. Clicking a chip does the same.
@@ -45,7 +45,7 @@ This file is the brief: enough to build OmniSearch from an empty folder. The fil
 - **A `keys.json` snippet**, merged into the person's keys. It binds `ctrl-shift-f` to `mod.open:omnisearch` in both `global` and `terminal`, so it also opens while a terminal has focus.
 - **The program it runs:**
   - `exec("herdr-omnisearch", ["app-search", "--limit", "40", ...flags, "--", ...words], { on })` once per machine, with `on` null for this computer and each name from `machines()` whose layout isn't `unavailable`.
-  - The flag `--archive` searches Sessions. `["app-search", "--refresh", "--limit", "0", "--launcher", 'codex=["codex-hub"]', ...]` is the refresh, sent once per machine on opening, after that machine's launchers are known: each installed agent's `run` from `knownAgents`, as JSON, so an agent the app starts through a launcher of its own is known by that program's name (or, for `["node", "/opt/hub.js"]`, by its script's).
+  - The flag `--archive` searches Sessions. `["app-search", "--refresh", "--limit", "0", "--launcher", 'codex=["codex-hub"]', ...]` is the refresh, sent once per machine on opening, after that machine's launchers are known: each installed agent's `run` from `knownAgents`, as JSON, so an agent the app starts through a launcher of its own is known by that program's name (or, for `["node", "/opt/hub.js"]`, by its script's). A launcher teaches only an agent Herdr's table lists or a program it doesn't know (never `gh` from `["gh", "copilot"]`), and nothing when a shell or a non-script word follows the interpreter.
   - It prints `{ "rows": [...], "error": null | "why" }`.
   - Live rows are `{ kind: "space", space, name }` or `{ kind: "terminal", address, space, tab, title, agent, status, snippet, cwd }`.
   - Sessions rows are `{ kind: "session", id, agent, session_id, title, space_name, updated, snippet, folder, argv, address }`. `argv` is the resume command, and `address` is the terminal running it, or null.
