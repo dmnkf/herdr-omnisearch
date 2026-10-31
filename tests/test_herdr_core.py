@@ -126,16 +126,16 @@ class HerdrCoreTests(unittest.TestCase):
             stack, codex = self.core(Path(tmp))
             with stack:
                 (codex / "rollout.jsonl").write_text("".join(json.dumps(line) + "\n" for line in transcript), encoding="utf-8")
-                archive_catalog.archive_catalog_index()
                 self.app_search("--refresh")
+                archive_catalog.archive_catalog_index()
                 live = self.app_search("walrus")
                 sessions = self.app_search("--archive", "walrus")
         self.assertEqual([(row["kind"], row.get("address"), row.get("snippet")) for row in live["rows"]],
                          [("space", None, None), ("terminal", "t2", "user: migrate the walrus schema")])
         self.assertEqual(len(sessions["rows"]), 1)
         session = sessions["rows"][0]
-        self.assertEqual((session["kind"], session["agent"], session["session_id"], session["address"]),
-                         ("session", "codex", CODEX_SESSION, "t2"))
+        self.assertEqual((session["kind"], session["agent"], session["session_id"], session["space_name"], session["address"]),
+                         ("session", "codex", CODEX_SESSION, "web", "t2"))
         self.assertEqual(session["argv"][:2], ["codex", "resume"])
         self.assertEqual(session["argv"][-1], CODEX_SESSION)
 
@@ -156,17 +156,22 @@ class HerdrCoreTests(unittest.TestCase):
 
     def test_a_resumed_session_is_read_from_the_resume_command(self):
         commands = {
-            ("codex", "resume", CODEX_SESSION): CODEX_SESSION,
-            ("codex", "resume", "-C", "/repo", CODEX_SESSION): CODEX_SESSION,
-            ("claude", "--resume", "cl-9"): "cl-9",
-            ("claude", "-r", "cl-9", "--model", "opus"): "cl-9",
-            ("opencode", "--session", "ses_123"): "ses_123",
-            ("omp", "--resume", "omp-4"): "omp-4",
-            ("claude", "--resume"): "",
-            ("codex", "resume", "--last"): "",
-            ("codex",): "",
+            ("codex", "codex", "resume", CODEX_SESSION): CODEX_SESSION,
+            ("codex", "codex", "resume", "-C", "/repo", CODEX_SESSION): CODEX_SESSION,
+            ("codex", "codex", "resume", CODEX_SESSION, "--model", "gpt-5"): CODEX_SESSION,
+            ("codex", "codex", "-s", "workspace-write", "resume", CODEX_SESSION): CODEX_SESSION,
+            ("codex", "codex", "resume", "--last", "-C", "/repo"): "",
+            ("codex", "codex", "-s", "workspace-write"): "",
+            ("claude", "claude", "--resume", "cl-9"): "cl-9",
+            ("claude", "claude", "-r", "cl-9", "--model", "opus"): "cl-9",
+            ("claude", "claude", "--resume"): "",
+            ("claude", "claude", "resume", CODEX_SESSION): "",
+            ("opencode", "opencode", "--session", "ses_123"): "ses_123",
+            ("opencode", "opencode", "-s", "ses_123"): "ses_123",
+            ("omp", "omp", "--resume", "omp-4"): "omp-4",
         }
-        self.assertEqual({argv: herdr_core.resumed_session_id(list(argv)) for argv in commands}, commands)
+        found = {command: herdr_core.resumed_session_id(command[0], list(command[1:])) for command in commands}
+        self.assertEqual(found, commands)
 
     def test_a_background_refresh_leaves_the_scope_herdr_core_ends(self):
         with tempfile.TemporaryDirectory() as tmp:

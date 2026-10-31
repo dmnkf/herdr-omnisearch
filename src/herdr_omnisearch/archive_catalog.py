@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .settings import app_config, cli_command, data_dir
 from .storage import (
+    app_db_path,
     archive_catalog_connect,
     compact_index,
     connect,
@@ -285,16 +286,20 @@ def _archive_catalog_index_unlocked(agents: str = ""):
     )
     live_session_spaces = {}
     live_spaces = {}
-    live_conn = None
-    try:
-        live_conn = connect()
-        live_session_spaces = live_space_labels_by_session(live_conn)
-        live_spaces = live_space_labels_by_cwd(live_conn)
-    except (sqlite3.Error, OSError):
-        pass
-    finally:
-        if live_conn is not None:
-            live_conn.close()
+    # The Herdr app's terminals keep their space names in their own index; Herdr's panes win a tie.
+    for live_db in (app_db_path(), None):
+        if live_db is not None and not live_db.exists():
+            continue
+        live_conn = None
+        try:
+            live_conn = connect(live_db)
+            live_session_spaces.update(live_space_labels_by_session(live_conn))
+            live_spaces.update(live_space_labels_by_cwd(live_conn))
+        except (sqlite3.Error, OSError):
+            pass
+        finally:
+            if live_conn is not None:
+                live_conn.close()
 
     conn = archive_catalog_connect()
     layout_current = archive_catalog_before_index(conn)

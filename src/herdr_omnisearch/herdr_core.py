@@ -11,7 +11,10 @@ AGENTS = {"claude", "codex", "opencode", "omp", "pi", "droid", "gemini", "amp"}
 REPORTED_APPS = {"claude-code": "claude"}
 CLAUDE_STATUS = {"busy": "working", "waiting": "blocked", "idle": "idle"}
 REPORTED_STATES = {"error": "blocked"}
-RESUME_FLAGS = {"--resume", "-r", "--session", "-s", "--session-id"}
+# How each agent's command names the session it resumes: a flag's value, or a session id after a subcommand.
+RESUME_FLAGS = {"claude": {"--resume", "-r", "--session-id"}, "opencode": {"--session", "-s"}, "omp": {"--resume"}}
+RESUME_COMMANDS = {"codex": "resume"}
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 TITLE_MARKS = re.compile(r"^[^\w(\[]+")
 
 
@@ -66,13 +69,14 @@ def terminal_agent(terminal) -> str:
     return next((program.lower() for program in programs if program.lower() in AGENTS), "")
 
 
-def resumed_session_id(argv) -> str:
-    """The session a command resumes: a resume flag's value, or the last word after `resume`."""
+def resumed_session_id(agent: str, argv) -> str:
+    flags = RESUME_FLAGS.get(agent, ())
     for flag, value in zip(argv, argv[1:]):
-        if flag in RESUME_FLAGS and not value.startswith("-"):
+        if flag in flags and not value.startswith("-"):
             return value
-    if "resume" in argv[1:3] and not argv[-1].startswith("-") and argv[-1] != "resume":
-        return argv[-1]
+    command = RESUME_COMMANDS.get(agent)
+    if command in argv[1:]:
+        return next((word for word in argv[argv.index(command, 1) + 1:] if UUID.fullmatch(word)), "")
     return ""
 
 
@@ -83,10 +87,11 @@ def terminal_pane(terminal, labels, sessions_by_pid):
     status = REPORTED_STATES.get(report.get("state"), report.get("state"))
     if status not in STATUS_WEIGHT:
         status = CLAUDE_STATUS.get(claude.get("status"), "unknown")
+    agent = terminal_agent(terminal)
     session_id = (
         claude.get("sessionId")
-        or resumed_session_id(foreground.get("argv") or [])
-        or resumed_session_id(terminal.get("argv") or [])
+        or resumed_session_id(agent, foreground.get("argv") or [])
+        or resumed_session_id(agent, terminal.get("argv") or [])
     )
     address = terminal["address"]
     return {
@@ -96,7 +101,7 @@ def terminal_pane(terminal, labels, sessions_by_pid):
         "terminal_id": address,
         "label": terminal.get("name") or "",
         "terminal_title_stripped": TITLE_MARKS.sub("", report.get("title") or terminal.get("title") or "").strip(),
-        "agent": terminal_agent(terminal),
+        "agent": agent,
         "agent_session": {"value": session_id} if session_id else None,
         "agent_status": status,
         "cwd": terminal.get("cwd") or "",
