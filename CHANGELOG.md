@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.14.0 - 2026-10-31
+
+- Search the Herdr app too. The app runs its terminals in herdr-core, not in
+  Herdr, so OmniSearch now reads herdr-core's terminals as well: their screens,
+  their agent and status, and for Claude Code and resumed sessions, the
+  conversation behind them. Only screens are read, so an agent is never
+  scrolled. A new mod in `omnisearch/` opens a popup on
+  Ctrl+Shift+F that searches those terminals on this computer and on every
+  connected machine, focuses the one you pick, and with Tab finds an old
+  session and resumes it in the space it ran in. Install the command with
+  `uv tool install git+https://github.com/dmnkf/herdr-omnisearch` on each
+  machine, then add the mod from the app; the README says how. A session
+  resumes through the agent's launcher in the app's `programs.json`, and an
+  agent the app started behind a shell or a wrapper is still recognized.
+- Add `herdr-omnisearch app-search`, which prints those results as JSON for the
+  mod. Herdr's own pickers never list herdr-core terminals, since Herdr can't
+  focus them.
+- Let the Herdr plugin and the command for the app share one machine. The app's
+  terminals live in their own `app-index.sqlite3`, so no plugin version prunes
+  or lists them. Both share the session catalog, and an older version no longer
+  re-indexes sessions a newer one indexed.
+
 ## 0.13.2 - 2026-10-27
 
 - Keep typing fast while a word is half typed. Choosing the word to highlight

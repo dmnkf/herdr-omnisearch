@@ -6,7 +6,7 @@ The supported public installation path is:
 herdr plugin install dmnkf/herdr-omnisearch
 ```
 
-Use `--ref v0.13.2` to pin this release. The plugin has no runtime
+Use `--ref v0.14.0` to pin this release. The plugin has no runtime
 dependency outside Python 3.9+ and the `herdr` command.
 
 GitHub plugin installation does not modify `~/.config/herdr/config.toml`. Add
