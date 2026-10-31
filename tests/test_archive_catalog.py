@@ -165,6 +165,25 @@ class ArchiveCatalogCompactionTests(unittest.TestCase):
                 self.assertEqual(search_ids("walrus"), [])
                 self.assertEqual(search_ids("penguin"), ["edited"])
 
+    def test_an_older_version_keeps_what_a_newer_one_indexed(self):
+        def indexed_versions():
+            conn = storage.archive_catalog_connect()
+            try:
+                return [row[0] for row in conn.execute("SELECT message_index_version FROM catalog_sessions")]
+            finally:
+                conn.close()
+
+        newer = archive_catalog.ARCHIVE_CATALOG_CONTENT_VERSION + 1
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with archive_catalog_env(root) as sessions:
+                write_codex_session(sessions / "shared.jsonl", "shared", [("user", "walrus plan")])
+                with patch.object(archive_catalog, "ARCHIVE_CATALOG_CONTENT_VERSION", newer):
+                    archive_catalog.archive_catalog_index()
+                archive_catalog.archive_catalog_index()
+                self.assertEqual(indexed_versions(), [newer])
+                self.assertEqual(search_ids("walrus"), ["shared"])
+
     def test_reindexing_keeps_only_current_messages_while_the_upgrade_waits_for_disk(self):
         def disk_usage(_path):
             return shutil._ntuple_diskusage(100 * 2**30, 100 * 2**30 - 10 * 2**20, 10 * 2**20)

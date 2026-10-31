@@ -374,8 +374,9 @@ def _archive_catalog_index_unlocked(agents: str = ""):
                 and int(old["source_size"]) == source_size
                 and int(old["source_mtime_ns"]) == source_mtime_ns
                 and int(old["started_epoch"] or 0) > 0
+                # The Herdr plugin and the app's command can share a catalog at different versions.
                 and int(old["message_index_version"] or 0)
-                == ARCHIVE_CATALOG_CONTENT_VERSION
+                >= ARCHIVE_CATALOG_CONTENT_VERSION
                 and int(old["is_present"] or 0) == 1
             ):
                 unchanged += 1
