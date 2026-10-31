@@ -13,6 +13,8 @@ CLAUDE_STATUS = {"busy": "working", "waiting": "blocked", "idle": "idle"}
 REPORTED_STATES = {"error": "blocked"}
 TITLE_MARKS = re.compile(r"^[^\w(\[]+")
 # Herdr's program table looks past these to what they run (herdr-app defaults/programs.json).
+SCRIPT_EXTENSIONS = (".js", ".mjs", ".cjs", ".ts", ".py", ".rb")
+FISH_LAUNCH = "command $argv[2..]; exec $argv[1] -i"
 SHELLS = {"zsh", "bash", "fish", "sh", "dash", "nu", "pwsh", "powershell", "cmd", "elvish", "xonsh", "tcsh", "csh", "ksh", "ion"}
 INTERPRETERS = {"node", "bun", "bunx", "deno", "python", "python3", "npx", "pnpm", "yarn", "uv", "uvx", "ruby", "bundle", "env", "sudo", "nice", "time", "watch", "nodemon"}
 
@@ -65,26 +67,36 @@ def agent_names():
     names = {}
     for agent in config["archive_agents"]:
         names[agent] = agent
-        for name in program_names(shlex.split(config["archive"].get(agent, {}).get("resume") or "")):
-            if name not in SHELLS | INTERPRETERS:
-                names.setdefault(name, agent)
+        resume = unwrap_launch(shlex.split(config["archive"].get(agent, {}).get("resume") or ""))
+        program = Path(resume[0]).name if resume else ""
+        if program and program not in SHELLS | INTERPRETERS:
+            names.setdefault(program, agent)
     return names
 
 
-def program_names(argv):
-    """The programs a command runs: past a shell's `-c '"$@"…' $0` wrapper, and past an interpreter to its script."""
-    names = []
-    words = list(argv)
-    while words and len(names) < 4:
-        name = Path(words[0]).name
-        names.append(name)
-        if name in SHELLS and len(words) > 4 and words[1].startswith("-") and words[1].endswith("c"):
-            words = words[4:]
-        elif name in INTERPRETERS:
-            words = [word for word in words[1:] if not word.startswith("-") and "=" not in word]
-        else:
-            break
-    return names
+def unwrap_launch(argv):
+    """The command inside the app's `sh -c '"$@"; exec "$0" -i' sh <command>` wrapper, or argv itself."""
+    while (
+        len(argv) > 4 and Path(argv[0]).name in SHELLS and argv[1].startswith("-") and argv[1].endswith("c")
+        and ('"$@"' in argv[2] or argv[2] == FISH_LAUNCH)
+    ):
+        argv = argv[4:]
+    return argv
+
+
+def program_agent(argv, names) -> str:
+    """The agent a command runs, read as Herdr's program table reads it (herdr-app src/programs.rs)."""
+    argv = unwrap_launch(list(argv))
+    if not argv:
+        return ""
+    first = Path(argv[0]).name
+    if first in INTERPRETERS:
+        for word in argv[1:]:
+            name = Path(word).name
+            stem = next((name[: -len(ext)] for ext in SCRIPT_EXTENSIONS if name.endswith(ext)), name)
+            if not word.startswith("-") and stem in names:
+                return names[stem]
+    return names.get(first, "")
 
 
 def running_argv(terminal):
@@ -130,8 +142,14 @@ def terminal_pane(terminal, labels, claude, resumed, names):
         session_id, agent = claude["sessionId"], "claude"
     else:
         session_id = next((word for word in command_words(terminal) if word in resumed), "")
-        programs = [report.get("app") or "", foreground.get("name") or "", *program_names(running_argv(terminal))]
-        agent = resumed.get(session_id) or next((names[name] for name in programs if name in names), report.get("app") or "")
+        agent = (
+            resumed.get(session_id)
+            or names.get(report.get("app") or "")
+            or program_agent(running_argv(terminal), names)
+            or names.get(foreground.get("name") or "")
+            or report.get("app")
+            or ""
+        )
     address = terminal["address"]
     return {
         "workspace_id": labels.get("herdr.space", ""),

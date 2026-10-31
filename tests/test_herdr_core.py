@@ -194,6 +194,30 @@ class HerdrCoreTests(unittest.TestCase):
         self.assertEqual(session["argv"][:2], ["codex", "resume"])
         self.assertEqual(session["argv"][-1], CODEX_SESSION)
 
+    def test_programs_are_read_the_way_herdr_reads_them(self):
+        commands = {
+            "t20": ["uv", "run", "codex"],
+            "t21": ["node", "--require", "/root/preload.js", "/usr/local/bin/codex"],
+            "t22": ["node", "/opt/codex/bin/codex.js", "resume"],
+            "t23": ["sh", "-c", APP_LAUNCH, "sh", "codex"],
+            "t24": ["fish", "-c", "command $argv[2..]; exec $argv[1] -i", "fish", "codex"],
+            "t25": ["bash", "-lc", 'nvim "$1"; exec bash -i', "bash", "/root/src/codex"],
+            "t26": ["uv", "run", "pytest"],
+            "t27": ["nvim", "/root/src/codex"],
+        }
+        terminals = [
+            terminal(address, labels={"herdr.space": "sp1", "herdr.tab": address, "where": "web / 1"},
+                     argv=argv, foreground={"pid": 0, "name": Path(argv[0]).name, "argv": argv, "cwd": "/repo"})
+            for address, argv in commands.items()
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, _codex = self.core(Path(tmp), terminals, screens={address: "prompt" for address in commands})
+            with stack:
+                settings.CONFIG_CACHE["archive"]["codex"]["resume"] = "uv run codex resume {session_id}"
+                rows = self.app_search("--refresh")["rows"]
+        self.assertEqual(sorted((row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"),
+                         [("t20", "codex"), ("t21", "codex"), ("t22", "codex"), ("t23", "codex"), ("t24", "codex")])
+
     def test_a_shell_in_a_resume_command_makes_no_terminal_an_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
             stack, _codex = self.core(Path(tmp))
