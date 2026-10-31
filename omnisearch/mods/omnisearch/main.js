@@ -11,6 +11,7 @@ const CLI = "herdr-omnisearch";
 const INSTALL = "uv tool install git+https://github.com/dmnkf/herdr-omnisearch";
 const LIMIT = 40;
 const DEBOUNCE_MS = 90;
+const LAUNCHERS_WAIT_MS = 5000;
 const ROW_H = 46;
 const LIST_H = ROW_H * 8;
 const MODES = [["live", "Live"], ["sessions", "Sessions"]];
@@ -64,7 +65,6 @@ export default class OmniSearch extends View {
     this.errors = new Map();
     this.refreshErrors = new Map();
     this.launchers = new Map();
-    this.launchersLoaded = new Map();
     this.input = InputState.new({ placeholder: "Search terminals by what they show or said…" });
     this.input.on("change", (_e, cx) => {
       this.query = this.input.value();
@@ -81,27 +81,29 @@ export default class OmniSearch extends View {
     } catch {}
     this.searchAll(cx);
     this.refresh(cx);
-    this.loadLaunchers(cx);
+    for (const machine of this.targets()) this.launchersOn(machine, cx);
   }
 
-  // How the person starts each agent on each machine (programs.json `run`), for resuming one.
-  loadLaunchers(cx) {
-    for (const machine of this.targets()) {
-      let loaded;
-      this.launchersLoaded.set(machine, new Promise((resolve) => (loaded = resolve)));
+  // How the person starts each agent on a machine (programs.json `run`), asked once; none if it takes too long.
+  launchersOn(machine, cx) {
+    if (!this.launchers.has(machine)) {
+      let settle;
+      this.launchers.set(machine, new Promise((resolve) => (settle = resolve)));
+      cx.timer.after(LAUNCHERS_WAIT_MS, () => settle({}));
       cx.spawn(async () => {
+        let known = [];
         try {
-          const known = await knownAgents({ on: machine });
-          this.launchers.set(machine, Object.fromEntries(known.filter((a) => a.installed).map((a) => [a.key, a.run])));
+          known = await knownAgents({ on: machine });
         } catch {}
-        loaded();
+        settle(Object.fromEntries(known.filter((a) => a.installed).map((a) => [a.key, a.run])));
       });
     }
+    return this.launchers.get(machine);
   }
 
   // The agent's own launcher, unless OmniSearch's resume command names another program.
-  resumeArgv(item) {
-    const launcher = this.launchers.get(item.machine)?.[item.agent];
+  resumeArgv(item, launchers) {
+    const launcher = launchers[item.agent];
     return launcher && item.argv[0] === item.agent ? [...launcher, ...item.argv.slice(1)] : item.argv;
   }
 
@@ -203,15 +205,18 @@ export default class OmniSearch extends View {
       notify({ title: "OmniSearch", body: `No resume command for ${item.agent}`, level: "warning" });
       return;
     }
+    if (this.resuming) return;
+    this.resuming = true;
+    cx.notify();
     // Closing the popup ends its tasks, so it waits for the machine's launchers first.
-    cx.spawn(async () => {
-      await this.launchersLoaded.get(item.machine);
+    cx.spawn(async (cx) => {
+      const launchers = await this.launchersOn(item.machine, cx);
       this.close();
       const tabsThere = (s) => new Set(s.tabs.map((t) => t.id));
       const space = spaces().find(
         (s) => (s.machine ?? null) === item.machine && (s.folder === item.folder || panes().some((p) => p.cwd === item.folder && tabsThere(s).has(p.tab))),
       );
-      const argv = this.resumeArgv(item);
+      const argv = this.resumeArgv(item, launchers);
       if (space) run("tab.new", { space: space.id, folder: item.folder, argv });
       else run("space.new", { folder: item.folder, argv, ...(item.machine ? { machine: item.machine } : {}) });
     });
@@ -339,7 +344,7 @@ export default class OmniSearch extends View {
           .child(div().text_size(15).font_semibold().text_color(t.foreground).mr(6).child("OmniSearch"))
           .children(MODES.map(chip))
           .child(div().flex_1())
-          .when(this.latest.size > 0, (el) => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.dim).spin(900)))
+          .when(this.latest.size > 0 || Boolean(this.resuming), (el) => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.dim).spin(900)))
           .child(div().text_size(11).text_color(t.dim).child("Tab live/sessions · Esc")),
       )
       .child(

@@ -37,7 +37,7 @@ function cx() {
     stopped: false,
     bound: [],
     bind_keys: (bindings) => (c.bound.push(...bindings), bindings.length),
-    timer: { after: (ms, fn) => c.timers.push(fn), every: () => {} },
+    timer: { after: (ms, fn) => c.timers.push(Object.assign(fn, { ms })), every: () => {} },
     spawn: (fn) => c.tasks.push(fn(c)),
     notify: () => c.notified++,
     focus_handle: () => ({ focus: () => {} }),
@@ -266,12 +266,12 @@ test("a session resumes through the agent's launcher on its machine, unless Omni
       ],
     },
   });
-  const { view, c } = await open(state);
-  key(view, c, "tab");
-  await settle(c);
   for (let i = 0; i < 3; i++) {
+    const { view, c } = await open(state);
+    key(view, c, "tab");
+    await settle(c);
+    for (let down = 0; down < i; down++) key(view, c, "down");
     await enter(c);
-    key(view, c, "down");
   }
   assert.deepEqual(state.ran.map(([, args]) => args.argv), [
     ["direct-claude", "--model", "opus", "--resume", "s-1"],
@@ -299,6 +299,41 @@ test("Enter on a session waits for the machine's launchers before starting it", 
   await drain();
   assert.deepEqual(state.ran, [["space.new", { folder: "/x", argv: ["codex-hub", "resume", "s1"] }]]);
   assert.deepEqual(state.closed, ["o1"]);
+});
+
+test("a machine that connects while the popup is open resumes through its own launcher, once however often Enter is pressed", async () => {
+  const session = { kind: "session", id: "c1", agent: "codex", session_id: "s1", title: "t", space_name: "", updated: 0, snippet: "", folder: "/x", argv: ["codex", "resume", "s1"], address: null };
+  const state = app({
+    answers: { here: ok([]), vps: (args) => ok(args.includes("--archive") ? [session] : []) },
+    launchers: { here: [], vps: [{ key: "codex", run: ["codex-hub"], installed: true }] },
+  });
+  const { view, c } = await open(state);
+  state.machines = [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }];
+  key(view, c, "tab");
+  await settle(c);
+  globalThis.__input.fire("submit", c);
+  globalThis.__input.fire("submit", c);
+  await settle(c);
+  assert.deepEqual(state.ran, [["space.new", { folder: "/x", argv: ["codex-hub", "resume", "s1"], machine: "vps" }]]);
+});
+
+test("a launcher lookup that never answers falls back to OmniSearch's resume command after a while", async () => {
+  const session = { kind: "session", id: "c1", agent: "codex", session_id: "s1", title: "t", space_name: "", updated: 0, snippet: "", folder: "/x", argv: ["codex", "resume", "s1"], address: null };
+  const state = app({ answers: { here: (args) => ok(args.includes("--archive") ? [session] : []) } });
+  state.knownAgents = () => new Promise(() => {});
+  const drain = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const view = new OmniSearch();
+  const c = cx();
+  view.init({}, c);
+  await drain();
+  key(view, c, "tab");
+  await drain();
+  globalThis.__input.fire("submit", c);
+  await drain();
+  assert.deepEqual(state.ran, []);
+  c.timers.filter((timer) => timer.ms === 5000).forEach((timer) => timer(c));
+  await drain();
+  assert.deepEqual(state.ran, [["space.new", { folder: "/x", argv: ["codex", "resume", "s1"] }]]);
 });
 
 test("a session without a resume command warns instead of starting anything", async () => {
