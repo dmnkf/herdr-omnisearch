@@ -36,6 +36,7 @@ elif command == "read":
 """
 
 CODEX_SESSION = "0199aaaa-bbbb-4ccc-8ddd-eeeeffff0001"
+ENDED_SESSION = "0199aaaa-bbbb-4ccc-8ddd-eeeeffff0003"
 # How the Herdr app starts an agent on a connected machine.
 APP_LAUNCH = '"$@"; exec "${SHELL:-sh}" -i'
 
@@ -69,7 +70,7 @@ TERMINALS = [
         parent="t1",
         status={"state": "blocked", "title": "Review the login form"},
         argv=["codex", "resume", CODEX_SESSION],
-        foreground={"pid": 52, "name": "node", "argv": ["node", "/usr/lib/codex/bin.js"], "cwd": "/repo"},
+        foreground={"pid": 52, "name": "node", "argv": ["node", "/usr/local/bin/codex", "resume", CODEX_SESSION], "cwd": "/repo"},
     ),
     terminal("t3", foreground={"pid": 63, "name": "claude", "argv": ["claude"]}),
     terminal("t4", labels={"herdr.space": "sp1", "herdr.tab": "tb1", "where": "web / 1"}, foreground={"name": "bash"}),
@@ -82,18 +83,25 @@ TERMINALS = [
         status={"state": "working", "app": "claude-code"},
         pid=100,
         argv=["sh", "-c", APP_LAUNCH, "sh", "claude"],
-        foreground={"pid": 100, "name": "sh", "argv": ["sh", "-c", APP_LAUNCH], "cwd": "/repo"},
+        foreground={"pid": 100, "name": "sh", "argv": ["sh", "-c", APP_LAUNCH, "sh", "claude"], "cwd": "/repo"},
     ),
     terminal(
         "t11",
         labels={"herdr.space": "sp1", "herdr.tab": "tb6", "where": "web / 6"},
         pid=110,
         argv=["sh", "-c", APP_LAUNCH, "sh", "codex", "--no-daemon"],
-        foreground={"pid": 110, "name": "sh", "argv": ["sh", "-c", APP_LAUNCH], "cwd": "/repo"},
+        foreground={"pid": 110, "name": "sh", "argv": ["sh", "-c", APP_LAUNCH, "sh", "codex", "--no-daemon"], "cwd": "/repo"},
+    ),
+    terminal(
+        "t12",
+        labels={"herdr.space": "sp1", "herdr.tab": "tb7", "where": "web / 7"},
+        pid=120,
+        argv=["sh", "-c", APP_LAUNCH, "sh", "codex", "resume", ENDED_SESSION],
+        foreground={"pid": 120, "name": "bash", "argv": ["/bin/bash", "-i"], "cwd": "/repo"},
     ),
 ]
 SCREENS = {"t1": "the login form rejects valid emails", "t2": "waiting for approval", "t3": "not in Herdr", "t4": "$ ls",
-           "t5": "the login form, finished", "t10": "planning the rollout", "t11": "codex ready",
+           "t5": "the login form, finished", "t10": "planning the rollout", "t11": "codex ready", "t12": "$ ",
            "vps/t9": "the login form on vps"}
 
 
@@ -180,6 +188,18 @@ class HerdrCoreTests(unittest.TestCase):
         self.assertEqual(session["argv"][:2], ["codex", "resume"])
         self.assertEqual(session["argv"][-1], CODEX_SESSION)
 
+    def test_an_agent_that_exited_leaves_its_session_to_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, codex = self.core(Path(tmp))
+            with stack:
+                write_codex_session(codex / "ended.jsonl", ENDED_SESSION, "narwhal export")
+                archive_catalog.archive_catalog_index()
+                self.app_search("--refresh")
+                live = self.app_search("narwhal")["rows"]
+                sessions = self.app_search("--archive", "narwhal")["rows"]
+        self.assertEqual([row for row in live if row["kind"] == "terminal"], [])
+        self.assertEqual([(row["session_id"], row["address"]) for row in sessions], [(ENDED_SESSION, None)])
+
     def test_an_ended_core_names_no_catalog_session(self):
         stale = {"workspace_id": "spOld", "tab_id": "tbOld", "pane_id": "t2", "agent": "codex",
                  "agent_session": {"value": CODEX_SESSION}, "agent_status": "idle", "cwd": "/repo"}
@@ -219,7 +239,7 @@ class HerdrCoreTests(unittest.TestCase):
                 "t8",
                 labels={"herdr.space": "sp1", "herdr.tab": "tb3", "where": "web / 3"},
                 argv=["direct-codex", "--yolo", "-s", "workspace-write", f"--resume={wrapped}"],
-                foreground={"pid": 88, "name": "direct-codex", "argv": ["direct-codex"], "cwd": "/repo"},
+                foreground={"pid": 88, "name": "direct-codex", "argv": ["direct-codex", "--yolo", "-s", "workspace-write", f"--resume={wrapped}"], "cwd": "/repo"},
             ),
             terminal(
                 "t9",

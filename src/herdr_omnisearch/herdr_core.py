@@ -69,8 +69,10 @@ def agent_names():
 
 
 def command_words(terminal):
-    """Every word of what the terminal runs, and the value of each `--flag=value`."""
-    argv = [*((terminal.get("foreground") or {}).get("argv") or []), *(terminal.get("argv") or [])]
+    """Every word of what runs in the terminal now, and the value of each `--flag=value`."""
+    foreground = terminal.get("foreground")
+    # Not its launch command: an agent the app started leaves a shell behind when it exits.
+    argv = (foreground.get("argv") or []) if foreground else terminal.get("argv") or []
     return [part for word in argv for part in (word, word.partition("=")[2]) if part]
 
 
