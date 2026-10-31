@@ -323,6 +323,17 @@ class HerdrCoreTests(unittest.TestCase):
         self.assertEqual(check, {"rows": [{"kind": "terminal", "address": "t2"}], "error": None})
         self.assertEqual(ended["rows"], [])
 
+    def test_a_space_name_keeps_its_slashes(self):
+        codex = ["codex"]
+        terminals = [terminal("t70", labels={"herdr.space": "sp7", "herdr.tab": "tb70", "where": "Ops / Production / 2"},
+                              argv=codex, foreground={"pid": 0, "name": "codex", "argv": codex, "cwd": "/repo"})]
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, _codex = self.core(Path(tmp), terminals, screens={"t70": "deploy window"})
+            with stack:
+                rows = self.app_search("--refresh", "production")["rows"]
+        self.assertEqual([(row["kind"], row.get("name"), row.get("address")) for row in rows],
+                         [("space", "Ops / Production", None), ("terminal", None, "t70")])
+
     def test_a_command_that_only_names_a_session_does_not_run_it(self):
         commands = {
             "t60": ["watch", "-n", "60", "rg", "-F", CODEX_SESSION, "/tmp/agent.log"],

@@ -231,7 +231,8 @@ def index_core(session_agents=None, launchers=()) -> int:
             screens[terminal["address"]] = screen_text(terminal["address"])
         except CoreError:
             continue
-        space_name = (labels.get("where") or "").split(" / ")[0]
+        # Herdr writes "<space> / <tab>"; a space name may hold " / " too.
+        space_name = (labels.get("where") or "").rsplit(" / ", 1)[0]
         spaces.setdefault(labels["herdr.space"], {
             "workspace_id": labels["herdr.space"],
             "label": space_name or labels["herdr.space"],
