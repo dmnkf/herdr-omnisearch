@@ -56,7 +56,7 @@ def session_rows(query: str, limit: int):
     for row in archive_catalog_search(query, limit):
         try:
             folder, argv = archive_resume_command(row)
-        except RuntimeError:
+        except (RuntimeError, ValueError, KeyError):
             folder, argv = row.get("cwd") or "", None
         out.append({
             "kind": "session",

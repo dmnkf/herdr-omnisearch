@@ -59,12 +59,22 @@ def reported_status(terminal):
     return status if isinstance(status, dict) else {}
 
 
+def resume_commands():
+    """Each catalogued agent's resume command as argv; a malformed one is left out."""
+    config = app_config()
+    commands = []
+    for agent in config["archive_agents"]:
+        try:
+            commands.append((agent, shlex.split(config["archive"].get(agent, {}).get("resume") or "")))
+        except ValueError:
+            continue
+    return commands
+
+
 def agent_names(launchers=()):
     """Agents by program name: the ones OmniSearch catalogs, their resume commands', and the app's launchers."""
-    config = app_config()
-    names = {agent.lower(): agent for agent in [*config["archive_agents"], *(agent for agent, _argv in launchers)]}
-    commands = [(agent, shlex.split(config["archive"].get(agent, {}).get("resume") or "")) for agent in config["archive_agents"]]
-    for agent, argv in [*commands, *launchers]:
+    names = {agent.lower(): agent for agent in [*app_config()["archive_agents"], *(agent for agent, _argv in launchers)]}
+    for agent, argv in [*resume_commands(), *launchers]:
         program = launched_program(argv)
         # `gh copilot` must not make every `gh` an agent: only agents and programs Herdr doesn't know.
         if program and (program in AGENT_PROGRAMS or program not in KNOWN_PROGRAMS):
@@ -114,9 +124,11 @@ def running_program(argv, names) -> str:
     return first
 
 
-def may_run_agent(program: str, names) -> bool:
-    """False for a shell or a program Herdr knows as something other than an agent; an unknown one may wrap one."""
-    return program in names or program in AGENT_PROGRAMS or not (program in SHELLS or program in KNOWN_PROGRAMS)
+def may_run_agent(program: str, names, launch_programs) -> bool:
+    """False for a shell or a program Herdr knows as something other than an agent, unless agents are launched with it."""
+    if program in names or program in AGENT_PROGRAMS or program in launch_programs:
+        return True
+    return not (program in SHELLS or program in KNOWN_PROGRAMS)
 
 
 def running_argv(terminal):
@@ -151,7 +163,7 @@ def live_claude_sessions():
     return live
 
 
-def terminal_pane(terminal, labels, claude, resumed, names):
+def terminal_pane(terminal, labels, claude, resumed, names, launch_programs=()):
     """A terminal as a live index pane; resumed maps the catalog's session ids among its words to their agent."""
     foreground = terminal.get("foreground") or {}
     report = reported_status(terminal)
@@ -163,7 +175,7 @@ def terminal_pane(terminal, labels, claude, resumed, names):
     else:
         program = running_program(running_argv(terminal), names)
         # `rg <session id> agent.log` names a session without running it.
-        words = command_words(terminal) if may_run_agent(program, names) else []
+        words = command_words(terminal) if may_run_agent(program, names, launch_programs) else []
         session_id = next((word for word in words if word in resumed), "")
         agent = (
             resumed.get(session_id)
@@ -220,6 +232,8 @@ def index_core(session_agents=None, launchers=()) -> int:
     sessions_by_pid = live_claude_sessions()
     resumed = session_agents([word for terminal in terminals for word in command_words(terminal)]) if session_agents else {}
     names = agent_names(launchers)
+    # `docker run … codex resume <id>` runs a session through a program Herdr knows as something else.
+    launch_programs = {program_stem(argv[0]) for _agent, argv in [*resume_commands(), *launchers] if argv} - SHELLS
     spaces = {}
     panes = []
     screens = {}
@@ -240,5 +254,5 @@ def index_core(session_agents=None, launchers=()) -> int:
         })
         foreground = terminal.get("foreground") or {}
         claude = sessions_by_pid.get(foreground.get("pid")) or sessions_by_pid.get(terminal.get("pid"))
-        panes.append(terminal_pane(terminal, labels, claude, resumed, names))
+        panes.append(terminal_pane(terminal, labels, claude, resumed, names, launch_programs))
     return store_core(list(spaces.values()), panes, screens)

@@ -336,6 +336,33 @@ class HerdrCoreTests(unittest.TestCase):
                 running = self.app_search("--running", f"codex={CODEX_SESSION}")["rows"]
         self.assertEqual(running, [])
 
+    def test_a_session_run_through_a_container_launcher_is_found_running(self):
+        boxed = ["docker", "run", "-it", "--rm", "codex-box", "codex", "resume", "-C", "/repo", CODEX_SESSION]
+        terminals = [terminal("t72", labels={"herdr.space": "sp1", "herdr.tab": "tb72", "where": "web / 1"},
+                              argv=boxed, foreground={"pid": 0, "name": "docker", "argv": boxed, "cwd": "/repo"})]
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, codex = self.core(Path(tmp), terminals, screens={"t72": "codex in a box"})
+            with stack:
+                write_codex_session(codex / "rollout.jsonl", CODEX_SESSION, "walrus schema")
+                archive_catalog.archive_catalog_index()
+                launcher = 'codex=["docker", "run", "-it", "--rm", "codex-box", "codex"]'
+                plain = self.app_search("--refresh", "--running", f"codex={CODEX_SESSION}")["rows"]
+                boxed_rows = self.app_search("--refresh", "--launcher", launcher, "--running", f"codex={CODEX_SESSION}")["rows"]
+        self.assertEqual(plain, [])
+        self.assertEqual(boxed_rows, [{"kind": "terminal", "address": "t72"}])
+
+    def test_a_malformed_resume_command_spoils_only_its_own_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, codex = self.core(Path(tmp))
+            with stack:
+                write_codex_session(codex / "rollout.jsonl", CODEX_SESSION, "walrus schema")
+                archive_catalog.archive_catalog_index()
+                settings.CONFIG_CACHE["archive"]["codex"]["resume"] = 'codex resume "{session_id}'
+                live = self.app_search("--refresh")
+                sessions = self.app_search("--archive", "walrus")
+        self.assertEqual((live["error"], [row.get("address") for row in live["rows"]]), (None, [None, "t1", "t10", "t2", "t11"]))
+        self.assertEqual([(row["session_id"], row["argv"]) for row in sessions["rows"]], [(CODEX_SESSION, None)])
+
     def test_a_space_name_keeps_its_slashes(self):
         codex = ["codex"]
         terminals = [terminal("t70", labels={"herdr.space": "sp7", "herdr.tab": "tb70", "where": "Ops / Production / 2"},
@@ -364,7 +391,7 @@ class HerdrCoreTests(unittest.TestCase):
             with stack:
                 write_codex_session(codex / "rollout.jsonl", CODEX_SESSION, "walrus schema")
                 archive_catalog.archive_catalog_index()
-                rows = self.app_search("--refresh")["rows"]
+                rows = self.app_search("--refresh", "--launcher", 'codex=["bash", "-lc", "codex"]')["rows"]
                 running = self.app_search("--running", f"codex={CODEX_SESSION}")["rows"]
         self.assertEqual([(row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"], [("t63", "codex")])
         self.assertEqual(running, [{"kind": "terminal", "address": "t63"}])
