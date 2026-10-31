@@ -258,7 +258,7 @@ class HerdrCoreTests(unittest.TestCase):
         self.assertEqual(sorted((row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"),
                          [("t52", "gemini"), ("t53", "codex")])
 
-    def test_a_script_launcher_is_known_by_its_script(self):
+    def test_a_launcher_teaches_only_the_program_it_starts_directly(self):
         commands = {
             "t41": ["node", "/opt/codex-hub.js"],
             "t42": ["python3", "/opt/claude_hub.py", "--fast"],
@@ -269,6 +269,7 @@ class HerdrCoreTests(unittest.TestCase):
             "t47": ["ls", "/repo"],
             "t48": ["node", "/opt/preload.js"],
             "t49": ["node", "/opt/loader.mjs"],
+            "t55": ["python3", "/opt/config.py"],
         }
         terminals = [
             terminal(address, labels={"herdr.space": "sp1", "herdr.tab": address, "where": "web / 1"},
@@ -278,6 +279,9 @@ class HerdrCoreTests(unittest.TestCase):
         launchers = [
             'codex=["env", "NODE_OPTIONS=--max-old-space-size=4096", "/usr/bin/node", "/opt/codex-hub.js"]',
             "claude=/opt/claude_hub.py",
+            'codex=["node", "--eval=//node.js", "/opt/preload.js"]',
+            'codex=["node", "/opt/team=blue/hub.js", "/opt/config.py"]',
+            'codex=["sh", "-c", "exec node /opt/codex-hub.js \\"$@\\"", "sh", "/opt/config.py"]',
             'codex=["uv", "run", "--with", "x", "codex"]',
             'claude=["env", "/bin/bash", "-lc", "claude"]',
             'pi=["node", "--require", "/opt/preload.js", "/opt/pi.js"]',
@@ -290,7 +294,7 @@ class HerdrCoreTests(unittest.TestCase):
             with stack:
                 rows = self.app_search("--refresh", *(arg for launcher in launchers for arg in ("--launcher", launcher)))["rows"]
         self.assertEqual(sorted((row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"),
-                         [("t41", "codex"), ("t42", "claude")])
+                         [("t42", "claude")])
 
     def test_a_shell_in_a_resume_command_makes_no_terminal_an_agent(self):
         with tempfile.TemporaryDirectory() as tmp:

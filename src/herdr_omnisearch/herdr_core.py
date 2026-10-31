@@ -73,21 +73,10 @@ def agent_names(launchers=()):
 
 
 def launched_program(argv) -> str:
-    """The program a launch command starts: its first word, or a script an interpreter runs straight away."""
-    after_interpreter = False
-    for word in unwrap_launch(list(argv)):
-        stem = program_stem(word)
-        if "=" in word and not word.startswith("-"):
-            continue
-        if stem in INTERPRETERS:
-            after_interpreter = True
-            continue
-        # A shell leaves the program unclear; after an interpreter only a script file is one, and an option
-        # (`--require=/opt/preload.js`) may carry a script of its own.
-        if stem in SHELLS or (after_interpreter and (word.startswith("-") or program_name(word) == stem)):
-            return ""
-        return stem
-    return ""
+    """The program a launch command starts directly; none when a shell or an interpreter starts it."""
+    # Reading further into a command line guesses: an option, a path or a script argument can look like a program.
+    stem = program_stem(argv[0]) if argv and not argv[0].startswith("-") else ""
+    return "" if stem in SHELLS or stem in INTERPRETERS else stem
 
 
 def program_name(word: str) -> str:
