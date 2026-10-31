@@ -245,6 +245,7 @@ class HerdrCoreTests(unittest.TestCase):
             "t52": ["node", "/root/.npm/bin/gemini"],
             "t53": ["uv", "pip", "install", "codex"],
             "t54": ["env", "npx", "codex"],
+            "t56": ["cursor-agent", "--resume"],
         }
         terminals = [
             terminal(address, labels={"herdr.space": "sp1", "herdr.tab": address, "where": "web / 1"},
@@ -254,9 +255,10 @@ class HerdrCoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             stack, _codex = self.core(Path(tmp), terminals, screens={address: "prompt" for address in commands})
             with stack:
-                rows = self.app_search("--refresh", "--launcher", 'copilot=["gh", "copilot"]', "--launcher", "gemini=npx")["rows"]
+                rows = self.app_search("--refresh", "--launcher", 'copilot=["gh", "copilot"]', "--launcher", "gemini=npx",
+                                       "--launcher", 'cursor=["cursor-agent"]')["rows"]
         self.assertEqual(sorted((row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"),
-                         [("t52", "gemini"), ("t53", "codex")])
+                         [("t52", "gemini"), ("t53", "codex"), ("t56", "cursor")])
 
     def test_a_launcher_teaches_only_the_program_it_starts_directly(self):
         commands = {
@@ -270,10 +272,13 @@ class HerdrCoreTests(unittest.TestCase):
             "t48": ["node", "/opt/preload.js"],
             "t49": ["node", "/opt/loader.mjs"],
             "t55": ["python3", "/opt/config.py"],
+            "t57": ["/opt/claude_hub.py", "--fast"],
         }
+        # A script's process is named after its interpreter.
+        names = {"t57": "python3"}
         terminals = [
             terminal(address, labels={"herdr.space": "sp1", "herdr.tab": address, "where": "web / 1"},
-                     argv=argv, foreground={"pid": 0, "name": Path(argv[0]).name, "argv": argv, "cwd": "/repo"})
+                     argv=argv, foreground={"pid": 0, "name": names.get(address, Path(argv[0]).name), "argv": argv, "cwd": "/repo"})
             for address, argv in commands.items()
         ]
         launchers = [
@@ -294,7 +299,7 @@ class HerdrCoreTests(unittest.TestCase):
             with stack:
                 rows = self.app_search("--refresh", *(arg for launcher in launchers for arg in ("--launcher", launcher)))["rows"]
         self.assertEqual(sorted((row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"),
-                         [("t42", "claude")])
+                         [("t42", "claude"), ("t57", "claude")])
 
     def test_a_shell_in_a_resume_command_makes_no_terminal_an_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -303,6 +308,20 @@ class HerdrCoreTests(unittest.TestCase):
                 settings.CONFIG_CACHE["archive"]["codex"]["resume"] = "bash -lc 'codex resume {session_id}'"
                 rows = self.app_search("--refresh")["rows"]
         self.assertEqual([row["address"] for row in rows if row["kind"] == "terminal"], ["t1", "t10", "t2", "t11"])
+
+    def test_a_session_cataloged_after_the_last_refresh_is_found_running_before_it_resumes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, codex = self.core(Path(tmp))
+            with stack:
+                write_codex_session(codex / "rollout.jsonl", CODEX_SESSION, "walrus schema")
+                self.app_search("--refresh")
+                archive_catalog.archive_catalog_index()
+                listed = self.app_search("--archive", "walrus")["rows"]
+                check = self.app_search("--refresh", "--running", f"codex={CODEX_SESSION}")
+                ended = self.app_search("--refresh", "--running", f"codex={ENDED_SESSION}")
+        self.assertEqual([row["address"] for row in listed], [None])
+        self.assertEqual(check, {"rows": [{"kind": "terminal", "address": "t2"}], "error": None})
+        self.assertEqual(ended["rows"], [])
 
     def test_an_agent_that_exited_leaves_its_session_to_resume(self):
         with tempfile.TemporaryDirectory() as tmp:

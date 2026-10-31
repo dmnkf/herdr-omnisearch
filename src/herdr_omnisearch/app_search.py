@@ -74,8 +74,8 @@ def session_rows(query: str, limit: int):
     return out
 
 
-def app_search(query: str, *, archive: bool, refresh: bool, limit: int, launchers=()):
-    """Rows for the Herdr app's mod: herdr-core terminals, or old sessions; launchers are its (agent, program) pairs."""
+def app_search(query: str, *, archive: bool, refresh: bool, limit: int, launchers=(), running=None):
+    """Rows for the Herdr app's mod: herdr-core terminals, or old sessions; launchers are its (agent, argv) pairs."""
     errors = []
     if refresh:
         try:
@@ -84,7 +84,10 @@ def app_search(query: str, *, archive: bool, refresh: bool, limit: int, launcher
             errors.append(str(exc))
         if app_config()["archive_enabled"]:
             maybe_background_archive_catalog_index("", CATALOG_STALE_SECONDS)
-    if archive and not app_config()["archive_enabled"]:
+    if running:
+        address = live_addresses().get(running)
+        rows = [{"kind": "terminal", "address": address}] if address else []
+    elif archive and not app_config()["archive_enabled"]:
         errors.append("archive search is off: set enabled = true under [archive] in OmniSearch's config.ini")
         rows = []
     else:

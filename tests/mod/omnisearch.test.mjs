@@ -361,6 +361,37 @@ test("a launcher list that came after the wait gave up is used for the next resu
   assert.deepEqual(state.ran, [["space.new", { folder: "/x", argv: ["codex-hub", "resume", "s1"] }]]);
 });
 
+test("Enter on a session a terminal runs by now focuses that terminal instead of starting it again", async () => {
+  const session = { kind: "session", id: "c1", agent: "codex", session_id: "s1", title: "t", space_name: "", updated: 0, snippet: "", folder: "/x", argv: ["codex", "resume", "s1"], address: null };
+  const state = app({
+    answers: { here: (args) => (args.includes("--running") ? ok([{ kind: "terminal", address: "t9" }]) : ok(args.includes("--archive") ? [session] : [])) },
+    agents: [{ address: "t9" }],
+  });
+  const { view, c } = await open(state);
+  key(view, c, "tab");
+  await settle(c);
+  await enter(c);
+  assert.deepEqual(state.calls.at(-1).args, ["app-search", "--refresh", "--limit", "0", "--running", "codex=s1"]);
+  assert.deepEqual(state.ran, [["agent.focus", { terminal: "t9" }]]);
+});
+
+test("a check that fails still resumes the session", async () => {
+  const session = { kind: "session", id: "c1", agent: "codex", session_id: "s1", title: "t", space_name: "", updated: 0, snippet: "", folder: "/x", argv: ["codex", "resume", "s1"], address: null };
+  const state = app({
+    answers: {
+      here: (args) => {
+        if (args.includes("--running")) throw new Error("exec timed out after 30 s");
+        return ok(args.includes("--archive") ? [session] : []);
+      },
+    },
+  });
+  const { view, c } = await open(state);
+  key(view, c, "tab");
+  await settle(c);
+  await enter(c);
+  assert.deepEqual(state.ran, [["space.new", { folder: "/x", argv: ["codex", "resume", "s1"] }]]);
+});
+
 test("a session without a resume command warns instead of starting anything", async () => {
   const session = { kind: "session", id: "a1", agent: "pi", session_id: "s-3", title: "t", space_name: "", updated: 0, snippet: "", folder: "/x", argv: null, address: null };
   const state = app({ answers: { here: (args) => ok(args.includes("--archive") ? [session] : []) } });

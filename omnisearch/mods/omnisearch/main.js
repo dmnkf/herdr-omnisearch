@@ -28,6 +28,9 @@ function ago(seconds) {
   return `${Math.round(s / 86400)}d`;
 }
 
+// Agents the app starts through a launcher of their own are known by that program's name.
+const launcherArgs = (launchers) => Object.entries(launchers).flatMap(([agent, run]) => ["--launcher", `${agent}=${JSON.stringify(run)}`]);
+
 function answer(r) {
   if (r.code !== 0) return { rows: [], error: (r.stderr || r.stdout).trim().split("\n").pop() || `exit ${r.code}` };
   try {
@@ -123,8 +126,7 @@ export default class OmniSearch extends View {
   refresh(cx) {
     for (const machine of this.targets()) {
       cx.spawn(async (cx) => {
-        // Agents the app starts through a launcher of their own are known by that program's name.
-        const launchers = Object.entries(await this.launchersOn(machine, cx)).flatMap(([agent, run]) => ["--launcher", `${agent}=${JSON.stringify(run)}`]);
+        const launchers = launcherArgs(await this.launchersOn(machine, cx));
         try {
           this.refreshErrors.set(machine, answer(await exec(CLI, ["app-search", "--refresh", "--limit", "0", ...launchers], { on: machine })).error);
         } catch (e) {
@@ -216,7 +218,14 @@ export default class OmniSearch extends View {
     // Closing the popup ends its tasks, so it waits for the machine's launchers first.
     cx.spawn(async (cx) => {
       const launchers = await this.launchersOn(item.machine, cx);
+      // The list can be a refresh behind the catalog: ask again, so a running session is focused, never started twice.
+      let running = null;
+      try {
+        const check = ["app-search", "--refresh", "--limit", "0", "--running", `${item.agent}=${item.session_id}`, ...launcherArgs(launchers)];
+        running = answer(await exec(CLI, check, { on: item.machine })).rows.find((r) => r.address)?.address;
+      } catch {}
       this.close();
+      if (running) return this.focusTerminal(item.machine, running, null);
       const tabsThere = (s) => new Set(s.tabs.map((t) => t.id));
       const space = spaces().find(
         (s) => (s.machine ?? null) === item.machine && (s.folder === item.folder || panes().some((p) => p.cwd === item.folder && tabsThere(s).has(p.tab))),
