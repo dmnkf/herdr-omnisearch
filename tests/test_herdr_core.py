@@ -323,6 +323,19 @@ class HerdrCoreTests(unittest.TestCase):
         self.assertEqual(check, {"rows": [{"kind": "terminal", "address": "t2"}], "error": None})
         self.assertEqual(ended["rows"], [])
 
+    def test_a_terminal_claims_the_session_it_runs_now_not_the_one_it_was_launched_with(self):
+        launched = ["codex", "resume", CODEX_SESSION]
+        terminals = [terminal("t71", labels={"herdr.space": "sp1", "herdr.tab": "tb71", "where": "web / 1"},
+                              argv=launched, foreground={"pid": 0, "name": "codex", "argv": ["codex"], "cwd": "/repo"})]
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, codex = self.core(Path(tmp), terminals, screens={"t71": "new chat"})
+            with stack:
+                write_codex_session(codex / "rollout.jsonl", CODEX_SESSION, "walrus schema")
+                archive_catalog.archive_catalog_index()
+                self.app_search("--refresh")
+                running = self.app_search("--running", f"codex={CODEX_SESSION}")["rows"]
+        self.assertEqual(running, [])
+
     def test_a_space_name_keeps_its_slashes(self):
         codex = ["codex"]
         terminals = [terminal("t70", labels={"herdr.space": "sp7", "herdr.tab": "tb70", "where": "Ops / Production / 2"},
