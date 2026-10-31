@@ -12,6 +12,9 @@ HC_TIMEOUT_SECONDS = 10
 CLAUDE_STATUS = {"busy": "working", "waiting": "blocked", "idle": "idle"}
 REPORTED_STATES = {"error": "blocked"}
 TITLE_MARKS = re.compile(r"^[^\w(\[]+")
+# Herdr's program table looks past these to what they run (herdr-app defaults/programs.json).
+SHELLS = {"zsh", "bash", "fish", "sh", "dash", "nu", "pwsh", "powershell", "cmd", "elvish", "xonsh", "tcsh", "csh", "ksh", "ion"}
+INTERPRETERS = {"node", "bun", "bunx", "deno", "python", "python3", "npx", "pnpm", "yarn", "uv", "uvx", "ruby", "bundle", "env", "sudo", "nice", "time", "watch", "nodemon"}
 
 
 class CoreError(RuntimeError):
@@ -62,18 +65,37 @@ def agent_names():
     names = {}
     for agent in config["archive_agents"]:
         names[agent] = agent
-        resume = shlex.split(config["archive"].get(agent, {}).get("resume") or "")
-        if resume:
-            names.setdefault(Path(resume[0]).name, agent)
+        for name in program_names(shlex.split(config["archive"].get(agent, {}).get("resume") or "")):
+            if name not in SHELLS | INTERPRETERS:
+                names.setdefault(name, agent)
     return names
+
+
+def program_names(argv):
+    """The programs a command runs: past a shell's `-c '"$@"…' $0` wrapper, and past an interpreter to its script."""
+    names = []
+    words = list(argv)
+    while words and len(names) < 4:
+        name = Path(words[0]).name
+        names.append(name)
+        if name in SHELLS and len(words) > 4 and words[1].startswith("-") and words[1].endswith("c"):
+            words = words[4:]
+        elif name in INTERPRETERS:
+            words = [word for word in words[1:] if not word.startswith("-") and "=" not in word]
+        else:
+            break
+    return names
+
+
+def running_argv(terminal):
+    foreground = terminal.get("foreground")
+    # Not its launch command: an agent the app started leaves a shell behind when it exits.
+    return (foreground.get("argv") or []) if foreground else terminal.get("argv") or []
 
 
 def command_words(terminal):
     """Every word of what runs in the terminal now, and the value of each `--flag=value`."""
-    foreground = terminal.get("foreground")
-    # Not its launch command: an agent the app started leaves a shell behind when it exits.
-    argv = (foreground.get("argv") or []) if foreground else terminal.get("argv") or []
-    return [part for word in argv for part in (word, word.partition("=")[2]) if part]
+    return [part for word in running_argv(terminal) for part in (word, word.partition("=")[2]) if part]
 
 
 def live_claude_sessions():
@@ -108,8 +130,7 @@ def terminal_pane(terminal, labels, claude, resumed, names):
         session_id, agent = claude["sessionId"], "claude"
     else:
         session_id = next((word for word in command_words(terminal) if word in resumed), "")
-        # The app starts an agent as `sh -c '"$@"; exec $SHELL -i' sh <agent> ...`: its name is a word further in.
-        programs = [report.get("app") or "", foreground.get("name") or "", *(Path(word).name for word in command_words(terminal))]
+        programs = [report.get("app") or "", foreground.get("name") or "", *program_names(running_argv(terminal))]
         agent = resumed.get(session_id) or next((names[name] for name in programs if name in names), report.get("app") or "")
     address = terminal["address"]
     return {

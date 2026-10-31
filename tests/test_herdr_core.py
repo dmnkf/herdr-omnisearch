@@ -93,6 +93,12 @@ TERMINALS = [
         foreground={"pid": 110, "name": "sh", "argv": ["sh", "-c", APP_LAUNCH, "sh", "codex", "--no-daemon"], "cwd": "/repo"},
     ),
     terminal(
+        "t13",
+        labels={"herdr.space": "sp1", "herdr.tab": "tb8", "where": "web / 8"},
+        argv=["/bin/bash"],
+        foreground={"pid": 130, "name": "nvim", "argv": ["nvim", "/root/src/codex"], "cwd": "/repo"},
+    ),
+    terminal(
         "t12",
         labels={"herdr.space": "sp1", "herdr.tab": "tb7", "where": "web / 7"},
         pid=120,
@@ -101,7 +107,7 @@ TERMINALS = [
     ),
 ]
 SCREENS = {"t1": "the login form rejects valid emails", "t2": "waiting for approval", "t3": "not in Herdr", "t4": "$ ls",
-           "t5": "the login form, finished", "t10": "planning the rollout", "t11": "codex ready", "t12": "$ ",
+           "t5": "the login form, finished", "t10": "planning the rollout", "t11": "codex ready", "t12": "$ ", "t13": "editing the login form notes",
            "vps/t9": "the login form on vps"}
 
 
@@ -187,6 +193,14 @@ class HerdrCoreTests(unittest.TestCase):
                          ("session", "codex", CODEX_SESSION, "web", "t2"))
         self.assertEqual(session["argv"][:2], ["codex", "resume"])
         self.assertEqual(session["argv"][-1], CODEX_SESSION)
+
+    def test_a_shell_in_a_resume_command_makes_no_terminal_an_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, _codex = self.core(Path(tmp))
+            with stack:
+                settings.CONFIG_CACHE["archive"]["codex"]["resume"] = "bash -lc 'codex resume {session_id}'"
+                rows = self.app_search("--refresh")["rows"]
+        self.assertEqual([row["address"] for row in rows if row["kind"] == "terminal"], ["t1", "t10", "t2", "t11"])
 
     def test_an_agent_that_exited_leaves_its_session_to_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
