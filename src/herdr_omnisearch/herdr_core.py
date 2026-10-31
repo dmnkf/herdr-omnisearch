@@ -4,6 +4,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from .herdr_programs import INTERPRETERS, KNOWN_PROGRAMS, SHELLS
 from .live_index import STATUS_WEIGHT, claude_sessions, store_session
 from .settings import app_config, core_session_key
 from .storage import app_db_path
@@ -12,11 +13,8 @@ HC_TIMEOUT_SECONDS = 10
 CLAUDE_STATUS = {"busy": "working", "waiting": "blocked", "idle": "idle"}
 REPORTED_STATES = {"error": "blocked"}
 TITLE_MARKS = re.compile(r"^[^\w(\[]+")
-# Herdr's program table looks past these to what they run (herdr-app defaults/programs.json).
 SCRIPT_EXTENSIONS = (".js", ".mjs", ".cjs", ".ts", ".py", ".rb")
-FISH_LAUNCH = "command $argv[2..]; exec $argv[1] -i"
-SHELLS = {"zsh", "bash", "fish", "sh", "dash", "nu", "pwsh", "powershell", "cmd", "elvish", "xonsh", "tcsh", "csh", "ksh", "ion"}
-INTERPRETERS = {"node", "bun", "bunx", "deno", "python", "python3", "npx", "pnpm", "yarn", "uv", "uvx", "ruby", "bundle", "env", "sudo", "nice", "time", "watch", "nodemon"}
+FISH_LAUNCH = "command $argv[2..]; exec $argv[1] -"
 
 
 class CoreError(RuntimeError):
@@ -61,24 +59,31 @@ def reported_status(terminal):
     return status if isinstance(status, dict) else {}
 
 
-def agent_names():
-    """The agents OmniSearch catalogs, by program name: each agent's own and its resume command's."""
+def agent_names(launchers=()):
+    """Agents by program name: the ones OmniSearch catalogs, their resume commands', and the app's launchers."""
     config = app_config()
     names = {}
+    programs = [(agent, agent) for agent in config["archive_agents"]]
     for agent in config["archive_agents"]:
-        names[agent] = agent
         resume = unwrap_launch(shlex.split(config["archive"].get(agent, {}).get("resume") or ""))
-        program = Path(resume[0]).name if resume else ""
-        if program and program not in SHELLS | INTERPRETERS:
-            names.setdefault(program, agent)
+        programs += [(agent, resume[0])] if resume else []
+    for agent, program in [*programs, *launchers]:
+        name = program_name(program)
+        if name and name not in SHELLS | INTERPRETERS:
+            names.setdefault(name, agent)
     return names
+
+
+def program_name(word: str) -> str:
+    # A login shell's argv[0] is `-zsh`.
+    return Path(word).name.lstrip("-").lower()
 
 
 def unwrap_launch(argv):
     """The command inside the app's `sh -c '"$@"; exec "$0" -i' sh <command>` wrapper, or argv itself."""
     while (
-        len(argv) > 4 and Path(argv[0]).name in SHELLS and argv[1].startswith("-") and argv[1].endswith("c")
-        and ('"$@"' in argv[2] or argv[2] == FISH_LAUNCH)
+        len(argv) > 4 and program_name(argv[0]) in SHELLS and argv[1].startswith("-") and argv[1].endswith("c")
+        and ('"$@"' in argv[2] or argv[2].startswith(FISH_LAUNCH))
     ):
         argv = argv[4:]
     return argv
@@ -89,13 +94,18 @@ def program_agent(argv, names) -> str:
     argv = unwrap_launch(list(argv))
     if not argv:
         return ""
-    first = Path(argv[0]).name
+    first = program_name(argv[0])
     if first in INTERPRETERS:
+        # The first program Herdr knows that the interpreter runs: an agent, or something else.
         for word in argv[1:]:
-            name = Path(word).name
+            if word.startswith("-"):
+                continue
+            name = program_name(word)
             stem = next((name[: -len(ext)] for ext in SCRIPT_EXTENSIONS if name.endswith(ext)), name)
-            if not word.startswith("-") and stem in names:
+            if stem in names:
                 return names[stem]
+            if stem in KNOWN_PROGRAMS:
+                return ""
     return names.get(first, "")
 
 
@@ -144,9 +154,9 @@ def terminal_pane(terminal, labels, claude, resumed, names):
         session_id = next((word for word in command_words(terminal) if word in resumed), "")
         agent = (
             resumed.get(session_id)
-            or names.get(report.get("app") or "")
+            or names.get((report.get("app") or "").lower())
             or program_agent(running_argv(terminal), names)
-            or names.get(foreground.get("name") or "")
+            or names.get(program_name(foreground.get("name") or ""))
             or report.get("app")
             or ""
         )
@@ -185,7 +195,7 @@ def store_core(spaces, panes, screens) -> int:
     )
 
 
-def index_core(session_agents=None) -> int:
+def index_core(session_agents=None, launchers=()) -> int:
     """Index the terminals the Herdr app shows here; session_agents names the agent of any session id in their commands."""
     try:
         terminals = core_terminals()
@@ -196,7 +206,7 @@ def index_core(session_agents=None) -> int:
     by_address = {terminal["address"]: terminal for terminal in terminals}
     sessions_by_pid = live_claude_sessions()
     resumed = session_agents([word for terminal in terminals for word in command_words(terminal)]) if session_agents else {}
-    names = agent_names()
+    names = agent_names(launchers)
     spaces = {}
     panes = []
     screens = {}

@@ -478,6 +478,7 @@ The package is split by responsibility, lower layers never import higher ones:
 - `textmatch.py` tokenizing, fuzzy matching, FTS query building
 - `live_index.py` live pane indexing and search
 - `herdr_core.py` herdr-core terminals as live index panes
+- `herdr_programs.py` Herdr's program table names, shells and interpreters
 - `opencode_history.py` OpenCode session listing and export
 - `archive_sources.py` agent history listing and transcript parsing, one entry per format
 - `archive_maintenance.py` catalog layout upgrade, prune and absent-session export

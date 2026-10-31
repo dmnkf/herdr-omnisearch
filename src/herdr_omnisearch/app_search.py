@@ -74,12 +74,12 @@ def session_rows(query: str, limit: int):
     return out
 
 
-def app_search(query: str, *, archive: bool, refresh: bool, limit: int):
-    """Rows for the Herdr app's OmniSearch mod: herdr-core terminals, or old sessions to resume."""
+def app_search(query: str, *, archive: bool, refresh: bool, limit: int, launchers=()):
+    """Rows for the Herdr app's mod: herdr-core terminals, or old sessions; launchers are its (agent, program) pairs."""
     errors = []
     if refresh:
         try:
-            index_core(archive_catalog_session_agents)
+            index_core(archive_catalog_session_agents, launchers)
         except CoreError as exc:
             errors.append(str(exc))
         if app_config()["archive_enabled"]:

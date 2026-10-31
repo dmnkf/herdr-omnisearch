@@ -204,6 +204,13 @@ class HerdrCoreTests(unittest.TestCase):
             "t25": ["bash", "-lc", 'nvim "$1"; exec bash -i', "bash", "/root/src/codex"],
             "t26": ["uv", "run", "pytest"],
             "t27": ["nvim", "/root/src/codex"],
+            "t28": ["uv", "run", "pytest", "tests/codex"],
+            "t29": ["sh", "-c", APP_LAUNCH, "sh", "env", "nvim", "/root/src/codex"],
+            "t30": ["node", "--inspect", "/opt/codex/bin/Codex.js"],
+            "t31": ["-bash", "-ic", APP_LAUNCH, "-bash", "env", "FOO=1", "codex"],
+            "t32": ["python3", "-m", "pytest", "/root/src/codex"],
+            "t33": ["npx", "vitest", "run", "src/codex"],
+            "t34": ["fish", "-lic", "command $argv[2..]; exec $argv[1] -li", "fish", "codex"],
         }
         terminals = [
             terminal(address, labels={"herdr.space": "sp1", "herdr.tab": address, "where": "web / 1"},
@@ -216,7 +223,20 @@ class HerdrCoreTests(unittest.TestCase):
                 settings.CONFIG_CACHE["archive"]["codex"]["resume"] = "uv run codex resume {session_id}"
                 rows = self.app_search("--refresh")["rows"]
         self.assertEqual(sorted((row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"),
-                         [("t20", "codex"), ("t21", "codex"), ("t22", "codex"), ("t23", "codex"), ("t24", "codex")])
+                         [("t20", "codex"), ("t21", "codex"), ("t22", "codex"), ("t23", "codex"), ("t24", "codex"),
+                          ("t30", "codex"), ("t31", "codex"), ("t34", "codex")])
+
+    def test_an_agent_started_through_the_apps_launcher_is_known_by_that_name(self):
+        hub = ["sh", "-c", APP_LAUNCH, "sh", "codex-hub", "--profile", "work"]
+        terminals = [terminal("t40", labels={"herdr.space": "sp1", "herdr.tab": "tb40", "where": "web / 1"},
+                              argv=hub, foreground={"pid": 400, "name": "sh", "argv": hub, "cwd": "/repo"})]
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, _codex = self.core(Path(tmp), terminals, screens={"t40": "codex hub ready"})
+            with stack:
+                unknown = self.app_search("--refresh")["rows"]
+                known = self.app_search("--refresh", "--launcher", "codex=codex-hub", "--launcher", "pi=sh")["rows"]
+        self.assertEqual(unknown, [])
+        self.assertEqual([(row["address"], row["agent"]) for row in known if row["kind"] == "terminal"], [("t40", "codex")])
 
     def test_a_shell_in_a_resume_command_makes_no_terminal_an_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
