@@ -35,7 +35,7 @@ This file is the brief: enough to build OmniSearch from an empty folder. The fil
   - **A terminal without a pane:** `agent.focus` for a reporting agent, `terminal.peek` for anything else.
   - **A space:** `space.select`.
   - **A session running now:** focuses its terminal, as above.
-  - **Any other session:** `tab.new` with its resume command, in the space already on its folder on that machine. Without such a space, `space.new` on that machine.
+  - **Any other session:** `tab.new` with its resume command, in the space already on its folder on that machine. Without such a space, `space.new` on that machine. The command starts through the person's own launcher for that agent on that machine (`knownAgents({ on })`, from `programs.json` `run`, installed ones only): `["codex-hub"]` turns `codex resume -C /repo <id>` into `codex-hub resume -C /repo <id>`. OmniSearch's resume command is kept as it is when it names another program than the agent.
   - **A session with no resume command:** a warning toast instead.
 - Esc closes the popup.
 
@@ -60,7 +60,9 @@ This file is the brief: enough to build OmniSearch from an empty folder. The fil
 - **`herdr-omnisearch`** comes from https://github.com/dmnkf/herdr-omnisearch, installed with `uv tool install git+https://github.com/dmnkf/herdr-omnisearch`:
   - It reads this machine's herdr-core terminals with `hc ls`, `hc get` and `hc read --lines 0 --json`, and leaves out a connected machine's (`vps/t7`): that machine indexes its own.
   - It keeps them in `app-index.sqlite3`, apart from the Herdr plugin's `index.sqlite3`, so any plugin version on the same machine leaves them alone. The session catalog is shared.
-  - It finds each Claude Code terminal's session through `~/.claude/sessions/<pid>.json`.
+  - It finds each Claude Code terminal's session through `~/.claude/sessions/<pid>.json`, by Claude's pid or its parent's: the app starts an agent under a shell (`sh -c '"$@"; exec $SHELL -i' sh claude ...` on a connected machine, `$SHELL -ic ...` here), so the terminal's own pid is that shell.
+  - Any other running session is found by its id: a word of the terminal's command, or the value of a `--flag=value`, that the session catalog knows. No agent's resume syntax is built in, so wrappers work too.
+  - The agent of a terminal is the first program name in its command that is an agent OmniSearch catalogs, or the program its resume command names (`[archive.<agent>] resume`). Agents that report their status name themselves.
   - It searches screens and transcripts with SQLite full-text search and typo-tolerant matching.
 
 ## Watch out

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 const { default: OmniSearch } = await import("../../omnisearch/mods/omnisearch/main.js");
 
-function app({ machines = [{ name: null, layout: "ready" }], answers = {}, panes = [], agents = [], spaces = [] } = {}) {
+function app({ machines = [{ name: null, layout: "ready" }], answers = {}, panes = [], agents = [], spaces = [], launchers = {} } = {}) {
   const state = {
     machines,
     panes,
@@ -13,6 +13,11 @@ function app({ machines = [{ name: null, layout: "ready" }], answers = {}, panes
     notified: [],
     closed: [],
     calls: [],
+    knownAgents: async (options) => {
+      const machine = options.on ?? "here";
+      if (!(machine in launchers)) throw new Error("unreachable");
+      return launchers[machine];
+    },
     exec: async (command, args, options) => {
       state.calls.push({ command, args, on: options.on });
       const answer = answers[options.on ?? "here"];
@@ -241,6 +246,33 @@ test("results of a superseded search never replace newer ones", async () => {
   const text = view.render().text();
   assert.match(text, /newer/);
   assert.doesNotMatch(text, /older/);
+});
+
+test("a session resumes through the agent's launcher on its machine, unless OmniSearch names another program", async () => {
+  const session = (agent, argv) => ({ kind: "session", id: agent, agent, session_id: "s-1", title: agent, space_name: "", updated: 0, snippet: "", folder: "/srv", argv, address: null });
+  const state = app({
+    machines: [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }],
+    answers: { vps: (args) => ok(args.includes("--archive") ? [session("claude", ["claude", "--resume", "s-1"]), session("codex", ["direct-codex", "resume", "s-1"]), session("opencode", ["opencode", "--session", "s-1"])] : []) },
+    launchers: {
+      vps: [
+        { key: "claude", run: ["direct-claude", "--model", "opus"], installed: true },
+        { key: "codex", run: ["codex-hub"], installed: true },
+        { key: "opencode", run: ["oc"], installed: false },
+      ],
+    },
+  });
+  const { view, c } = await open(state);
+  key(view, c, "tab");
+  await settle(c);
+  for (let i = 0; i < 3; i++) {
+    globalThis.__input.fire("submit");
+    key(view, c, "down");
+  }
+  assert.deepEqual(state.ran.map(([, args]) => args.argv), [
+    ["direct-claude", "--model", "opus", "--resume", "s-1"],
+    ["direct-codex", "resume", "s-1"],
+    ["opencode", "--session", "s-1"],
+  ]);
 });
 
 test("a session without a resume command warns instead of starting anything", async () => {

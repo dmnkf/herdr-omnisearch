@@ -96,7 +96,8 @@ resume.
 3. Press Ctrl+Shift+F.
 
 The mod runs `herdr-omnisearch app-search` on this computer and on every
-connected machine, and skips a machine that doesn't have it. Session search
+connected machine, and skips a machine that doesn't have it. A session resumes
+through the launcher the app has for that agent (`run` in its `programs.json`). Session search
 needs [archive indexing](#archive-search) turned on. How the mod works, and
 how to rebuild it, is in [omnisearch/RECIPE.md](omnisearch/RECIPE.md).
 

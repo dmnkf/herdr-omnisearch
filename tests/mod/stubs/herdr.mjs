@@ -2,6 +2,7 @@
 const h = () => globalThis.__herdr;
 
 export const exec = (command, args, options) => h().exec(command, args, options);
+export const knownAgents = (options) => h().knownAgents(options);
 export const machines = () => h().machines;
 export const panes = () => h().panes;
 export const agents = () => h().agents;

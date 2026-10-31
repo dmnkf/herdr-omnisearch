@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, machines, panes, agents, spaces, run, notify, theme, props, closeOverlay } from "herdr";
+import { exec, knownAgents, machines, panes, agents, spaces, run, notify, theme, props, closeOverlay } from "herdr";
 
 const CLI = "herdr-omnisearch";
 const INSTALL = "uv tool install git+https://github.com/dmnkf/herdr-omnisearch";
@@ -63,6 +63,7 @@ export default class OmniSearch extends View {
     this.found = new Map();
     this.errors = new Map();
     this.refreshErrors = new Map();
+    this.launchers = new Map();
     this.input = InputState.new({ placeholder: "Search terminals by what they show or said…" });
     this.input.on("change", (_e, cx) => {
       this.query = this.input.value();
@@ -79,6 +80,25 @@ export default class OmniSearch extends View {
     } catch {}
     this.searchAll(cx);
     this.refresh(cx);
+    this.loadLaunchers(cx);
+  }
+
+  // How the person starts each agent on each machine (programs.json `run`), for resuming one.
+  loadLaunchers(cx) {
+    for (const machine of this.targets()) {
+      cx.spawn(async () => {
+        try {
+          const known = await knownAgents({ on: machine });
+          this.launchers.set(machine, Object.fromEntries(known.filter((a) => a.installed).map((a) => [a.key, a.run])));
+        } catch {}
+      });
+    }
+  }
+
+  // The agent's own launcher, unless OmniSearch's resume command names another program.
+  resumeArgv(item) {
+    const launcher = this.launchers.get(item.machine)?.[item.agent];
+    return launcher && item.argv[0] === item.agent ? [...launcher, ...item.argv.slice(1)] : item.argv;
   }
 
   close() {
@@ -182,8 +202,9 @@ export default class OmniSearch extends View {
     const space = spaces().find(
       (s) => (s.machine ?? null) === item.machine && (s.folder === item.folder || panes().some((p) => p.cwd === item.folder && tabsThere(s).has(p.tab))),
     );
-    if (space) run("tab.new", { space: space.id, folder: item.folder, argv: item.argv });
-    else run("space.new", { folder: item.folder, argv: item.argv, ...(item.machine ? { machine: item.machine } : {}) });
+    const argv = this.resumeArgv(item);
+    if (space) run("tab.new", { space: space.id, folder: item.folder, argv });
+    else run("space.new", { folder: item.folder, argv, ...(item.machine ? { machine: item.machine } : {}) });
   }
 
   glyph(t, status) {
