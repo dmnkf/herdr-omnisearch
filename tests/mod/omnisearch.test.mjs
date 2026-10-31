@@ -93,6 +93,20 @@ test("a refresh that failed says why, even when the search after it answers", as
   assert.match(view.render().text(), /hc ls failed: no core/);
 });
 
+test("a refresh that timed out says so, and the list still searches again", async () => {
+  const state = app({
+    answers: {
+      here: (args) => {
+        if (args.includes("--refresh")) throw new Error("exec timed out after 30 s");
+        return ok([TERMINAL]);
+      },
+    },
+  });
+  const { view } = await open(state);
+  assert.match(view.render().text(), /fix login.*refresh failed: exec timed out after 30 s/);
+  assert.equal(state.calls.filter((call) => !call.args.includes("--refresh")).length, 2);
+});
+
 test("Tab is bound in the mod's own key context and switches to old sessions", async () => {
   const state = app({ answers: { here: ok([]) } });
   const { view, c } = await open(state);

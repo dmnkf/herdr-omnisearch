@@ -94,13 +94,12 @@ export default class OmniSearch extends View {
   refresh(cx) {
     for (const machine of this.targets()) {
       cx.spawn(async (cx) => {
-        let r;
         try {
-          r = await exec(CLI, ["app-search", "--refresh", "--limit", "0"], { on: machine });
-        } catch {
-          return;
+          this.refreshErrors.set(machine, answer(await exec(CLI, ["app-search", "--refresh", "--limit", "0"], { on: machine })).error);
+        } catch (e) {
+          // A timeout or a lost connection; a missing command shows when its search fails too.
+          this.refreshErrors.set(machine, `refresh failed: ${e?.message ?? e}`);
         }
-        this.refreshErrors.set(machine, answer(r).error);
         this.search(cx, machine);
       });
     }
