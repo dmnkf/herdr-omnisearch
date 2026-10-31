@@ -1,0 +1,4 @@
+{
+  "global": { "ctrl-shift-f": "mod.open:omnisearch" },
+  "terminal": { "ctrl-shift-f": "mod.open:omnisearch" }
+}

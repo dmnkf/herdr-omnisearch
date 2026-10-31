@@ -19,7 +19,8 @@ The name and interaction model are inspired by
 
 ## Requirements
 
-- Herdr 0.7.5 or newer (0.9.0 or newer for [multiple machines](#multiple-machines))
+- Herdr 0.7.5 or newer (0.9.0 or newer for [multiple machines](#multiple-machines)),
+  or the [Herdr app](#herdr-app) with herdr-core 0.1.15 or newer
 - Python 3.9 or newer
 - Linux or macOS
 
@@ -40,7 +41,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To install a specific release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.13.2
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.14.0
 ```
 
 GitHub plugin installation does not change `~/.config/herdr/config.toml`. Add
@@ -71,6 +72,33 @@ keys to Herdr.
 
 For local, editable, offline, and second-VM installations, see
 [INSTALL.md](INSTALL.md).
+
+## Herdr app
+
+The [Herdr app](https://herdr.dev) is a separate desktop client built on
+herdr-core, and its terminals are not Herdr's panes. OmniSearch comes to it as
+a mod: Ctrl+Shift+F opens a popup that searches the app's terminals by what
+they show or what their agent was told, and Tab switches to old sessions to
+resume.
+
+1. On each machine where your agents run, install the command:
+
+   ```bash
+   uv tool install git+https://github.com/dmnkf/herdr-omnisearch
+   ```
+
+2. In the Herdr app, ask your agent:
+
+   ```text
+   Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/dmnkf/herdr-omnisearch/tree/main/omnisearch
+   ```
+
+3. Press Ctrl+Shift+F.
+
+The mod runs `herdr-omnisearch app-search` on this computer and on every
+connected machine, and skips a machine that doesn't have it. Session search
+needs [archive indexing](#archive-search) turned on. How the mod works, and
+how to rebuild it, is in [omnisearch/RECIPE.md](omnisearch/RECIPE.md).
 
 ## Usage
 
@@ -248,7 +276,10 @@ Plugin installations store their SQLite indexes here:
 ```text
 ~/.local/state/herdr/plugins/herdr.omnisearch/index.sqlite3
 ~/.local/state/herdr/plugins/herdr.omnisearch/archive-catalog.sqlite3
+~/.local/state/herdr/plugins/herdr.omnisearch/app-index.sqlite3
 ```
+
+`app-index.sqlite3` holds the Herdr app's terminals, apart from Herdr's panes.
 
 When an archived session's history file disappears, its catalog messages move
 to the `archive-catalog-absent/` directory next to the catalog and no longer
@@ -280,7 +311,7 @@ Use `config.example.ini` as a starting point. Runtime overrides:
 
 - `HERDR_OMNISEARCH_CONFIG`: config file path
 - `HERDR_BIN`: Herdr executable; defaults to `herdr` from `PATH`
-- `HERDR_OMNISEARCH_DB` and `HERDR_OMNISEARCH_CATALOG_DB`: index paths
+- `HERDR_OMNISEARCH_DB`, `HERDR_OMNISEARCH_APP_DB` and `HERDR_OMNISEARCH_CATALOG_DB`: index paths
 - `HERDR_OMNISEARCH_COMMAND`: command used for background indexing and previews
 - `HERDR_SOCKET_PATH`: Herdr socket; named sessions can use `HERDR_SESSION`
 
@@ -445,6 +476,7 @@ The package is split by responsibility, lower layers never import higher ones:
 - `storage.py` SQLite paths, schema, repair and migration, lock files
 - `textmatch.py` tokenizing, fuzzy matching, FTS query building
 - `live_index.py` live pane indexing and search
+- `herdr_core.py` herdr-core terminals as live index panes
 - `opencode_history.py` OpenCode session listing and export
 - `archive_sources.py` agent history listing and transcript parsing, one entry per format
 - `archive_maintenance.py` catalog layout upgrade, prune and absent-session export
@@ -454,12 +486,16 @@ The package is split by responsibility, lower layers never import higher ones:
 - `navigate.py` focus and resume operations against Herdr
 - `picker.py` the native curses picker and the fzf fallback
 - `watcher.py` the background live index watcher
+- `app_search.py` the JSON rows the Herdr app mod reads
 - `cli.py` argparse commands only
+
+The Herdr app mod is `omnisearch/mods/omnisearch/main.js`.
 
 Run the tests with:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests
+node --import ./tests/mod/loader.mjs --test tests/mod/omnisearch.test.mjs
 ```
 
 The suite redirects plugin state to a temporary directory on its own.
