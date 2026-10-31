@@ -21,6 +21,7 @@ from .settings import (
     herdr_session_key,
 )
 from .storage import (
+    app_db_path,
     archive_catalog_db_path,
     connect,
     db_path,
@@ -372,6 +373,7 @@ def cmd_preview(args) -> int:
 
 def cmd_doctor(_args) -> int:
     print(f"db: {db_path()}")
+    print(f"app_db: {app_db_path()}")
     print(f"archive_catalog_db: {archive_catalog_db_path()}")
     print(f"herdr: {herdr_bin()}")
     print(f"herdr_socket: {resolve_socket_path()}")
@@ -454,15 +456,12 @@ def cmd_purge(args) -> int:
         if not any(lock_is_held(pid_file) for pid_file in data_dir().glob("watch*.pid")):
             break
         time.sleep(0.05)
-    path = db_path()
-    catalog_path = archive_catalog_db_path()
     candidates = [
-        path,
-        Path(str(path) + "-wal"),
-        Path(str(path) + "-shm"),
-        catalog_path,
-        Path(str(catalog_path) + "-wal"),
-        Path(str(catalog_path) + "-shm"),
+        Path(str(database) + suffix)
+        for database in (db_path(), app_db_path(), archive_catalog_db_path())
+        for suffix in ("", "-wal", "-shm")
+    ]
+    candidates += [
         data_dir() / "archive-catalog.lock",
         data_dir() / "machines-sync.lock",
     ]

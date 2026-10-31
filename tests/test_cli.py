@@ -1927,14 +1927,18 @@ class CliTests(unittest.TestCase):
     def test_purge_requires_confirmation_and_removes_index_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "index.sqlite3"
+            app_db = Path(tmp) / "app-index.sqlite3"
             catalog = Path(tmp) / "archive-catalog.sqlite3"
             db.write_bytes(b"index")
             Path(str(db) + "-wal").write_bytes(b"wal")
+            app_db.write_bytes(b"app index")
+            Path(str(app_db) + "-shm").write_bytes(b"shm")
             catalog.write_bytes(b"catalog")
             with patch.dict(
                 os.environ,
                 {
                     "HERDR_OMNISEARCH_DB": str(db),
+                    "HERDR_OMNISEARCH_APP_DB": str(app_db),
                     "HERDR_OMNISEARCH_CATALOG_DB": str(catalog),
                 },
                 clear=False,
@@ -1945,6 +1949,8 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(cli.cmd_purge(Namespace(yes=True)), 0)
             self.assertFalse(db.exists())
             self.assertFalse(Path(str(db) + "-wal").exists())
+            self.assertFalse(app_db.exists())
+            self.assertFalse(Path(str(app_db) + "-shm").exists())
             self.assertFalse(catalog.exists())
 
     def test_plugin_state_migration_moves_legacy_database_without_copying(self):
