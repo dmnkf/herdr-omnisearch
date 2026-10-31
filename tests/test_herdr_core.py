@@ -238,6 +238,25 @@ class HerdrCoreTests(unittest.TestCase):
         self.assertEqual(unknown, [])
         self.assertEqual([(row["address"], row["agent"]) for row in known if row["kind"] == "terminal"], [("t40", "codex")])
 
+    def test_a_script_launcher_is_known_by_its_script(self):
+        commands = {
+            "t41": ["node", "/opt/codex-hub.js"],
+            "t42": ["python3", "/opt/claude_hub.py", "--fast"],
+            "t43": ["uv", "run", "pytest"],
+        }
+        terminals = [
+            terminal(address, labels={"herdr.space": "sp1", "herdr.tab": address, "where": "web / 1"},
+                     argv=argv, foreground={"pid": 0, "name": Path(argv[0]).name, "argv": argv, "cwd": "/repo"})
+            for address, argv in commands.items()
+        ]
+        launchers = ['codex=["node", "/opt/codex-hub.js"]', "claude=/opt/claude_hub.py", 'codex=["uv", "run", "--with", "x", "codex"]']
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, _codex = self.core(Path(tmp), terminals, screens={address: "prompt" for address in commands})
+            with stack:
+                rows = self.app_search("--refresh", *(arg for launcher in launchers for arg in ("--launcher", launcher)))["rows"]
+        self.assertEqual(sorted((row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"),
+                         [("t41", "codex"), ("t42", "claude")])
+
     def test_a_shell_in_a_resume_command_makes_no_terminal_an_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
             stack, _codex = self.core(Path(tmp))

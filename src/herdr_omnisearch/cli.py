@@ -160,7 +160,12 @@ def cmd_search(args) -> int:
 def cmd_app_search(args) -> int:
     import json
     from .app_search import app_search
-    launchers = [tuple(pair.split("=", 1)) for pair in args.launcher if "=" in pair]
+    # AGENT=PROGRAM, or AGENT=["node", "/opt/hub.js"] for a whole command.
+    launchers = [
+        (agent, json.loads(command) if command.startswith("[") else [command])
+        for agent, _, command in (pair.partition("=") for pair in args.launcher)
+        if command
+    ]
     print(json.dumps(app_search(" ".join(args.query), archive=args.archive, refresh=args.refresh, limit=args.limit, launchers=launchers)))
     return 0
 
@@ -572,7 +577,7 @@ def build_parser():
     p.add_argument("--archive", action="store_true", help="search old sessions instead of live terminals")
     p.add_argument("--refresh", action="store_true", help="index herdr-core's terminals first")
     p.add_argument("--launcher", action="append", default=[], metavar="AGENT=PROGRAM",
-                   help="a program the app starts this agent with (repeatable)")
+                   help="a program, or a JSON command, the app starts this agent with (repeatable)")
     p.set_defaults(func=cmd_app_search)
 
     p = sub.add_parser("export", help="print this session's live rows as JSON for machine sync")

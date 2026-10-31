@@ -124,7 +124,7 @@ export default class OmniSearch extends View {
     for (const machine of this.targets()) {
       cx.spawn(async (cx) => {
         // Agents the app starts through a launcher of their own are known by that program's name.
-        const launchers = Object.entries(await this.launchersOn(machine, cx)).flatMap(([agent, run]) => ["--launcher", `${agent}=${run[0]}`]);
+        const launchers = Object.entries(await this.launchersOn(machine, cx)).flatMap(([agent, run]) => ["--launcher", `${agent}=${JSON.stringify(run)}`]);
         try {
           this.refreshErrors.set(machine, answer(await exec(CLI, ["app-search", "--refresh", "--limit", "0", ...launchers], { on: machine })).error);
         } catch (e) {

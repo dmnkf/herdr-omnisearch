@@ -339,7 +339,7 @@ test("a launcher lookup that never answers falls back to OmniSearch's resume com
 test("a refresh tells the machine the launchers the app starts its agents with", async () => {
   const state = app({ answers: { here: ok([]) }, launchers: { here: [{ key: "codex", run: ["codex-hub", "--profile", "work"], installed: true }, { key: "pi", run: ["pi"], installed: false }] } });
   await open(state);
-  assert.deepEqual(state.calls.find((call) => call.args.includes("--refresh")).args, ["app-search", "--refresh", "--limit", "0", "--launcher", "codex=codex-hub"]);
+  assert.deepEqual(state.calls.find((call) => call.args.includes("--refresh")).args, ["app-search", "--refresh", "--limit", "0", "--launcher", 'codex=["codex-hub","--profile","work"]']);
 });
 
 test("a launcher list that came after the wait gave up is used for the next resume", async () => {

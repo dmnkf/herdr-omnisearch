@@ -62,21 +62,33 @@ def reported_status(terminal):
 def agent_names(launchers=()):
     """Agents by program name: the ones OmniSearch catalogs, their resume commands', and the app's launchers."""
     config = app_config()
-    names = {}
-    programs = [(agent, agent) for agent in config["archive_agents"]]
-    for agent in config["archive_agents"]:
-        resume = unwrap_launch(shlex.split(config["archive"].get(agent, {}).get("resume") or ""))
-        programs += [(agent, resume[0])] if resume else []
-    for agent, program in [*programs, *launchers]:
-        name = program_name(program)
-        if name and name not in SHELLS | INTERPRETERS:
-            names.setdefault(name, agent)
+    names = {agent.lower(): agent for agent in config["archive_agents"]}
+    commands = [(agent, shlex.split(config["archive"].get(agent, {}).get("resume") or "")) for agent in config["archive_agents"]]
+    for agent, argv in [*commands, *launchers]:
+        program = launched_program(argv)
+        if program:
+            names.setdefault(program, agent)
     return names
+
+
+def launched_program(argv) -> str:
+    """The program a launch command starts: its first word, or the script an interpreter runs; never a shell."""
+    argv = unwrap_launch(list(argv))
+    first = program_stem(argv[0]) if argv else ""
+    if first in INTERPRETERS:
+        # A script is a path or a file name; `uv run codex` names no program of its own.
+        return next((program_stem(word) for word in argv[1:] if "/" in word or program_name(word) != program_stem(word)), "")
+    return "" if first in SHELLS else first
 
 
 def program_name(word: str) -> str:
     # A login shell's argv[0] is `-zsh`.
     return Path(word).name.lstrip("-").lower()
+
+
+def program_stem(word: str) -> str:
+    name = program_name(word)
+    return next((name[: -len(ext)] for ext in SCRIPT_EXTENSIONS if name.endswith(ext)), name)
 
 
 def unwrap_launch(argv):
@@ -94,14 +106,13 @@ def program_agent(argv, names) -> str:
     argv = unwrap_launch(list(argv))
     if not argv:
         return ""
-    first = program_name(argv[0])
+    first = program_stem(argv[0])
     if first in INTERPRETERS:
         # The first program Herdr knows that the interpreter runs: an agent, or something else.
         for word in argv[1:]:
             if word.startswith("-"):
                 continue
-            name = program_name(word)
-            stem = next((name[: -len(ext)] for ext in SCRIPT_EXTENSIONS if name.endswith(ext)), name)
+            stem = program_stem(word)
             if stem in names:
                 return names[stem]
             if stem in KNOWN_PROGRAMS:
@@ -156,7 +167,7 @@ def terminal_pane(terminal, labels, claude, resumed, names):
             resumed.get(session_id)
             or names.get((report.get("app") or "").lower())
             or program_agent(running_argv(terminal), names)
-            or names.get(program_name(foreground.get("name") or ""))
+            or names.get(program_stem(foreground.get("name") or ""))
             or report.get("app")
             or ""
         )

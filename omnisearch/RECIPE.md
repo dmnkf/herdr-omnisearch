@@ -45,7 +45,7 @@ This file is the brief: enough to build OmniSearch from an empty folder. The fil
 - **A `keys.json` snippet**, merged into the person's keys. It binds `ctrl-shift-f` to `mod.open:omnisearch` in both `global` and `terminal`, so it also opens while a terminal has focus.
 - **The program it runs:**
   - `exec("herdr-omnisearch", ["app-search", "--limit", "40", ...flags, "--", ...words], { on })` once per machine, with `on` null for this computer and each name from `machines()` whose layout isn't `unavailable`.
-  - The flag `--archive` searches Sessions. `["app-search", "--refresh", "--limit", "0", "--launcher", "codex=codex-hub", ...]` is the refresh, sent once per machine on opening, after that machine's launchers are known: each installed agent's `run[0]` from `knownAgents`, so an agent the app starts through a launcher of its own is known by that program's name.
+  - The flag `--archive` searches Sessions. `["app-search", "--refresh", "--limit", "0", "--launcher", 'codex=["codex-hub"]', ...]` is the refresh, sent once per machine on opening, after that machine's launchers are known: each installed agent's `run` from `knownAgents`, as JSON, so an agent the app starts through a launcher of its own is known by that program's name (or, for `["node", "/opt/hub.js"]`, by its script's).
   - It prints `{ "rows": [...], "error": null | "why" }`.
   - Live rows are `{ kind: "space", space, name }` or `{ kind: "terminal", address, space, tab, title, agent, status, snippet, cwd }`.
   - Sessions rows are `{ kind: "session", id, agent, session_id, title, space_name, updated, snippet, folder, argv, address }`. `argv` is the resume command, and `address` is the terminal running it, or null.
