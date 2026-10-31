@@ -99,23 +99,24 @@ def unwrap_launch(argv):
     return argv
 
 
-def program_agent(argv, names) -> str:
-    """The agent a command runs, read as Herdr's program table reads it (herdr-app src/programs.rs)."""
+def running_program(argv, names) -> str:
+    """The program a command runs, read as Herdr's program table reads it (herdr-app src/programs.rs)."""
     argv = unwrap_launch(list(argv))
     if not argv:
         return ""
     first = program_stem(argv[0])
     if first in INTERPRETERS:
-        # The first program Herdr knows that the interpreter runs: an agent, or something else.
+        # The first program the interpreter runs that is known: an agent, or something else.
         for word in argv[1:]:
-            if word.startswith("-"):
-                continue
             stem = program_stem(word)
-            if stem in names:
-                return names[stem]
-            if stem in KNOWN_PROGRAMS:
-                return ""
-    return names.get(first, "")
+            if not word.startswith("-") and (stem in names or stem in KNOWN_PROGRAMS):
+                return stem
+    return first
+
+
+def may_run_agent(program: str, names) -> bool:
+    """False for a shell or a program Herdr knows as something other than an agent; an unknown one may wrap one."""
+    return program in names or program in AGENT_PROGRAMS or not (program in SHELLS or program in KNOWN_PROGRAMS)
 
 
 def running_argv(terminal):
@@ -160,11 +161,14 @@ def terminal_pane(terminal, labels, claude, resumed, names):
     if claude:
         session_id, agent = claude["sessionId"], "claude"
     else:
-        session_id = next((word for word in command_words(terminal) if word in resumed), "")
+        program = running_program(running_argv(terminal), names)
+        # `rg <session id> agent.log` names a session without running it.
+        words = command_words(terminal) if may_run_agent(program, names) else []
+        session_id = next((word for word in words if word in resumed), "")
         agent = (
             resumed.get(session_id)
             or names.get((report.get("app") or "").lower())
-            or program_agent(running_argv(terminal), names)
+            or names.get(program, "")
             or names.get(program_stem(foreground.get("name") or ""))
             or report.get("app")
             or ""

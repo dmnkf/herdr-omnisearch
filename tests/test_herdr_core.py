@@ -323,6 +323,28 @@ class HerdrCoreTests(unittest.TestCase):
         self.assertEqual(check, {"rows": [{"kind": "terminal", "address": "t2"}], "error": None})
         self.assertEqual(ended["rows"], [])
 
+    def test_a_command_that_only_names_a_session_does_not_run_it(self):
+        commands = {
+            "t60": ["watch", "-n", "60", "rg", "-F", CODEX_SESSION, "/tmp/agent.log"],
+            "t61": ["grep", "-r", CODEX_SESSION, "/root/.codex"],
+            "t62": ["bash", "-c", 'echo "$1"', "bash", CODEX_SESSION],
+            "t63": ["/opt/direct-codex", f"--resume={CODEX_SESSION}"],
+        }
+        terminals = [
+            terminal(address, labels={"herdr.space": "sp1", "herdr.tab": address, "where": "web / 1"},
+                     argv=argv, foreground={"pid": 0, "name": Path(argv[0]).name, "argv": argv, "cwd": "/repo"})
+            for address, argv in commands.items()
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            stack, codex = self.core(Path(tmp), terminals, screens={address: "prompt" for address in commands})
+            with stack:
+                write_codex_session(codex / "rollout.jsonl", CODEX_SESSION, "walrus schema")
+                archive_catalog.archive_catalog_index()
+                rows = self.app_search("--refresh")["rows"]
+                running = self.app_search("--running", f"codex={CODEX_SESSION}")["rows"]
+        self.assertEqual([(row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"], [("t63", "codex")])
+        self.assertEqual(running, [{"kind": "terminal", "address": "t63"}])
+
     def test_an_agent_that_exited_leaves_its_session_to_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             stack, codex = self.core(Path(tmp))
