@@ -69,6 +69,11 @@ async function type(view, c, text) {
   await settle(c);
 }
 
+async function enter(c) {
+  globalThis.__input.fire("submit", c);
+  await settle(c);
+}
+
 function key(view, c, k) {
   view.render().handler("on_key_down")({ key: k, modifiers: {} }, c);
 }
@@ -131,7 +136,7 @@ test("moving down before anything is found still selects the first result once i
   view.init({}, c);
   key(view, c, "down");
   await settle(c);
-  globalThis.__input.fire("submit");
+  await enter(c);
   assert.deepEqual(state.ran, [["agent.focus", { terminal: "t3" }]]);
 });
 
@@ -160,9 +165,9 @@ test("Enter on a remote terminal selects its tab and focuses its pane by machine
     answers: { vps: ok([{ kind: "space", space: "sp1", name: "web" }, TERMINAL]) },
     panes: [{ pane: "p1", terminal: "vps/t3", tab: "vps/tb1" }],
   });
-  const { view } = await open(state);
+  const { view, c } = await open(state);
   assert.match(view.render().text(), /fix login.*claude.*web.*vps.*the login form/);
-  globalThis.__input.fire("submit");
+  await enter(c);
   assert.deepEqual(state.ran, [["tab.select", { id: "vps/tb1" }], ["pane.focus", { terminal: "vps/t3" }]]);
   assert.deepEqual(state.closed, ["o1"]);
 });
@@ -170,17 +175,17 @@ test("Enter on a remote terminal selects its tab and focuses its pane by machine
 test("a terminal without a pane is focused as an agent, else peeked", async () => {
   const state = app({ answers: { here: ok([TERMINAL, { ...TERMINAL, address: "t4", title: "helper" }]) }, agents: [{ address: "t3" }] });
   const { view, c } = await open(state);
-  globalThis.__input.fire("submit");
+  await enter(c);
   key(view, c, "down");
-  globalThis.__input.fire("submit");
+  await enter(c);
   assert.deepEqual(state.ran, [["agent.focus", { terminal: "t3" }], ["terminal.peek", { terminal: "t4" }]]);
 });
 
 test("a space that matched without its terminals goes to the space", async () => {
   const state = app({ answers: { here: ok([{ kind: "space", space: "sp9", name: "billing" }]) } });
-  const { view } = await open(state);
+  const { view, c } = await open(state);
   assert.match(view.render().text(), /billing/);
-  globalThis.__input.fire("submit");
+  await enter(c);
   assert.deepEqual(state.ran, [["space.select", { id: "sp9" }]]);
 });
 
@@ -196,7 +201,7 @@ test("Tab searches old sessions, and Enter resumes one in the space already open
   await settle(c);
   assert.ok(state.calls.at(-1).args.includes("--archive"));
   assert.match(view.render().text(), /web.*claude.*user: fix it/);
-  globalThis.__input.fire("submit");
+  await enter(c);
   assert.deepEqual(state.ran, [["tab.new", { space: "sp2", folder: "/repo", argv: ["claude", "--resume", "s-1"] }]]);
 });
 
@@ -209,7 +214,7 @@ test("a session resumes in the space whose folder it was in", async () => {
   const { view, c } = await open(state);
   key(view, c, "tab");
   await settle(c);
-  globalThis.__input.fire("submit");
+  await enter(c);
   assert.deepEqual(state.ran, [["tab.new", { space: "sp1", folder: "/repo", argv: ["claude", "--resume", "s-1"] }]]);
 });
 
@@ -222,9 +227,9 @@ test("a remote session with no open space starts a space on its machine, and a r
   const { view, c } = await open(state);
   key(view, c, "tab");
   await settle(c);
-  globalThis.__input.fire("submit");
+  await enter(c);
   key(view, c, "down");
-  globalThis.__input.fire("submit");
+  await enter(c);
   assert.deepEqual(state.ran, [
     ["space.new", { folder: "/srv", argv: ["codex", "resume", "s-2"], machine: "vps" }],
     ["terminal.peek", { terminal: "vps/t5" }],
@@ -265,7 +270,7 @@ test("a session resumes through the agent's launcher on its machine, unless Omni
   key(view, c, "tab");
   await settle(c);
   for (let i = 0; i < 3; i++) {
-    globalThis.__input.fire("submit");
+    await enter(c);
     key(view, c, "down");
   }
   assert.deepEqual(state.ran.map(([, args]) => args.argv), [
@@ -275,13 +280,34 @@ test("a session resumes through the agent's launcher on its machine, unless Omni
   ]);
 });
 
+test("Enter on a session waits for the machine's launchers before starting it", async () => {
+  let loaded;
+  const session = { kind: "session", id: "c1", agent: "codex", session_id: "s1", title: "t", space_name: "", updated: 0, snippet: "", folder: "/x", argv: ["codex", "resume", "s1"], address: null };
+  const state = app({ answers: { here: (args) => ok(args.includes("--archive") ? [session] : []) } });
+  state.knownAgents = () => new Promise((resolve) => (loaded = resolve));
+  const drain = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const view = new OmniSearch();
+  const c = cx();
+  view.init({}, c);
+  await drain();
+  key(view, c, "tab");
+  await drain();
+  globalThis.__input.fire("submit", c);
+  await drain();
+  assert.deepEqual([state.ran, state.closed], [[], []]);
+  loaded([{ key: "codex", run: ["codex-hub"], installed: true }]);
+  await drain();
+  assert.deepEqual(state.ran, [["space.new", { folder: "/x", argv: ["codex-hub", "resume", "s1"] }]]);
+  assert.deepEqual(state.closed, ["o1"]);
+});
+
 test("a session without a resume command warns instead of starting anything", async () => {
   const session = { kind: "session", id: "a1", agent: "pi", session_id: "s-3", title: "t", space_name: "", updated: 0, snippet: "", folder: "/x", argv: null, address: null };
   const state = app({ answers: { here: (args) => ok(args.includes("--archive") ? [session] : []) } });
   const { view, c } = await open(state);
   key(view, c, "tab");
   await settle(c);
-  globalThis.__input.fire("submit");
+  await enter(c);
   assert.deepEqual(state.ran, []);
   assert.equal(state.notified[0].body, "No resume command for pi");
 });

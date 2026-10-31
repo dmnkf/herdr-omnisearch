@@ -64,13 +64,14 @@ export default class OmniSearch extends View {
     this.errors = new Map();
     this.refreshErrors = new Map();
     this.launchers = new Map();
+    this.launchersLoaded = new Map();
     this.input = InputState.new({ placeholder: "Search terminals by what they show or said…" });
     this.input.on("change", (_e, cx) => {
       this.query = this.input.value();
       this.at = 0;
       this.schedule(cx);
     });
-    this.input.on("submit", () => this.go(this.list()[this.at]));
+    this.input.on("submit", (_e, cx) => this.go(this.list()[this.at], cx));
     this.input.focus();
     cx.timer.after(600, () => this.input.focus());
     this.handle = cx.focus_handle();
@@ -86,11 +87,14 @@ export default class OmniSearch extends View {
   // How the person starts each agent on each machine (programs.json `run`), for resuming one.
   loadLaunchers(cx) {
     for (const machine of this.targets()) {
+      let loaded;
+      this.launchersLoaded.set(machine, new Promise((resolve) => (loaded = resolve)));
       cx.spawn(async () => {
         try {
           const known = await knownAgents({ on: machine });
           this.launchers.set(machine, Object.fromEntries(known.filter((a) => a.installed).map((a) => [a.key, a.run])));
         } catch {}
+        loaded();
       });
     }
   }
@@ -175,13 +179,13 @@ export default class OmniSearch extends View {
     this.searchAll(cx);
   }
 
-  go(item) {
+  go(item, cx) {
     if (!item) return;
+    if (item.kind === "session" && !item.address) return this.resume(item, cx);
     this.close();
     if (item.kind === "space") run("space.select", { id: qualify(item.machine, item.space) });
     else if (item.kind === "terminal") this.focusTerminal(item.machine, item.address, item.tab);
-    else if (item.address) this.focusTerminal(item.machine, item.address, null);
-    else this.resume(item);
+    else this.focusTerminal(item.machine, item.address, null);
   }
 
   focusTerminal(machine, address, tab) {
@@ -193,18 +197,24 @@ export default class OmniSearch extends View {
     else run("terminal.peek", { terminal });
   }
 
-  resume(item) {
+  resume(item, cx) {
     if (!item.argv) {
+      this.close();
       notify({ title: "OmniSearch", body: `No resume command for ${item.agent}`, level: "warning" });
       return;
     }
-    const tabsThere = (s) => new Set(s.tabs.map((t) => t.id));
-    const space = spaces().find(
-      (s) => (s.machine ?? null) === item.machine && (s.folder === item.folder || panes().some((p) => p.cwd === item.folder && tabsThere(s).has(p.tab))),
-    );
-    const argv = this.resumeArgv(item);
-    if (space) run("tab.new", { space: space.id, folder: item.folder, argv });
-    else run("space.new", { folder: item.folder, argv, ...(item.machine ? { machine: item.machine } : {}) });
+    // Closing the popup ends its tasks, so it waits for the machine's launchers first.
+    cx.spawn(async () => {
+      await this.launchersLoaded.get(item.machine);
+      this.close();
+      const tabsThere = (s) => new Set(s.tabs.map((t) => t.id));
+      const space = spaces().find(
+        (s) => (s.machine ?? null) === item.machine && (s.folder === item.folder || panes().some((p) => p.cwd === item.folder && tabsThere(s).has(p.tab))),
+      );
+      const argv = this.resumeArgv(item);
+      if (space) run("tab.new", { space: space.id, folder: item.folder, argv });
+      else run("space.new", { folder: item.folder, argv, ...(item.machine ? { machine: item.machine } : {}) });
+    });
   }
 
   glyph(t, status) {
@@ -234,7 +244,7 @@ export default class OmniSearch extends View {
       .cursor_pointer()
       .when(selected, (el) => el.bg(t.selected))
       .hover((s) => s.bg(t.hover))
-      .on_click(() => this.go(item))
+      .on_click((_e, cx) => this.go(item, cx))
       .child(
         h_flex()
           .gap(8)
