@@ -374,8 +374,6 @@ def focus_remote_row(row) -> str:
     args = ["focus-target", "--workspace-id", row.get("workspace_id") or ""]
     if row_frontend(row) == "core" and not (row.get("pane_id") or "").startswith("workspace:"):
         return run_remote(machine_for_row(row), [*args, "--core", row["pane_id"]]).strip()
-    if row.get("socket_path"):
-        args += ["--socket", row["socket_path"]]
     if row.get("tab_id"):
         args += ["--tab-id", row["tab_id"]]
     if (row.get("pane_id") or "").startswith("workspace:"):

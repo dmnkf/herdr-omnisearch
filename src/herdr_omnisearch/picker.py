@@ -120,6 +120,7 @@ class RemoteSessions:
         self.machines = None
         self.limit = limit
         self.answers = {}
+        self.shown = {}
 
     def rows(self, query: str):
         if not query.strip():
@@ -131,7 +132,9 @@ class RemoteSessions:
             for machine in self.machines:
                 # Daemon threads: leaving the picker never waits for a slow machine.
                 threading.Thread(target=self.ask, args=(machine, query), daemon=True).start()
-        return [row for machine in self.machines for row in self.answers[query].get(machine["id"], [])]
+        answers = dict(self.answers[query])
+        self.shown[query] = len(answers)
+        return [row for machine in self.machines for row in answers.get(machine["id"], [])]
 
     def ask(self, machine, query: str) -> None:
         try:
@@ -141,7 +144,11 @@ class RemoteSessions:
         self.answers[query][machine["id"]] = rows
 
     def waiting(self, query: str) -> bool:
-        return query in self.answers and len(self.answers[query]) < len(self.machines)
+        """True while a machine has yet to answer, or answered after the rows on screen were taken."""
+        if query not in self.answers:
+            return False
+        answered = len(self.answers[query])
+        return answered < len(self.machines) or answered != self.shown.get(query)
 
 
 def fzf_picker(args) -> int:

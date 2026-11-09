@@ -95,12 +95,13 @@ def focus_core_terminal(address: str, title: str = "") -> int:
 
 
 def focus_row(row) -> int:
+    if row_frontend(row) == "core" and is_workspace_row(row):
+        machine = f" on {machine_name(row)}" if row.get("machine_id") else ""
+        say(f"{row.get('workspace_label') or row.get('workspace_id')} is a space in the Herdr app{machine}.")
+        return 0
     if row.get("machine_id"):
         return focus_machine_row(row)
     if row_frontend(row) == "core":
-        if is_workspace_row(row):
-            say(f"{row.get('workspace_label') or row.get('workspace_id')} is a space in the Herdr app.")
-            return 0
         return focus_core_terminal(row["pane_id"], row.get("pane_label") or "")
     if is_workspace_row(row):
         return 0 if focus_workspace_tab(row) else 1

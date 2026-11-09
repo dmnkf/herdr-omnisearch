@@ -5,6 +5,7 @@ import os
 import shutil
 import time
 
+from .herdr_socket import socket_is_alive
 from .live_index import FRONTEND_KEY, index_session
 from .settings import CORE_SESSION_PREFIX, DEFAULT_LINES, core_session_key
 from .storage import app_db_path, connect, db_path, exclusive_lock
@@ -27,7 +28,11 @@ def frontend_records():
                 continue
             if frontend == "core" and session != core_session_key():
                 continue
-            records.append({"frontend": frontend, "session": session, **json.loads(value)})
+            record = {"frontend": frontend, "session": session, **json.loads(value)}
+            # A TUI server that exited leaves its record until another one reaps it.
+            if frontend == "tui" and not socket_is_alive(record.get("socket") or ""):
+                continue
+            records.append(record)
     return records
 
 
@@ -85,7 +90,7 @@ def refresh_frontends(launchers=(), *, core=False):
     from .archive_catalog import archive_catalog_session_agents
     from .herdr_core import CoreError, index_core
     from .herdr_cli import HerdrCLIError
-    from .herdr_socket import HerdrError, resolve_socket_path, socket_is_alive
+    from .herdr_socket import HerdrError, resolve_socket_path
     errors = []
     if core or shutil.which("hc"):
         try:

@@ -1,13 +1,14 @@
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
 import unittest
 from argparse import Namespace
 from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -109,6 +110,10 @@ class FrontendTests(unittest.TestCase):
         config["archive"]["codex"]["launcher"] = "shell"
         stack = ExitStack()
         self.addCleanup(stack.close)
+        # A live TUI server is one whose socket accepts connections.
+        self.server = stack.enter_context(socket.socket(socket.AF_UNIX))
+        self.server.bind(str(root / "herdr.sock"))
+        self.server.listen()
         stack.enter_context(patch.dict(os.environ, {
             "PATH": str(bin_dir),
             "HC_FAKE_STATE": str(root / "hc-state.json"),
@@ -168,6 +173,15 @@ class FrontendTests(unittest.TestCase):
         live_index.index_session(50, False, False)
         check = self.app_search("--running", f"codex={TUI_SESSION}")
         self.assertEqual([(row["frontend"], row["address"]) for row in check["rows"]], [("tui", "w2:p1")])
+
+    def test_a_tui_server_that_exited_runs_nothing_any_more(self):
+        self.both_frontends_indexed()
+        self.server.close()
+        (self.root / "herdr.sock").unlink()
+        session = self.app_search("--archive", "ledger")["rows"][0]
+        check = self.app_search("--refresh", "--running", f"codex={TUI_SESSION}")
+        self.assertEqual((session["address"], session["running"]), (None, None))
+        self.assertEqual(check, {"rows": [], "error": None})
 
     def test_a_second_start_while_the_first_is_starting_is_refused(self):
         self.both_frontends_indexed()
@@ -229,6 +243,9 @@ class FrontendTests(unittest.TestCase):
         conn.close()
         rows = live_index.grouped_search_index("invoice", 10, machines=True)
         synced_core = next(row for row in rows if row["machine_id"] and row["pane_id"] == "t1")
+        synced_space = next(row for row in rows if row["machine_id"] and row["pane_id"] == "workspace:sp1")
+        with redirect_stdout(io.StringIO()):
+            navigate.focus_row(synced_space)
         with patch.object(machines, "saved_machines", return_value=[machine]), patch.object(
             machines, "run_remote", return_value="t1 runs in the Herdr app as t1; no Herdr pane mirrors it.\n"
         ) as remote:
@@ -239,7 +256,10 @@ class FrontendTests(unittest.TestCase):
         ])
         self.assertEqual(picker.row_title(synced_core, full=True), "vps › web · codex · t1 · in the app")
         self.assertEqual(remote.call_args.args[1], ["focus-target", "--workspace-id", "sp1", "--core", "t1"])
-        self.assertEqual((code, FakeTui.calls), (0, [("notify", "vps: t1 runs in the Herdr app as t1; no Herdr pane mirrors it.")]))
+        self.assertEqual((code, FakeTui.calls), (0, [
+            ("notify", "web is a space in the Herdr app on vps."),
+            ("notify", "vps: t1 runs in the Herdr app as t1; no Herdr pane mirrors it."),
+        ]))
 
     def test_the_tui_searches_old_sessions_on_every_machine_and_resumes_one_on_its_own(self):
         machine = {"id": "b" * 32, "label": "gpubox", "target": "gpubox", "session": "default"}
@@ -261,6 +281,21 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual([call.args[1] for call in remote.call_args_list],
                          [["archive-search", "--json", "--limit", "10", "--", "walrus"], ["archive-resume", "archive-catalog:Z3B1"]])
         self.assertEqual((code, FakeTui.calls[-1][0]), (0, "notify"))
+
+    def test_a_machine_answering_after_the_rows_were_taken_is_still_shown(self):
+        machine = {"id": "c" * 32, "label": "slow", "target": "slow", "session": "default"}
+        remote = picker.RemoteSessions(10)
+        answered = []
+        with patch.object(picker, "saved_machines_or_empty", return_value=[machine]), patch.object(
+            picker.threading, "Thread", side_effect=lambda target, args, daemon: answered.append((target, args)) or Mock()
+        ):
+            before = remote.rows("walrus")
+            target, ask_args = answered[0]
+            with patch.object(picker, "remote_archive_rows", return_value=[{"stable_id": "archive-catalog:x", "session_id": "s9"}]):
+                target(*ask_args)
+            waiting = remote.waiting("walrus")
+            after = remote.rows("walrus")
+        self.assertEqual((before, waiting, [row["session_id"] for row in after], remote.waiting("walrus")), ([], True, ["s9"], False))
 
 
 if __name__ == "__main__":
