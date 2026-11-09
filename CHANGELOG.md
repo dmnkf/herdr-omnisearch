@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.15.0 - 2026-11-09
+
+- Search both terminal servers from either side. The Herdr app's OmniSearch
+  now lists the herdr TUI's agent panes next to the app's terminals, each
+  tagged "app" or "TUI", and the TUI's live search lists the app's terminals,
+  marked "in the app", on this machine and on saved machines.
+- Never start a session twice. Before a resume, OmniSearch re-reads both the
+  TUI and herdr-core on that machine and focuses the session where it runs: a
+  Claude Code session in a TUI pane no longer looks idle to the app, and one
+  in the app no longer looks idle to the TUI. A terminal the app doesn't show
+  counts too, and so does a TUI pane whose command resumes a session it never
+  reported. A second start of one session within 30 seconds is refused, and
+  the app no longer starts a session when its check failed.
+- Focus across the two. Enter on a TUI pane in the app focuses the app
+  terminal mirroring it, or selects the pane in the TUI and says so. Enter on
+  an app terminal in the TUI focuses the Herdr pane mirroring it, or says where
+  it runs. Mirrors made by `herdr-mirror` are never listed as rows of their own.
+- Search old sessions on every saved machine from the TUI's archive search,
+  and resume one on its own machine.
+- Upgrade OmniSearch on every machine: the plugin with `herdr plugin install`,
+  and the command for the app with `uv tool install --force`.
+
 ## 0.14.0 - 2026-10-31
 
 - Search the Herdr app too. The app runs its terminals in herdr-core, not in

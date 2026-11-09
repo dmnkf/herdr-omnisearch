@@ -6,7 +6,8 @@ keyboard-driven terminal interface.
 - Search workspace metadata and recent terminal output from live panes.
 - Group matching panes by workspace and jump directly to a result.
 - Optionally search complete local user and assistant message history.
-- Resume archived sessions from the search result.
+- Resume archived sessions from the search result, on the machine they ran on, and focus a session that already runs instead of starting it twice.
+- Search the Herdr app's terminals (herdr-core) from the TUI, and the TUI's panes from the app.
 - Keep all indexed data in local SQLite databases.
 
 Archive indexing is disabled by default. OmniSearch does not upload indexed
@@ -41,7 +42,7 @@ herdr plugin action invoke doctor --plugin herdr.omnisearch
 To install a specific release:
 
 ```bash
-herdr plugin install dmnkf/herdr-omnisearch --ref v0.14.0
+herdr plugin install dmnkf/herdr-omnisearch --ref v0.15.0
 ```
 
 GitHub plugin installation does not change `~/.config/herdr/config.toml`. Add
@@ -96,7 +97,12 @@ resume.
 3. Press Ctrl+Shift+F.
 
 The mod runs `herdr-omnisearch app-search` on this computer and on every
-connected machine, and skips a machine that doesn't have it. A session resumes
+connected machine, and skips a machine that doesn't have it. Live results are
+the app's terminals and the agent panes of the herdr TUI running on the same
+machine, each tagged "app" or "TUI". Enter on a TUI pane focuses the app
+terminal that mirrors it (`herdr-mirror`), or else selects the pane in the TUI
+and says so in a toast. A session that already runs, in the app or in the TUI,
+is focused instead of started again. A session resumes
 through the launcher the app has for that agent (`run` in its `programs.json`). Session search
 needs [archive indexing](#archive-search) turned on. How the mod works, and
 how to rebuild it, is in [omnisearch/RECIPE.md](omnisearch/RECIPE.md).
@@ -126,6 +132,13 @@ indexing on, they match on their whole conversation too: live search looks up
 the sessions running in your panes in the archive catalog, and opening the live
 picker refreshes the catalog when it is more than a minute old. Panes that match
 only in their conversation are listed after panes whose screen or name matches.
+
+Where herdr-core runs too (the Herdr app's terminal server), live search also
+lists its terminals, marked "in the app". Herdr can't show them, so Enter
+focuses the Herdr pane that mirrors one (`herdr-mirror attach core:<address>`),
+or else tells you where it runs. A pane or terminal that only mirrors the
+other side is never listed twice. The watcher re-reads herdr-core's terminals
+every 15 seconds.
 
 The watcher keeps the live index current. To rebuild it manually:
 
@@ -251,7 +264,16 @@ Three-character terms are exact; longer terms support prefix matching.
 The picker initially browses the newest 14 calendar days by session creation
 date. Left/right changes that date filter instantly. Every nonempty content
 query searches the complete catalog once, regardless of the current browse
-window. Exact and typo-tolerant content searches use the same catalog and can
+window. With saved machines, a query also searches each machine's catalog in
+the background; its sessions show up with the machine's name as they arrive.
+Enter on one resumes it on that machine, with that machine's resume command.
+
+Enter never starts a session that already runs on its machine. OmniSearch
+re-reads the TUI and herdr-core, and if a pane or terminal runs the session it
+is focused: a herdr-core terminal through the Herdr pane that mirrors it, or
+else a notification says where it runs. A second start of the same session
+within 30 seconds, from the TUI or the app, is refused while the first agent
+starts up. Exact and typo-tolerant content searches use the same catalog and can
 be resumed without a second indexing pass.
 
 ### Maintenance
@@ -347,7 +369,8 @@ How it works:
   under a machine namespace. `export` only refreshes the remote's own index,
   and only when its watcher is not running. Nothing else is written there.
 - Each remote needs OmniSearch 0.8.0 installed as a Herdr plugin and
-  `python3`. The remote command finds the plugin through Herdr's plugin
+  `python3`. With 0.15.0 or newer there, its herdr-core terminals come along
+  (marked "in the app"), and its old sessions show up in archive search. The remote command finds the plugin through Herdr's plugin
   registry, so it does not depend on the SSH `PATH`.
 - The watcher refreshes machines every `sync_seconds`, and opening the picker
   refreshes them when stale. An unreachable machine keeps its last results and
@@ -477,6 +500,7 @@ The package is split by responsibility, lower layers never import higher ones:
 - `storage.py` SQLite paths, schema, repair and migration, lock files
 - `textmatch.py` tokenizing, fuzzy matching, FTS query building
 - `live_index.py` live pane indexing and search
+- `running.py` where a session runs on this machine, across the TUI and herdr-core
 - `herdr_core.py` herdr-core terminals as live index panes
 - `herdr_programs.py` Herdr's program table names, shells and interpreters
 - `opencode_history.py` OpenCode session listing and export
