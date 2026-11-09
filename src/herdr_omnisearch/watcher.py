@@ -13,8 +13,12 @@ from .storage import (
     try_exclusive_lock,
     watcher_pid_path,
 )
+from .herdr_core import index_core_if_installed
 from .live_index import index_session
 from .machines import machines_config, maybe_background_sync
+
+# herdr-core sends Herdr no events, so its terminals are re-read on a clock.
+CORE_REFRESH_SECONDS = 15
 
 def watcher_subscriptions(snapshot):
     subscriptions = [
@@ -69,6 +73,7 @@ def watch_live_index(lines: int, debounce: float) -> int:
         return 0
     retry_delay = 1.0
     sync_due = 0.0
+    core_due = 0.0
     try:
         while True:
             try:
@@ -90,6 +95,9 @@ def watch_live_index(lines: int, debounce: float) -> int:
                             sync_seconds = machines_config()["sync_seconds"]
                             maybe_background_sync(sync_seconds, discover=True)
                             sync_due = now + sync_seconds
+                        if now >= core_due:
+                            index_core_if_installed()
+                            core_due = now + CORE_REFRESH_SECONDS
                         if event:
                             if refresh_due is None:
                                 refresh_due = now + debounce

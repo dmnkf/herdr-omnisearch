@@ -2,6 +2,7 @@ import base64
 import curses
 import shutil
 import sys
+import threading
 
 from .herdr_socket import HerdrError
 from .settings import DEFAULT_LINES, app_config, cli_command_string, data_dir
@@ -24,8 +25,16 @@ from .live_index import (
     is_workspace_row,
     machine_name,
     maybe_background_index,
+    row_frontend,
 )
-from .machines import machine_statuses, maybe_background_sync, machines_config
+from .machines import (
+    MachineError,
+    machine_statuses,
+    machines_config,
+    maybe_background_sync,
+    remote_archive_rows,
+    saved_machines_or_empty,
+)
 from .archive_catalog import (
     archive_catalog_index,
     archive_catalog_live_matches,
@@ -100,7 +109,39 @@ def archive_pick(args) -> int:
         if refresh_later:
             maybe_background_archive_catalog_index(args.agents, args.stale_seconds)
 
+    args.remote_sessions = RemoteSessions(args.limit) if merges_machines(args) else None
     return open_picker(args, refresh_in_background)
+
+
+class RemoteSessions:
+    """Each saved machine's old sessions for a query, asked in the background so typing never waits on SSH."""
+
+    def __init__(self, limit: int):
+        self.machines = None
+        self.limit = limit
+        self.answers = {}
+
+    def rows(self, query: str):
+        if not query.strip():
+            return []
+        if self.machines is None:
+            self.machines = saved_machines_or_empty()
+        if query not in self.answers:
+            self.answers[query] = {}
+            for machine in self.machines:
+                # Daemon threads: leaving the picker never waits for a slow machine.
+                threading.Thread(target=self.ask, args=(machine, query), daemon=True).start()
+        return [row for machine in self.machines for row in self.answers[query].get(machine["id"], [])]
+
+    def ask(self, machine, query: str) -> None:
+        try:
+            rows = remote_archive_rows(machine, query, self.limit)
+        except MachineError:
+            rows = []
+        self.answers[query][machine["id"]] = rows
+
+    def waiting(self, query: str) -> bool:
+        return query in self.answers and len(self.answers[query]) < len(self.machines)
 
 
 def fzf_picker(args) -> int:
@@ -213,18 +254,20 @@ def row_title(row, *, full=False):
         else:
             preview_lines = clean_text(row.get("content") or "").splitlines()
             summary = preview_lines[-1] if preview_lines else row.get("title") or "session"
-        return f"{space} · {agent} · {shorten(summary, 76)}{match_count(row)}"
+        machine = f"{row['machine_label']} › " if row.get("machine_label") else ""
+        return f"{machine}{space} · {agent} · {shorten(summary, 76)}{match_count(row)}"
     if is_machine_row(row):
         return machine_name(row)
+    app = " · in the app" if row_frontend(row) == "core" else ""
     if is_workspace_row(row):
-        return f"{row.get('workspace_label') or row.get('workspace_id')}{match_count(row)}"
+        return f"{row.get('workspace_label') or row.get('workspace_id')}{app}{match_count(row)}"
     label = row.get("pane_label") or row.get("pane_id")
     agent = row.get("agent") or "shell"
     if row.get("_under_workspace") and not full:
         # The workspace header right above already names it.
-        return f"{agent} · {label}{match_count(row)}"
+        return f"{agent} · {label}{app}{match_count(row)}"
     workspace = row.get("workspace_label") or row.get("workspace_id")
-    return f"{machine_prefix(row)}{workspace} · {agent} · {label}{match_count(row)}"
+    return f"{machine_prefix(row)}{workspace} · {agent} · {label}{app}{match_count(row)}"
 
 
 def row_meta(row) -> str:
@@ -486,6 +529,7 @@ def picker_rows(args, query, *, snippets=False):
         all_sessions=getattr(args, "all_sessions", False),
         machines=merges_machines(args),
         session_matcher=archive_catalog_live_matches,
+        core=True,
     )
     if any(is_machine_row(row) for row in rows):
         annotate_machine_rows(rows)
@@ -512,7 +556,7 @@ def picker_focus(args, result):
         if row is not None and row.get("_archive_catalog"):
             return focus_archive_row(row)
         return focus_archive_catalog_result(stable_id)
-    if row is not None and row.get("machine_id"):
+    if row is not None:
         return focus_row(row)
     return focus_result(stable_id)
 
@@ -605,8 +649,8 @@ def action_specs(args, row):
         focus_label = f"focus on {machine_name(row)}, then select that machine"
     specs.append({"name": "focus", "label": focus_label})
 
-    # Renames target the local socket; synced rows belong to another server.
-    if not archive and not row.get("machine_id"):
+    # Renames target the local socket; synced rows and the app's terminals belong to another server.
+    if not archive and not row.get("machine_id") and row_frontend(row) == "tui":
         if row.get("workspace_id"):
             specs.append({"name": "rename-workspace", "label": "rename workspace"})
         if row.get("pane_id") and not is_workspace_row(row):
@@ -755,6 +799,9 @@ def cached_picker_rows(args, query, cache):
         cache[cache_key] = rows
         if len(cache) > 128:
             cache.pop(next(iter(cache)))
+    remote = getattr(args, "remote_sessions", None)
+    if remote and getattr(args, "archive", False) and query.strip():
+        return rows + remote.rows(query)
     return rows
 
 
@@ -816,7 +863,20 @@ def curses_picker(stdscr, args, after_first_frame) -> int:
             after_first_frame()
             after_first_frame = None
         message = ""
-        key = stdscr.get_wch()
+        remote = getattr(args, "remote_sessions", None)
+        lookup = archive_picker_lookup_query(args, query)
+        if remote and remote.waiting(lookup):
+            # Wake up to show each machine's answer as it lands.
+            stdscr.timeout(200)
+            try:
+                key = stdscr.get_wch()
+            except curses.error:
+                rows = cached_picker_rows(args, lookup, row_cache)
+                continue
+            finally:
+                stdscr.timeout(-1)
+        else:
+            key = stdscr.get_wch()
 
         if key == "\x03":
             return 130

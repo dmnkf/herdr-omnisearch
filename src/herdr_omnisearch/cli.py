@@ -16,6 +16,7 @@ from .settings import (
     app_config,
     cli_command,
     config_dir,
+    core_session_key,
     data_dir,
     herdr_bin,
     herdr_session_key,
@@ -129,9 +130,11 @@ def cmd_open_plugin_pane(args) -> int:
 
 
 def cmd_index(args) -> int:
+    from .herdr_core import index_core_if_installed
     try:
         count = index_session(args.lines, args.include_empty, args.include_wrappers)
         print(f"indexed {count} chunks into {db_path()}")
+        index_core_if_installed()
         return 0
     finally:
         release_index_lock()
@@ -147,6 +150,7 @@ def cmd_search(args) -> int:
         all_sessions=args.all_sessions,
         machines=not args.local_only and machines_config()["enabled"],
         session_matcher=archive_catalog_live_matches,
+        core=True,
     )
     if args.json:
         print(json.dumps(rows, indent=2))
@@ -193,26 +197,33 @@ def cmd_export(_args) -> int:
         # A running watcher skips reindexing, so check the server itself.
         error = f"Herdr server is not running at {resolve_socket_path()}"
     elif not watcher_is_running() and time.time() - last_indexed > EXPORT_STALE_SECONDS:
+        from .herdr_core import index_core_if_installed
         try:
             index_session(DEFAULT_LINES, False, False)
+            index_core_if_installed()
         except Exception as exc:  # stale rows beat no rows for the merging machine
             error = str(exc)
-    conn = connect()
-    try:
-        rows = conn.execute(
-            """
-            SELECT d.*, f.body AS body
-            FROM docs d
-            LEFT JOIN docs_fts f ON f.stable_id = d.stable_id
-            WHERE d.machine_id = '' AND d.herdr_session = ?
-            """,
-            (session_key,),
-        ).fetchall()
-        last = conn.execute(
-            "SELECT value FROM meta WHERE key = ?", (f"last_indexed_at:{session_key}",)
-        ).fetchone()
-    finally:
-        conn.close()
+    rows = []
+    index_path = db_path()
+    # The herdr-core terminals here too, so a machine merging this one lists both frontends.
+    for path, session in ((index_path, session_key), (app_db_path(), core_session_key())):
+        conn = connect(path)
+        try:
+            rows += conn.execute(
+                """
+                SELECT d.*, f.body AS body
+                FROM docs d
+                LEFT JOIN docs_fts f ON f.stable_id = d.stable_id
+                WHERE d.machine_id = '' AND d.herdr_session = ?
+                """,
+                (session,),
+            ).fetchall()
+            if path == index_path:
+                last = conn.execute(
+                    "SELECT value FROM meta WHERE key = ?", (f"last_indexed_at:{session_key}",)
+                ).fetchone()
+        finally:
+            conn.close()
     skip = {"machine_id", "machine_label"}
     payload = {
         "format": EXPORT_FORMAT,
@@ -349,7 +360,7 @@ def cmd_focus(args) -> int:
 
 
 def cmd_focus_target(args) -> int:
-    return focus_target(args.workspace_id, args.tab_id, args.pane_id, args.agent, args.workspace_only)
+    return focus_target(args.workspace_id, args.tab_id, args.pane_id, args.agent, args.workspace_only, args.socket, args.core)
 
 
 def cmd_archive_resume(args) -> int:
@@ -628,6 +639,8 @@ def build_parser():
     p.add_argument("--pane-id", default="")
     p.add_argument("--agent", default="")
     p.add_argument("--workspace-only", action="store_true")
+    p.add_argument("--socket", default="", help="the Herdr server the pane is in, when not this one")
+    p.add_argument("--core", default="", metavar="ADDRESS", help="a herdr-core terminal: focus its mirror pane, or say where it is")
     p.set_defaults(func=cmd_focus_target)
 
     p = sub.add_parser("archive-resume", help="resume an archived session result in Herdr")

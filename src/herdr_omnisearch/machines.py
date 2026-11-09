@@ -10,7 +10,7 @@ import shlex
 import time
 
 from .herdr_cli import HerdrCLI, HerdrCLIError
-from .live_index import prune_vocabulary, replace_docs
+from .live_index import prune_vocabulary, replace_docs, row_frontend
 from .settings import app_config, cli_command, data_dir, herdr_bin
 from .storage import compact_index, connect, spawn_locked_background, try_exclusive_lock
 from .textmatch import index_tokens
@@ -34,7 +34,7 @@ TEXT_FIELDS = (
 # from Herdr's registry instead of trusting a PATH that non-interactive SSH
 # shells usually lack.
 REMOTE_BOOTSTRAP = r"""
-import json, os, shutil, sys
+import json, os, sys
 home = os.path.expanduser("~")
 root = os.environ.get("HERDR_OMNISEARCH_ROOT")
 if not root:
@@ -45,7 +45,7 @@ if not root:
     except (OSError, ValueError, StopIteration, KeyError, TypeError):
         sys.exit("herdr.omnisearch is not installed on this machine")
 local_bin = os.path.join(home, ".local", "bin")
-if not shutil.which("herdr") and os.path.exists(os.path.join(local_bin, "herdr")):
+if os.path.isdir(local_bin) and local_bin not in os.environ.get("PATH", "").split(os.pathsep):
     os.environ["PATH"] = local_bin + os.pathsep + os.environ.get("PATH", "")
 os.environ["HERDR_PLUGIN_ROOT"] = root
 sys.path.insert(0, os.path.join(root, "src"))
@@ -368,9 +368,14 @@ def machine_for_row(row):
     raise MachineError(f"machine {row.get('machine_label') or row.get('machine_id')} is no longer saved")
 
 
-def focus_remote_row(row) -> None:
+def focus_remote_row(row) -> str:
+    """Focus a synced row on its machine; returns what that machine said, when it could only say where the row is."""
     # Target ids, not the stable id: stable ids change with every content refresh.
     args = ["focus-target", "--workspace-id", row.get("workspace_id") or ""]
+    if row_frontend(row) == "core" and not (row.get("pane_id") or "").startswith("workspace:"):
+        return run_remote(machine_for_row(row), [*args, "--core", row["pane_id"]]).strip()
+    if row.get("socket_path"):
+        args += ["--socket", row["socket_path"]]
     if row.get("tab_id"):
         args += ["--tab-id", row["tab_id"]]
     if (row.get("pane_id") or "").startswith("workspace:"):
@@ -379,4 +384,23 @@ def focus_remote_row(row) -> None:
         args += ["--pane-id", row["pane_id"]]
         if row.get("agent"):
             args += ["--agent", row["agent"]]
-    run_remote(machine_for_row(row), args)
+    return run_remote(machine_for_row(row), args).strip()
+
+
+def resume_remote_row(row) -> str:
+    """Resume or focus a saved machine's old session there, with its own resume commands; returns what it said."""
+    return run_remote(machine_for_row(row), ["archive-resume", row["stable_id"]]).strip()
+
+
+def remote_archive_rows(machine, query: str, limit: int):
+    """A saved machine's old sessions matching query, tagged with the machine."""
+    import json
+    output = run_remote(machine, ["archive-search", "--json", "--limit", str(limit), "--", *query.split()])
+    try:
+        rows = json.loads(output)
+    except ValueError as exc:
+        raise MachineError(f"{machine['label']}: archive search returned invalid JSON") from exc
+    return [
+        {**row, "machine_id": machine["id"], "machine_label": machine["label"]}
+        for row in rows if isinstance(row, dict) and isinstance(row.get("stable_id"), str)
+    ]
