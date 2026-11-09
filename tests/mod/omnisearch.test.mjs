@@ -375,7 +375,7 @@ test("Enter on a session a terminal runs by now focuses that terminal instead of
   assert.deepEqual(state.ran, [["agent.focus", { terminal: "t9" }]]);
 });
 
-test("a check that fails still resumes the session", async () => {
+test("a check that fails starts nothing and says why", async () => {
   const session = { kind: "session", id: "c1", agent: "codex", session_id: "s1", title: "t", space_name: "", updated: 0, snippet: "", folder: "/x", argv: ["codex", "resume", "s1"], address: null };
   const state = app({
     answers: {
@@ -389,7 +389,70 @@ test("a check that fails still resumes the session", async () => {
   key(view, c, "tab");
   await settle(c);
   await enter(c);
-  assert.deepEqual(state.ran, [["space.new", { folder: "/x", argv: ["codex", "resume", "s1"] }]]);
+  assert.deepEqual(state.ran, []);
+  assert.deepEqual(state.notified, [{ title: "OmniSearch", body: "Didn't resume t: exec timed out after 30 s", level: "warning" }]);
+  assert.deepEqual(state.closed, ["o1"]);
+});
+
+const PANE = { kind: "terminal", frontend: "tui", address: "w2:p1", space: "w2", tab: "w2:t1", title: "billing fix", agent: "claude", status: "idle", snippet: "invoice totals", cwd: "/srv", space_name: "billing", socket: "/run/herdr.sock", mirror: null };
+
+test("a herdr TUI pane is listed with its space and says it lives in the TUI", async () => {
+  const state = app({ answers: { here: ok([TERMINAL, PANE]) } });
+  const { view } = await open(state);
+  const text = view.render().text();
+  assert.match(text, /fix login.*claude.*app.*the login form/);
+  assert.match(text, /billing fix.*claude.*billing.*TUI.*invoice totals/);
+});
+
+test("Enter on a TUI pane the app mirrors focuses the mirror terminal", async () => {
+  const state = app({ answers: { here: ok([{ ...PANE, mirror: "t8" }]) }, agents: [{ address: "t8" }] });
+  const { c } = await open(state);
+  await enter(c);
+  assert.deepEqual(state.ran, [["agent.focus", { terminal: "t8" }]]);
+  assert.deepEqual(state.closed, ["o1"]);
+});
+
+test("Enter on a TUI pane nothing mirrors selects it in that machine's TUI and says so", async () => {
+  const state = app({
+    machines: [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }],
+    answers: { vps: (args) => (args[0] === "focus-target" ? { code: 0, stdout: "", stderr: "" } : ok([PANE])) },
+  });
+  const { c } = await open(state);
+  await enter(c);
+  assert.deepEqual(state.calls.at(-1), {
+    command: "herdr-omnisearch",
+    args: ["focus-target", "--workspace-id", "w2", "--tab-id", "w2:t1", "--pane-id", "w2:p1", "--agent", "claude", "--socket", "/run/herdr.sock"],
+    on: "vps",
+  });
+  assert.deepEqual(state.ran, []);
+  assert.deepEqual(state.notified, [{ title: "OmniSearch", body: "billing fix runs in the herdr TUI on vps, not in the app. It is selected there now: switch to that TUI to see it." }]);
+  assert.deepEqual(state.closed, ["o1"]);
+});
+
+test("a session running in a TUI pane is focused there, never started in the app", async () => {
+  const where = { ...PANE, kind: "terminal" };
+  const session = { kind: "session", id: "c1", agent: "claude", session_id: "s1", title: "billing", space_name: "billing", updated: 0, snippet: "", folder: "/srv", argv: ["claude", "--resume", "s1"], address: null, running: where };
+  const state = app({ answers: { here: (args) => (args[0] === "focus-target" ? { code: 0, stdout: "", stderr: "" } : ok(args.includes("--archive") ? [session] : [])) } });
+  const { view, c } = await open(state);
+  key(view, c, "tab");
+  await settle(c);
+  assert.match(view.render().text(), /billing.*claude.*running in TUI/);
+  await enter(c);
+  assert.deepEqual(state.calls.at(-1).args.slice(0, 2), ["focus-target", "--workspace-id"]);
+  assert.deepEqual(state.ran, []);
+});
+
+test("a session the check finds in a TUI pane is focused through the app terminal mirroring it", async () => {
+  const session = { kind: "session", id: "c1", agent: "claude", session_id: "s1", title: "billing", space_name: "", updated: 0, snippet: "", folder: "/srv", argv: ["claude", "--resume", "s1"], address: null, running: null };
+  const state = app({
+    answers: { here: (args) => (args.includes("--running") ? ok([{ ...PANE, mirror: "t8" }]) : ok(args.includes("--archive") ? [session] : [])) },
+    panes: [{ pane: "p8", terminal: "t8", tab: "tb8" }],
+  });
+  const { view, c } = await open(state);
+  key(view, c, "tab");
+  await settle(c);
+  await enter(c);
+  assert.deepEqual(state.ran, [["pane.focus", { terminal: "t8" }]]);
 });
 
 test("a session without a resume command warns instead of starting anything", async () => {

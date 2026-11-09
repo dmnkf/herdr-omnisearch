@@ -1,7 +1,8 @@
 // OmniSearch: find a terminal by what it shows or said, or an old agent session
 // to resume. Asks `herdr-omnisearch app-search` on this computer and on every
-// connected machine; a machine without it is skipped. Tab switches between
-// live terminals and old sessions, ↑/↓ and Enter go, Esc leaves.
+// connected machine; a machine without it is skipped. Live rows are the app's
+// terminals and the herdr TUI's agent panes, each saying which it lives in.
+// Tab switches between live terminals and old sessions, ↑/↓ and Enter go, Esc leaves.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
@@ -17,6 +18,7 @@ const LIST_H = ROW_H * 8;
 const MODES = [["live", "Live"], ["sessions", "Sessions"]];
 const MODE_ACTION = "omnisearch_mode";
 const MARKS = { blocked: "●", done: "●", idle: "○" };
+const FRONTENDS = { core: "app", tui: "TUI" };
 
 // Remote ids carry their machine: `vps/t7`.
 const qualify = (machine, id) => (machine && id ? `${machine}/${id}` : id);
@@ -190,11 +192,40 @@ export default class OmniSearch extends View {
 
   go(item, cx) {
     if (!item) return;
-    if (item.kind === "session" && !item.address) return this.resume(item, cx);
-    this.close();
-    if (item.kind === "space") run("space.select", { id: qualify(item.machine, item.space) });
-    else if (item.kind === "terminal") this.focusTerminal(item.machine, item.address, item.tab);
-    else this.focusTerminal(item.machine, item.address, null);
+    if (item.kind === "session") {
+      // An older OmniSearch names only the app terminal running it.
+      const running = item.running ?? (item.address ? { frontend: "core", address: item.address } : null);
+      return running ? this.goLive(item.machine, running, cx) : this.resume(item, cx);
+    }
+    if (item.kind === "space") {
+      this.close();
+      return run("space.select", { id: qualify(item.machine, item.space) });
+    }
+    this.goLive(item.machine, item, cx);
+  }
+
+  // A terminal in the app, or a pane of the herdr TUI: through the app terminal mirroring it, else in the TUI itself.
+  goLive(machine, where, cx) {
+    if (where.frontend !== "tui" || where.mirror) {
+      this.close();
+      return where.frontend === "tui" ? this.focusTerminal(machine, where.mirror, null) : this.focusTerminal(machine, where.address, where.tab);
+    }
+    const args = ["focus-target", "--workspace-id", where.space ?? "", "--tab-id", where.tab ?? "", "--pane-id", where.address];
+    if (where.agent) args.push("--agent", where.agent);
+    if (where.socket) args.push("--socket", where.socket);
+    cx.spawn(async () => {
+      let r;
+      try {
+        r = await exec(CLI, args, { on: machine });
+      } catch (e) {
+        r = { code: 1, stderr: `${e?.message ?? e}` };
+      }
+      this.close();
+      const name = where.title || where.address;
+      const tui = machine ? `the herdr TUI on ${machine}` : "the herdr TUI";
+      if (r.code === 0) notify({ title: "OmniSearch", body: `${name} runs in ${tui}, not in the app. It is selected there now: switch to that TUI to see it.` });
+      else notify({ title: "OmniSearch", body: `Couldn't select ${name} in ${tui}: ${(r.stderr || r.stdout || "").trim() || `exit ${r.code}`}`, level: "warning" });
+    });
   }
 
   focusTerminal(machine, address, tab) {
@@ -219,13 +250,18 @@ export default class OmniSearch extends View {
     cx.spawn(async (cx) => {
       const launchers = await this.launchersOn(item.machine, cx);
       // The list can be a refresh behind the catalog: ask again, so a running session is focused, never started twice.
-      let running = null;
+      let found;
       try {
         const check = ["app-search", "--refresh", "--limit", "0", "--running", `${item.agent}=${item.session_id}`, ...launcherArgs(launchers)];
-        running = answer(await exec(CLI, check, { on: item.machine })).rows.find((r) => r.address)?.address;
-      } catch {}
+        found = answer(await exec(CLI, check, { on: item.machine }));
+      } catch (e) {
+        found = { rows: [], error: `${e?.message ?? e}` };
+      }
+      const running = found.rows.find((r) => r.address);
+      if (running) return this.goLive(item.machine, running, cx);
       this.close();
-      if (running) return this.focusTerminal(item.machine, running, null);
+      // Only a check that answered may start it: one that failed can't tell a running session from an ended one.
+      if (found.error) return notify({ title: "OmniSearch", body: `Didn't resume ${item.title || item.session_id}: ${found.error}`, level: "warning" });
       const tabsThere = (s) => new Set(s.tabs.map((t) => t.id));
       const space = spaces().find(
         (s) => (s.machine ?? null) === item.machine && (s.folder === item.folder || panes().some((p) => p.cwd === item.folder && tabsThere(s).has(p.tab))),
@@ -247,10 +283,11 @@ export default class OmniSearch extends View {
     if (item.kind === "space") title = item.spaceName;
     else if (item.kind === "terminal") {
       title = item.title || item.address;
-      tags.push(item.agent, item.spaceName);
+      tags.push(item.agent, item.spaceName, FRONTENDS[item.frontend ?? "core"]);
     } else {
+      const running = item.running ?? (item.address ? { frontend: "core" } : null);
       title = item.title || item.spaceName || item.session_id;
-      tags.push(item.agent, item.title ? item.spaceName : "", item.address ? "running" : ago(item.updated));
+      tags.push(item.agent, item.title ? item.spaceName : "", running ? `running in ${FRONTENDS[running.frontend]}` : ago(item.updated));
     }
     if (item.machine) tags.push(item.machine);
     const snippet = item.kind === "space" ? "space" : item.snippet;
@@ -268,7 +305,7 @@ export default class OmniSearch extends View {
         h_flex()
           .gap(8)
           .items_center()
-          .child(item.kind === "session" ? div().w(12).flex_none().text_color(item.address ? t.working : t.dim).child(item.address ? "●" : "↺") : this.glyph(t, item.status))
+          .child(item.kind === "session" ? div().w(12).flex_none().text_color(item.running || item.address ? t.working : t.dim).child(item.running || item.address ? "●" : "↺") : this.glyph(t, item.status))
           .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).when(selected, (d) => d.font_semibold()).child(title))
           .children(tags.filter(Boolean).map((tag) => div().flex_none().text_size(11).text_color(t.dim).child(tag))),
       )

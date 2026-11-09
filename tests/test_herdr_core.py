@@ -147,6 +147,7 @@ class HerdrCoreTests(unittest.TestCase):
             "HERDR_OMNISEARCH_APP_DB": str(root / "app-index.sqlite3"),
             "HERDR_OMNISEARCH_CATALOG_DB": str(root / "archive-catalog.sqlite3"),
             "CLAUDE_CONFIG_DIR": str(root / "claude"),
+            "HERDR_SOCKET_PATH": str(root / "herdr.sock"),
         }))
         stack.enter_context(patch.object(settings, "CONFIG_CACHE", config))
         stack.enter_context(patch.object(app_search, "maybe_background_archive_catalog_index", lambda *args: None))
@@ -164,13 +165,13 @@ class HerdrCoreTests(unittest.TestCase):
                 answer = self.app_search("--refresh")
         self.assertEqual(answer, {"error": None, "rows": [
             {"kind": "space", "space": "sp1", "name": "web"},
-            {"kind": "terminal", "address": "t1", "space": "sp1", "tab": "tb1", "title": "Fix the login form",
+            {"kind": "terminal", "frontend": "core", "address": "t1", "space": "sp1", "tab": "tb1", "title": "Fix the login form",
              "agent": "claude", "status": "working", "snippet": "the login form rejects valid emails", "cwd": "/repo"},
-            {"kind": "terminal", "address": "t10", "space": "sp1", "tab": "tb5", "title": "rollout-plan",
+            {"kind": "terminal", "frontend": "core", "address": "t10", "space": "sp1", "tab": "tb5", "title": "rollout-plan",
              "agent": "claude", "status": "working", "snippet": "planning the rollout", "cwd": "/repo"},
-            {"kind": "terminal", "address": "t2", "space": "sp1", "tab": "tb1", "title": "Review the login form",
+            {"kind": "terminal", "frontend": "core", "address": "t2", "space": "sp1", "tab": "tb1", "title": "Review the login form",
              "agent": "codex", "status": "blocked", "snippet": "waiting for approval", "cwd": "/repo"},
-            {"kind": "terminal", "address": "t11", "space": "sp1", "tab": "tb6", "title": "",
+            {"kind": "terminal", "frontend": "core", "address": "t11", "space": "sp1", "tab": "tb6", "title": "",
              "agent": "codex", "status": "unknown", "snippet": "codex ready", "cwd": "/repo"},
         ]})
 
@@ -320,7 +321,9 @@ class HerdrCoreTests(unittest.TestCase):
                 check = self.app_search("--refresh", "--running", f"codex={CODEX_SESSION}")
                 ended = self.app_search("--refresh", "--running", f"codex={ENDED_SESSION}")
         self.assertEqual([row["address"] for row in listed], [None])
-        self.assertEqual(check, {"rows": [{"kind": "terminal", "address": "t2"}], "error": None})
+        self.assertEqual(check, {"rows": [{"kind": "terminal", "frontend": "core", "address": "t2", "space": "sp1", "tab": "tb1",
+                                           "title": "Review the login form", "agent": "codex", "space_name": "web",
+                                           "socket": "", "mirror": None}], "error": None})
         self.assertEqual(ended["rows"], [])
 
     def test_a_terminal_claims_the_session_it_runs_now_not_the_one_it_was_launched_with(self):
@@ -349,7 +352,7 @@ class HerdrCoreTests(unittest.TestCase):
                 plain = self.app_search("--refresh", "--running", f"codex={CODEX_SESSION}")["rows"]
                 boxed_rows = self.app_search("--refresh", "--launcher", launcher, "--running", f"codex={CODEX_SESSION}")["rows"]
         self.assertEqual(plain, [])
-        self.assertEqual(boxed_rows, [{"kind": "terminal", "address": "t72"}])
+        self.assertEqual([(row["frontend"], row["address"]) for row in boxed_rows], [("core", "t72")])
 
     def test_a_malformed_resume_command_spoils_only_its_own_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -394,7 +397,7 @@ class HerdrCoreTests(unittest.TestCase):
                 rows = self.app_search("--refresh", "--launcher", 'codex=["bash", "-lc", "codex"]')["rows"]
                 running = self.app_search("--running", f"codex={CODEX_SESSION}")["rows"]
         self.assertEqual([(row["address"], row["agent"]) for row in rows if row["kind"] == "terminal"], [("t63", "codex")])
-        self.assertEqual(running, [{"kind": "terminal", "address": "t63"}])
+        self.assertEqual([(row["frontend"], row["address"]) for row in running], [("core", "t63")])
 
     def test_an_agent_that_exited_leaves_its_session_to_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
