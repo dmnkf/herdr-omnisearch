@@ -206,6 +206,11 @@ class HerdrClient:
         )
         return result["read"]["text"]
 
+    def pane_foreground(self, pane_id):
+        """The argv of each process in the pane's foreground process group."""
+        info = self.request("pane.process_info", {"pane_id": pane_id})["process_info"]
+        return [process.get("argv") or [] for process in info.get("foreground_processes") or []]
+
     def focus_workspace(self, workspace_id):
         return self.request("workspace.focus", {"workspace_id": workspace_id})
 

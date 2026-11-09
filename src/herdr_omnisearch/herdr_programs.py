@@ -34,3 +34,13 @@ AGENT_PROGRAMS = {
     "agy", "amp", "antigravity", "claude", "claude-code", "codex", "copilot", "crush", "cursor", "cursor-agent",
     "gemini", "github-copilot", "grok", "hermes", "kimi", "kiro", "kiro-cli", "opencode", "pi", "qoder", "qodercli",
 }
+
+MIRROR_PROGRAM = "herdr-mirror"
+
+
+def mirror_origin(argv) -> str:
+    """What a `herdr-mirror attach <origin>` command mirrors (`tui:<pane>`, `core:<address>`), else ''."""
+    argv = list(argv or [])
+    if len(argv) >= 3 and argv[0].rsplit("/", 1)[-1] == MIRROR_PROGRAM and argv[1] == "attach":
+        return argv[2] if argv[2].startswith(("tui:", "core:")) else ""
+    return ""

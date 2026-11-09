@@ -1,13 +1,14 @@
 import json
 import re
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
-from .herdr_programs import AGENT_PROGRAMS, INTERPRETERS, KNOWN_PROGRAMS, SHELLS
+from .herdr_programs import AGENT_PROGRAMS, INTERPRETERS, KNOWN_PROGRAMS, SHELLS, mirror_origin
 from .live_index import STATUS_WEIGHT, claude_sessions, store_session
 from .settings import app_config, core_session_key
-from .storage import app_db_path
+from .storage import app_db_path, connect
 
 HC_TIMEOUT_SECONDS = 10
 CLAUDE_STATUS = {"busy": "working", "waiting": "blocked", "idle": "idle"}
@@ -15,6 +16,8 @@ REPORTED_STATES = {"error": "blocked"}
 TITLE_MARKS = re.compile(r"^[^\w(\[]+")
 SCRIPT_EXTENSIONS = (".js", ".mjs", ".cjs", ".ts", ".py", ".rb")
 FISH_LAUNCH = "command $argv[2..]; exec $argv[1] -"
+MIRROR_LABEL = "herdr-mirror.origin"
+LAUNCHERS_KEY = "app_launchers"
 
 
 class CoreError(RuntimeError):
@@ -213,21 +216,50 @@ def shown_labels(terminal, by_address):
     return None
 
 
-def store_core(spaces, panes, screens) -> int:
+def store_core(spaces, panes, screens, mirrors=None, owners=None) -> int:
     return store_session(
         core_session_key(), "", spaces, panes, lambda pane: screens[pane["pane_id"]],
-        include_empty=False, include_wrappers=False, db=app_db_path(),
+        include_empty=False, include_wrappers=False, db=app_db_path(), mirrors=mirrors, owners=owners,
     )
+
+
+def core_mirror_origin(terminal) -> str:
+    """The Herdr pane a terminal mirrors (`tui:w1:p2`), or '' for a terminal that owns what it runs."""
+    origin = (terminal.get("labels") or {}).get(MIRROR_LABEL) or mirror_origin(unwrap_launch(running_argv(terminal)))
+    return origin if origin.startswith("tui:") else ""
+
+
+def remembered_launchers(launchers):
+    """The app's launchers, kept from its last refresh for the refreshes Herdr starts."""
+    conn = connect(app_db_path())
+    try:
+        with conn:
+            if launchers:
+                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (LAUNCHERS_KEY, json.dumps(launchers)))
+                return launchers
+            row = conn.execute("SELECT value FROM meta WHERE key = ?", (LAUNCHERS_KEY,)).fetchone()
+    finally:
+        conn.close()
+    return [(agent, argv) for agent, argv in json.loads(row[0])] if row else []
 
 
 def index_core(session_agents=None, launchers=()) -> int:
     """Index the terminals the Herdr app shows here; session_agents names the agent of any session id in their commands."""
     try:
-        terminals = core_terminals()
+        listed = core_terminals()
     except CoreError:
         # A core that is gone took its terminals with it.
         store_core([], [], {})
         raise
+    launchers = remembered_launchers([(agent, list(argv)) for agent, argv in launchers])
+    mirrors = {}
+    terminals = []
+    for terminal in listed:
+        origin = core_mirror_origin(terminal)
+        if origin:
+            mirrors[origin] = terminal["address"]
+        else:
+            terminals.append(terminal)
     by_address = {terminal["address"]: terminal for terminal in terminals}
     sessions_by_pid = live_claude_sessions()
     resumed = session_agents([word for terminal in terminals for word in command_words(terminal)]) if session_agents else {}
@@ -236,9 +268,14 @@ def index_core(session_agents=None, launchers=()) -> int:
     launch_programs = {program_stem(argv[0]) for _agent, argv in [*resume_commands(), *launchers] if argv} - SHELLS
     spaces = {}
     panes = []
+    owners = []
     screens = {}
     for terminal in terminals:
+        foreground = terminal.get("foreground") or {}
+        claude = sessions_by_pid.get(foreground.get("pid")) or sessions_by_pid.get(terminal.get("pid"))
         labels = shown_labels(terminal, by_address)
+        # A terminal the app does not show still owns the session it runs.
+        owners.append(terminal_pane(terminal, labels or {}, claude, resumed, names, launch_programs))
         if labels is None:
             continue
         try:
@@ -252,7 +289,15 @@ def index_core(session_agents=None, launchers=()) -> int:
             "label": space_name or labels["herdr.space"],
             "active_tab_id": labels.get("herdr.tab", ""),
         })
-        foreground = terminal.get("foreground") or {}
-        claude = sessions_by_pid.get(foreground.get("pid")) or sessions_by_pid.get(terminal.get("pid"))
-        panes.append(terminal_pane(terminal, labels, claude, resumed, names, launch_programs))
-    return store_core(list(spaces.values()), panes, screens)
+        panes.append(owners[-1])
+    return store_core(list(spaces.values()), panes, screens, mirrors, owners)
+
+
+def index_core_if_installed() -> None:
+    """Keep herdr-core's terminals current for Herdr's own search, on a machine that runs herdr-core too."""
+    from .archive_catalog import archive_catalog_session_agents
+    if shutil.which("hc"):
+        try:
+            index_core(archive_catalog_session_agents)
+        except CoreError:
+            pass

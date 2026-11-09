@@ -68,6 +68,9 @@ class FakeHerdrClient:
         self.reads.append((pane_id, lines))
         return "indexed live output"
 
+    def pane_foreground(self, pane_id):
+        return []
+
 
 class FakeHerdrCLI:
     instances = []

@@ -5,17 +5,20 @@ import time
 from pathlib import Path
 
 from .herdr_cli import HerdrCLI
+from .herdr_programs import mirror_origin
 from .herdr_socket import HerdrClient, HerdrError, socket_is_alive
 from .settings import (
     CORE_SESSION_PREFIX,
     app_config,
     cli_command,
+    core_session_key,
     data_dir,
     herdr_bin,
     herdr_session_identity,
     herdr_session_key,
 )
 from .storage import (
+    app_db_path,
     compact_index,
     connect,
     index_is_bloated,
@@ -39,6 +42,8 @@ from .textmatch import (
     token_trigrams,
     tokens,
 )
+
+FRONTEND_KEY = "frontend:"
 
 STATUS_WEIGHT = {
     "workspace": 0,
@@ -159,10 +164,43 @@ def should_skip_pane(pane, workspace_label: str, *, include_wrappers: bool) -> b
     return False
 
 
+def pane_foreground(client: HerdrClient, pane_id: str):
+    try:
+        return client.pane_foreground(pane_id)
+    except HerdrError:
+        return []
+
+
+def claim_named_sessions(panes, foregrounds) -> None:
+    """A pane running an agent that reported no session owns the catalog session of that agent its command names."""
+    from .archive_catalog import archive_catalog_session_agents
+    words = {
+        pane["pane_id"]: [part for argv in foregrounds[pane["pane_id"]] for word in argv for part in (word, word.partition("=")[2]) if part]
+        for pane in panes
+        if pane_agent(pane) and not pane_agent_session_id(pane)
+    }
+    agents = archive_catalog_session_agents([word for pane_words in words.values() for word in pane_words])
+    for pane in panes:
+        session_id = next((word for word in words.get(pane["pane_id"], []) if agents.get(word) == pane_agent(pane)), "")
+        if session_id:
+            pane["agent_session"] = {"agent": pane_agent(pane), "value": session_id}
+
+
 def index_session(lines: int, include_empty: bool, include_wrappers: bool, snapshot=None) -> int:
     client = HerdrClient()
     snapshot = snapshot or client.snapshot()
-    panes = merge_agent_records(snapshot.get("panes", []), HerdrCLI(herdr_bin()).agent_list())
+    panes = []
+    mirrors = {}
+    foregrounds = {}
+    for pane in merge_agent_records(snapshot.get("panes", []), HerdrCLI(herdr_bin()).agent_list()):
+        foreground = pane_foreground(client, pane.get("pane_id") or "")
+        origin = next((origin for origin in map(mirror_origin, foreground) if origin.startswith("core:")), "")
+        if origin:
+            mirrors[origin] = pane["pane_id"]
+        else:
+            panes.append(pane)
+            foregrounds[pane["pane_id"]] = foreground
+    claim_named_sessions(panes, foregrounds)
     session_key, session_socket = herdr_session_identity()
     return store_session(
         session_key,
@@ -172,12 +210,17 @@ def index_session(lines: int, include_empty: bool, include_wrappers: bool, snaps
         lambda pane: pane_recent_text(client, pane, lines),
         include_empty=include_empty,
         include_wrappers=include_wrappers,
+        mirrors=mirrors,
     )
 
 
-def store_session(session_key, session_socket, workspaces_payload, panes, read_pane, *, include_empty, include_wrappers, db=None) -> int:
-    """Replace one session's rows with its workspaces and panes, read_pane giving each pane's text."""
+def store_session(
+    session_key, session_socket, workspaces_payload, panes, read_pane, *, include_empty, include_wrappers, db=None, mirrors=None,
+    owners=None,
+) -> int:
+    """Replace one session's rows; owners (default panes) may run sessions, mirrors maps an origin (`core:t7`) to its pane."""
     import hashlib
+    import json
     workspace_labels = {
         workspace["workspace_id"]: workspace.get("label") or workspace["workspace_id"]
         for workspace in workspaces_payload
@@ -296,11 +339,37 @@ def store_session(session_key, session_socket, workspaces_payload, panes, read_p
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
             (f"last_indexed_at:{session_key}", str(now)),
         )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (f"{FRONTEND_KEY}{session_key}", json.dumps({
+                "socket": session_socket,
+                "owners": session_owners(panes if owners is None else owners, workspace_labels, session_names),
+                "mirrors": mirrors or {},
+            })),
+        )
         reap_dead_sessions(conn, session_key)
         prune_vocabulary(conn)
     compact_index(conn)
     conn.close()
     return len(docs)
+
+
+def session_owners(panes, workspace_labels, session_names):
+    """Every pane running a known session, whether or not search shows it."""
+    owners = []
+    for pane in panes:
+        session_id = pane_agent_session_id(pane)
+        if session_id:
+            owners.append({
+                "agent": pane_agent(pane),
+                "session_id": session_id,
+                "pane_id": pane["pane_id"],
+                "workspace_id": pane.get("workspace_id", ""),
+                "tab_id": pane.get("tab_id", ""),
+                "workspace_label": workspace_labels.get(pane.get("workspace_id"), pane.get("workspace_id", "")),
+                "title": pane_title(pane, session_names.get(session_id, "")),
+            })
+    return owners
 
 
 def prune_vocabulary(conn) -> None:
@@ -361,6 +430,7 @@ def replace_docs(conn, owner_where: str, owner_params, docs, doc_tokens) -> None
 
 def reap_dead_sessions(conn, current_key: str) -> int:
     """Drop index rows and state files of sessions whose socket is gone."""
+    import json
     rows = conn.execute(
         """
         SELECT DISTINCT herdr_session, socket_path FROM docs
@@ -369,14 +439,16 @@ def reap_dead_sessions(conn, current_key: str) -> int:
         """,
         (current_key, f"{CORE_SESSION_PREFIX}%"),
     ).fetchall()
-    dead = [
-        row["herdr_session"]
-        for row in rows
-        if not socket_is_alive(row["socket_path"] or "")
-    ]
+    sockets = {row["herdr_session"]: row["socket_path"] or "" for row in rows}
+    # A session showing only mirrors has no rows, just its record.
+    for key, value in conn.execute("SELECT key, value FROM meta WHERE key LIKE ?", (f"{FRONTEND_KEY}%",)).fetchall():
+        session = key[len(FRONTEND_KEY):]
+        if session != current_key and not session.startswith(CORE_SESSION_PREFIX):
+            sockets.setdefault(session, json.loads(value).get("socket") or "")
+    dead = [session for session, socket_path in sockets.items() if not socket_is_alive(socket_path)]
     for key in dead:
         replace_docs(conn, "machine_id = '' AND herdr_session = :session", {"session": key}, [], [])
-        conn.execute("DELETE FROM meta WHERE key = ?", (f"last_indexed_at:{key}",))
+        conn.execute("DELETE FROM meta WHERE key IN (?, ?)", (f"last_indexed_at:{key}", f"{FRONTEND_KEY}{key}"))
         stop_watcher_at(data_dir() / f"watch-{key}.pid")
         for leftover in (
             data_dir() / f"watch-{key}.pid",
@@ -780,6 +852,12 @@ def fuzzy_snippet(content: str, matched_tokens):
     return text[:260]
 
 
+def row_frontend(row) -> str:
+    """`core` for a herdr-core terminal, here or synced from a machine; `tui` for a Herdr pane."""
+    session = (row.get("herdr_session") or "").rsplit("/", 1)[-1]
+    return "core" if session.startswith(CORE_SESSION_PREFIX) else "tui"
+
+
 def is_workspace_row(row) -> bool:
     return (row.get("pane_id") or "").startswith("workspace:")
 
@@ -840,7 +918,7 @@ def is_machine_row(row) -> bool:
     return (row.get("pane_id") or "").startswith("machine:")
 
 
-def decorate_live_tree(rows, *, machine_level=False, db=None):
+def decorate_live_tree(rows, *, machine_level=False, dbs=(None,)):
     if not rows:
         return rows
     workspace_order = []
@@ -860,7 +938,8 @@ def decorate_live_tree(rows, *, machine_level=False, db=None):
         for key in workspace_order
         if key not in workspace_rows and child_rows.get(key)
     ]
-    workspace_rows.update(fetch_workspace_rows(missing_headers, db))
+    for db in dbs:
+        workspace_rows.update(fetch_workspace_rows(missing_headers, db))
 
     depth = 1 if machine_level else 0
     groups = {}
@@ -929,11 +1008,16 @@ def grouped_search_index(
     session_matcher=None,
     session=None,
     db=None,
+    core=False,
 ):
+    """Live rows as a tree; core adds this machine's herdr-core terminals to its own panes."""
     # Each machine gets its own limit so a busy host cannot crowd the others out.
     owners = synced_machine_ids() if machines else []
+    searches = [(owner, all_sessions, session, db) for owner in (["", *owners] if owners else [None])]
+    if core:
+        searches.append(("" if owners else None, False, core_session_key(), app_db_path()))
     rows = []
-    for owner in ["", *owners] if owners else [None]:
+    for owner, scope_all, scope_session, source in searches:
         rows.extend(
             search_index(
                 query,
@@ -941,12 +1025,12 @@ def grouped_search_index(
                 status=status,
                 agent=agent,
                 snippets=snippets,
-                all_sessions=all_sessions,
+                all_sessions=scope_all,
                 machines=machines,
                 machine_id=owner,
                 session_matcher=session_matcher,
-                session=session,
-                db=db,
+                session=scope_session,
+                db=source,
             )
         )
     grouped = {}
@@ -982,7 +1066,7 @@ def grouped_search_index(
         ranked.append(row)
     spans_machines = len({row.get("machine_id") or "" for row in ranked}) > 1
     machine_level = machines and (spans_machines or any(row.get("machine_id") for row in ranked))
-    tree = decorate_live_tree(ranked, machine_level=machine_level, db=db)
+    tree = decorate_live_tree(ranked, machine_level=machine_level, dbs=list(dict.fromkeys(source for *_scope, source in searches)))
     # Pinning only adds information when the hits are spread over machines.
     if not (spans_machines and query.strip()):
         return tree

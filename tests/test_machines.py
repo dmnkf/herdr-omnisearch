@@ -84,6 +84,9 @@ class LocalHerdrClient:
     def pane_read(self, pane_id, lines):
         return "deploy notes from the laptop"
 
+    def pane_foreground(self, pane_id):
+        return []
+
 
 class LocalHerdrCLI:
     def __init__(self, binary="herdr", runner=None, env=None):
