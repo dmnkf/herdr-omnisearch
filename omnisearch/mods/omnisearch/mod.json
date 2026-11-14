@@ -1,1 +1,1 @@
-{ "place": "none", "title": "OmniSearch", "overlay": { "kind": "popup", "at": "top", "offset": 40, "width": 720, "height": 0.8 } }
+{ "place": "none", "title": "OmniSearch", "overlay": { "kind": "popup", "at": "top", "offset": 28, "width": 0.92, "height": 0.88 } }

@@ -6,30 +6,33 @@ This file is the brief: enough to build OmniSearch from an empty folder. The fil
 
 ## What you see
 
-- A popup near the top of your window, 720px wide and up to 80% of its height, offset 40px from the top. Nothing is added to the layout itself.
-- A heading row: "OmniSearch" (15px, semibold), then two chips, "Live" and "Sessions" (12px, the current one on the `selected` color). A small spinner shows on the right while any machine is still answering, and the hint "Tab live/sessions · Esc" sits at the far right (11px, `dim`).
-- A search field 36px high with a 9px radius, a 1px `accent` border on the terminal `background`, and the shipped search icon. The placeholder reads "Search terminals by what they show or said…".
-- A list of up to 8 rows at a time, each 46px with a 7px radius:
-  - Line 1: a status glyph, the title (13px, `foreground`, semibold when selected) and tags at the right (11px, `dim`).
-  - Line 2: the matching text (11.5px, `muted`), cut to one line.
-  - The selected row is on `selected` and hovered rows on `hover`.
-- **Live rows** are the app's terminals and the herdr TUI's agent panes on each machine. Their title is the agent's own title, else the terminal's, else the Claude Code session name. The tags are the agent, the space, where it lives ("app" or "TUI") and, for another machine, the machine's name. A terminal or pane that only mirrors the other one (`herdr-mirror`) is never a row of its own.
-- A space that matched by name but has no matching terminal gets its own row, with "space" as its second line.
-- **Sessions rows** are old agent sessions. Their tags are the agent, the space name, and how long ago the session last changed ("5m", "3h", "2d"), or "running in app" or "running in TUI" when a terminal or pane on that machine runs it now.
-- With no rows, one line of `dim` text explains why. It reads "Searching…", "Nothing matches "…"", "No terminals to show yet." or a machine's error. With no machine that has `herdr-omnisearch`, it gives the install command.
+- A popup over almost all of the window: 92% of its width and 88% of its height, 28px from the top. Nothing is added to the layout itself.
+- **Top bar, 56px:** the shipped search icon (17px, `dim`), a borderless field in 16px with the placeholder "Search agents by what they show or said", the shipped spinner (13px, `dim`) while any machine is still answering, and a two-part switch, "Live" and "Sessions" (12px, the current one on `selected`, on `background` at half opacity).
+- A 1px `border` hairline, then the body, then another hairline and a 34px footer: key caps for "↵ Open", "⇥ Sessions" (or "⇥ Live") and "esc Close" (10.5px on `hover`, labels in `dim`), and at the right how many agents or sessions are listed, or the machines' errors in `blocked`.
+- **Left, the list:** 40% of the width (at least 420px), the body's full height.
+  - One section per machine, in a fixed order: this computer first, then the others by name. When more than one machine has rows, each section starts with a 30px header: the machine's name ("This computer" here) in `foreground`, semibold, 11.5px, and its row count in `dim`.
+  - Rows are 36px, or 54px when they show a snippet, with an 8px radius, 6px in from the sides. Line 1: the agent's icon from the app's program table (16px), the title (13.5px, `foreground`), the status mark, then the space's name in its own color and a `dim` suffix ("TUI", "Space", a session's age or "running"). Line 2, only while searching or in Sessions: the matching text, 12px, started just before the first match, the matched words in `accent` and medium weight, the rest in `dim`.
+  - Each space's name has a color of its own, the same for the same name, from the theme's terminal palette without yellow (the match color) and red (it reads as an error): `ansi4`, `ansi5`, `ansi6`, `ansi2`, `ansi12`, `ansi13`, `ansi14`, `ansi10`.
+  - The selected row is on `selected` with a 3px `accent` bar at its left edge; hovered rows are on `hover`.
+- **Live rows** are the app's terminals and the herdr TUI's agent panes on each machine. Their title is the agent's own title, else the terminal's, else the Claude Code session name. "TUI" follows the space's name when Enter would take the person out of the app (a TUI pane nothing mirrors). A terminal or pane that only mirrors the other one (`herdr-mirror`) is never a row of its own.
+- A space that matched by name but has no matching terminal gets its own row, with the shipped layers icon and "Space".
+- **Sessions rows** are old agent sessions: the space name when there is a title, then how long ago the session last changed ("5m ago", "3h ago", "2d ago", then a date like "Jul 13"), or "running" ("running in TUI" when only a TUI pane runs it).
+- **Right, the preview** of the selected row, the rest of the width, 20px in:
+  - The icon (18px) and title (14px, medium), then the space's name in its color and, in `dim`, where the row lives ("in the app", "in the TUI", "TUI, shown here" for a mirrored pane), its status and its machine.
+  - **Match**, while searching or for a session: the whole matching text, wrapped, up to about six lines, words containing a query word on an `accent` tint (25%).
+  - **Conversation**, for a row whose agent session is known: its newest messages, bottom-aligned, the oldest cut off at the top. The person's on a `selected` block headed "You", the agent's as rendered Markdown headed by the agent's name in its color; each with how long ago it was said. While searching, the newest message holding a query word is outlined in `accent` and followed by one more message.
+  - **Screen**, for a live row without a known session: its screen on the terminal `background` in an 8px-radius box, JetBrains Mono 11.5px on 16px lines, as many lines as fit. A TUI pane keeps its colors, bold and dim; an app terminal is plain text. Blank runs fold to one line, and while searching the view centers on the last line holding a query word, which gets an `accent` bar (19%) across its width.
+- With no rows, the list says why in `dim`, centered: "Searching…", "Nothing matches “…”", "No agents running", "No sessions yet" or a machine's error. With no machine that has `herdr-omnisearch`, it gives the install command.
 
 ## How it behaves
 
-- Status glyphs come from the terminal's agent:
-  - Working is the shipped spinner, turning once every 900 ms in `working`.
-  - Blocked is "●" in `blocked`, done is "●" in `done`, and idle is "○" in `idle`.
-  - Anything unknown is "·" in `dim`.
-  - A session row shows "↺", or "●" in `working` when it is running now.
-- Opening the popup searches at once with an empty query. The live list then shows every agent terminal, the busiest first, from what each machine indexed last.
+- Status marks show only what asks for attention: working is the shipped spinner (12px, turning every 900 ms in `working`), blocked a "Needs you" pill (`blocked` on its 15% tint), done a 6px dot in `done`. Idle and unknown show nothing. A session running now shows a 6px dot in `working`.
+- Opening the popup searches at once with an empty query. The live list then shows every agent, the ones needing the person first (blocked, working, done, idle), from what each machine indexed last.
 - Once that machine's launchers are known (at most 5 s), each machine re-reads herdr-core's terminals with `app-search --refresh --limit 0`. It also starts a background refresh of its session catalog when that is over a minute old. As each machine finishes, its own rows are searched again. A refresh that failed says why, under the list or in place of it.
 - Typing searches again 90 ms after the last key. Each machine shows the answer to its newest search only, so a slow answer to older words is dropped. Each machine's rows replace its old ones as they arrive, so the list never empties while you type.
-- Up and Down move the selection, stopping at the ends; Page Up and Page Down move 8 rows. The list scrolls only as far as it takes to keep the selection in view. The wheel scrolls it too.
-- Tab switches between Live and Sessions and searches the same words there. Clicking a chip does the same.
+- Up and Down move the selection, stopping at the ends; Page Up and Page Down move 8 rows. The selection stays on the same row, not the same position, when a machine's answer arrives. The list scrolls only as far as it takes to keep the selection in view, and the wheel scrolls it too.
+- The preview reads what the selected row shows a moment after it is chosen, and again while it stays chosen: its conversation every 3 s, its screen every 2 s.
+- Tab switches between Live and Sessions and searches the same words there. Clicking either half of the switch does the same.
 - Enter, or a click, acts on the row and closes the popup:
   - **A terminal with a pane:** `tab.select` on its tab, then `pane.focus` on the terminal.
   - **A terminal without a pane:** `agent.focus` for a reporting agent, `terminal.peek` for anything else.
@@ -56,10 +59,15 @@ This file is the brief: enough to build OmniSearch from an empty folder. The fil
 - **Herdr functions:** `exec`, `knownAgents`, `machines`, `spaces`, `panes`, `agents`, `run`, `notify`, `theme`, `props` and `closeOverlay`.
 - **Tab:** the app binds Tab to moving focus, and its binding runs before a mod's key handler. So `init` calls `cx.bind_keys([{ keystroke: "tab", action: "omnisearch_mode", context: "OmniSearch" }])`, and the root has `.key_context("OmniSearch").on_action("omnisearch_mode", …)`. Being deeper in, that binding wins. The `win98` menu mod does the same for Escape.
 - **UI:**
-  - `InputState` and `Input` from `gpui-base` for the field.
-  - A focus-tracked root `v_flex` that takes Escape, arrows and page keys before the field does, and Tab too when the key binding is gone.
-  - The shipped `mods/workspace-chrome/search.svg` and `spinner.svg`.
-  - When the list is longer than 8 rows, every row is placed absolutely at `index × 46px` minus the scroll.
+  - `InputState` and `Input` from `gpui-base` for the field, `TextView.markdown` for an agent's messages.
+  - A focus-tracked root `v_flex` that takes Escape, arrows and page keys before the field does, and Tab too when the key binding is gone. Its `on_size_change` gives the popup's size; the list's width and height and the preview's height come from it.
+  - The shipped `mods/workspace-chrome/search.svg`, `spinner.svg` and `layers.svg`, and each agent's icon from `knownAgents()` (`icons/<agent>.svg` when it isn't listed).
+  - Every section header and row is placed absolutely at its running top minus the scroll, so no stack drifts. The screen box's `on_size_change` decides how many 16px lines it shows.
+  - Highlighted words in the Match block are one element per word in a wrapping row, so a match gets a real tinted background; `line_height` takes `"18px"` and `"16px"` strings, because a bare number is a multiple of the font size.
+- **Preview sources:**
+  - `exec("herdr-omnisearch", ["app-conversation", "--agent", agent, "--session", session_id, "--", ...words], { on })` answers `{ found, messages: [{ role, at, text, match }] }`: the session's history file is found through the catalog, and the end of the file (2 MB) is read on each call, so a live agent's newest message is there at once; an older match comes from the catalog's messages. Live rows carry `session_id` for this.
+  - `exec("herdr", ["pane", "read", pane, "--ansi", "--source", "visible"], { on })` for a TUI pane: lines with SGR color codes only, drawn as runs (16 theme colors, the 256-color cube and gray ramp, and 24-bit colors).
+  - `exec("hc", ["read", "<machine>/<address>", "--lines", "0"])` for an app terminal: plain text. Its history is never read (see Watch out).
 - **`herdr-omnisearch`** comes from https://github.com/dmnkf/herdr-omnisearch, installed with `uv tool install git+https://github.com/dmnkf/herdr-omnisearch`:
   - It reads this machine's herdr-core terminals with `hc ls`, `hc get` and `hc read --lines 0 --json`, and leaves out a connected machine's (`vps/t7`): that machine indexes its own.
   - It keeps them in `app-index.sqlite3`, apart from the Herdr plugin's `index.sqlite3`, so any plugin version on the same machine leaves them alone. The session catalog is shared. Live search reads both indexes, and a refresh re-reads the herdr TUI too when its server runs.

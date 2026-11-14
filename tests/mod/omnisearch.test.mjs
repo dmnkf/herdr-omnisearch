@@ -37,7 +37,8 @@ function cx() {
     stopped: false,
     bound: [],
     bind_keys: (bindings) => (c.bound.push(...bindings), bindings.length),
-    timer: { after: (ms, fn) => c.timers.push(Object.assign(fn, { ms })), every: () => {} },
+    intervals: [],
+    timer: { after: (ms, fn) => c.timers.push(Object.assign(fn, { ms })), every: (ms, fn) => c.intervals.push(fn) },
     spawn: (fn) => c.tasks.push(fn(c)),
     notify: () => c.notified++,
     focus_handle: () => ({ focus: () => {} }),
@@ -48,6 +49,11 @@ function cx() {
 
 async function settle(c) {
   while (c.tasks.length) await c.tasks.shift();
+}
+
+async function tick(c) {
+  for (const fn of c.intervals) fn(c);
+  await settle(c);
 }
 
 function ok(rows) {
@@ -166,7 +172,7 @@ test("Enter on a remote terminal selects its tab and focuses its pane by machine
     panes: [{ pane: "p1", terminal: "vps/t3", tab: "vps/tb1" }],
   });
   const { view, c } = await open(state);
-  assert.match(view.render().text(), /fix login.*claude.*web.*vps.*the login form/);
+  assert.match(view.render().text(), /vps.*icons\/claude\.svg fix login.*web/);
   await enter(c);
   assert.deepEqual(state.ran, [["tab.select", { id: "vps/tb1" }], ["pane.focus", { terminal: "vps/t3" }]]);
   assert.deepEqual(state.closed, ["o1"]);
@@ -200,7 +206,7 @@ test("Tab searches old sessions, and Enter resumes one in the space already open
   key(view, c, "tab");
   await settle(c);
   assert.ok(state.calls.at(-1).args.includes("--archive"));
-  assert.match(view.render().text(), /web.*claude.*user: fix it/);
+  assert.match(view.render().text(), /icons\/claude\.svg web .*You: fix it/);
   await enter(c);
   assert.deepEqual(state.ran, [["tab.new", { space: "sp2", folder: "/repo", argv: ["claude", "--resume", "s-1"] }]]);
 });
@@ -400,8 +406,8 @@ test("a herdr TUI pane is listed with its space and says it lives in the TUI", a
   const state = app({ answers: { here: ok([TERMINAL, PANE]) } });
   const { view } = await open(state);
   const text = view.render().text();
-  assert.match(text, /fix login.*claude.*app.*the login form/);
-  assert.match(text, /billing fix.*claude.*billing.*TUI.*invoice totals/);
+  assert.match(text, /icons\/claude\.svg fix login/);
+  assert.match(text, /icons\/claude\.svg billing fix billing TUI/);
 });
 
 test("Enter on a TUI pane the app mirrors focuses the mirror terminal", async () => {
@@ -436,7 +442,7 @@ test("a session running in a TUI pane is focused there, never started in the app
   const { view, c } = await open(state);
   key(view, c, "tab");
   await settle(c);
-  assert.match(view.render().text(), /billing.*claude.*running in TUI/);
+  assert.match(view.render().text(), /icons\/claude\.svg billing.*running in TUI/);
   await enter(c);
   assert.deepEqual(state.calls.at(-1).args.slice(0, 2), ["focus-target", "--workspace-id"]);
   assert.deepEqual(state.ran, []);
@@ -464,4 +470,61 @@ test("a session without a resume command warns instead of starting anything", as
   await enter(c);
   assert.deepEqual(state.ran, []);
   assert.equal(state.notified[0].body, "No resume command for pi");
+});
+
+test("the preview shows the selected terminal's screen, read through the app by its machine address", async () => {
+  const state = app({
+    machines: [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }],
+    answers: {
+      here: (args) => (args[0] === "read" ? { code: 0, stdout: "npm test\nthe login form is fixed\n", stderr: "" } : ok([])),
+      vps: ok([{ ...TERMINAL, address: "t7" }]),
+    },
+  });
+  const { view, c } = await open(state);
+  await tick(c);
+  assert.deepEqual(state.calls.at(-1), { command: "hc", args: ["read", "vps/t7", "--lines", "0"], on: undefined });
+  assert.match(view.render().text(), /Screen.*npm test.*the login form is fixed/);
+});
+
+test("a TUI pane is previewed in color from that machine's TUI, without escape codes", async () => {
+  const state = app({
+    machines: [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }],
+    answers: {
+      here: ok([]),
+      vps: (args) => (args[0] === "pane" ? { code: 0, stdout: "\x1b[38;2;166;227;161minvoice totals\x1b[0m match\r\n", stderr: "" } : ok([{ ...TERMINAL, frontend: "tui", address: "w1:p1", mirror: null }])),
+    },
+  });
+  const { view, c } = await open(state);
+  await tick(c);
+  assert.deepEqual(state.calls.at(-1), { command: "herdr", args: ["pane", "read", "w1:p1", "--ansi", "--source", "visible"], on: "vps" });
+  const text = view.render().text();
+  assert.match(text, /invoice totals\s+match/);
+  assert.ok(!text.includes("\x1b"), "no escape codes in what is shown");
+});
+
+test("while searching, the preview shows the whole match the row came from", async () => {
+  const state = app({ answers: { here: ok([{ ...TERMINAL, snippet: "assistant: ...fixed the login form and the signup form..." }]) } });
+  const { view, c } = await open(state);
+  await type(view, c, "login");
+  assert.match(view.render().text(), /Match …fixed the login form and the signup form…/);
+});
+
+test("a terminal whose session is known previews its conversation from that machine, not its screen", async () => {
+  const talk = { found: true, error: null, messages: [
+    { role: "user", at: 0, text: "fix the login form", match: false },
+    { role: "assistant", at: 0, text: "The login form is fixed.", match: true },
+  ] };
+  const state = app({
+    machines: [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }],
+    answers: {
+      here: ok([]),
+      vps: (args) => (args[0] === "app-conversation" ? { code: 0, stdout: JSON.stringify(talk), stderr: "" } : ok([{ ...TERMINAL, address: "t7", session_id: "s1" }])),
+    },
+  });
+  const { view, c } = await open(state);
+  await tick(c);
+  assert.deepEqual(state.calls.at(-1), { command: "herdr-omnisearch", args: ["app-conversation", "--agent", "claude", "--session", "s1", "--"], on: "vps" });
+  await tick(c);
+  assert.ok(!state.calls.some((call) => call.command === "hc" || call.command === "herdr"), "the screen is not read");
+  assert.match(view.render().text(), /Conversation You fix the login form .*The login form is fixed\./);
 });

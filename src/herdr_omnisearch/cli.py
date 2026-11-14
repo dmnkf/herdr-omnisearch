@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -33,6 +34,7 @@ from .storage import (
     watcher_log_path,
 )
 from .textmatch import clean_text
+from .conversation import conversation
 from .live_index import grouped_search_index, index_session, maybe_background_index
 from .opencode_history import opencode_binary
 from .machines import (
@@ -367,6 +369,11 @@ def cmd_archive_resume(args) -> int:
     return focus_archive_catalog_result(args.stable_id)
 
 
+def cmd_app_conversation(args) -> int:
+    print(json.dumps(conversation(args.agent, args.session, args.words, args.limit)))
+    return 0
+
+
 def cmd_preview(args) -> int:
     if args.stable_id.startswith("archive-catalog:"):
         row = archive_catalog_result(args.stable_id)
@@ -669,6 +676,13 @@ def build_parser():
 
     p = sub.add_parser("event-refresh", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_event_refresh)
+
+    p = sub.add_parser("app-conversation", help="an agent session's messages as JSON, for the Herdr app mod")
+    p.add_argument("--agent", required=True)
+    p.add_argument("--session", required=True)
+    p.add_argument("--limit", type=int, default=12)
+    p.add_argument("words", nargs="*")
+    p.set_defaults(func=cmd_app_conversation)
 
     p = sub.add_parser("preview", help=argparse.SUPPRESS)
     p.add_argument("stable_id")

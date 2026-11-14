@@ -46,5 +46,6 @@ function element(kind) {
 
 export const div = element("div");
 export const svg = element("svg");
+export const image = element("image");
 
 export class View {}

@@ -24,6 +24,7 @@ def terminal_row(row, frontend):
         "status": row.get("agent_status") or "unknown",
         "snippet": " ".join((row.get("snippet") or "").split()),
         "cwd": row.get("foreground_cwd") or row.get("cwd") or "",
+        "session_id": row.get("agent_session_id") or "",
     }
 
 
