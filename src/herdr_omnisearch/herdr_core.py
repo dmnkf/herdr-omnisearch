@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shlex
 import shutil
@@ -24,10 +25,20 @@ class CoreError(RuntimeError):
     pass
 
 
+def core_env():
+    """This environment without what only belongs to OmniSearch or to one herdr TUI pane.
+
+    `hc` starts herdr-core when none runs, and the core keeps the environment it started with
+    for every terminal after it: started from the TUI plugin, it would hand each one the plugin's
+    PYTHONPATH and that pane's HERDR_PANE_ID.
+    """
+    return {k: v for k, v in os.environ.items() if k != "PYTHONPATH" and not k.startswith("HERDR_")}
+
+
 def hc(*args) -> str:
     try:
         result = subprocess.run(
-            ["hc", *args], capture_output=True, text=True, timeout=HC_TIMEOUT_SECONDS, check=False,
+            ["hc", *args], capture_output=True, text=True, timeout=HC_TIMEOUT_SECONDS, check=False, env=core_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CoreError(f"hc {args[0]} failed: {exc}") from exc

@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 os.environ.setdefault("HERDR_PLUGIN_STATE_DIR", tempfile.mkdtemp(prefix="herdr-omnisearch-tests-"))
 
-from herdr_omnisearch import app_search, archive_catalog, cli, live_index, settings, storage  # noqa: E402
+from herdr_omnisearch import app_search, archive_catalog, cli, herdr_core, live_index, settings, storage  # noqa: E402
 
 FAKE_HC = f"""#!{sys.executable}
 import json, os, sys
@@ -502,3 +503,17 @@ class HerdrCoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoreEnvironmentTests(unittest.TestCase):
+    def test_hc_never_hands_a_new_core_the_plugins_or_a_panes_environment(self):
+        seen = {}
+
+        def run(argv, **kwargs):
+            seen.update(kwargs["env"])
+            return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+
+        plugin = {"PYTHONPATH": "/plugin/src", "HERDR_PANE_ID": "wT:p1", "HERDR_ENV": "1", "HERDR_PLUGIN_ID": "herdr.omnisearch", "HOME": "/root"}
+        with patch.dict(os.environ, plugin), patch("herdr_omnisearch.herdr_core.subprocess.run", side_effect=run):
+            herdr_core.hc("ls", "--json")
+        self.assertEqual({k: seen.get(k) for k in plugin}, {"PYTHONPATH": None, "HERDR_PANE_ID": None, "HERDR_ENV": None, "HERDR_PLUGIN_ID": None, "HOME": "/root"})
