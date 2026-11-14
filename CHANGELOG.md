@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.16.1 - 2026-11-14
+
+- Keep the TUI plugin's environment out of herdr-core. When no herdr-core ran,
+  the plugin's watcher started one through `hc`, and that core kept the
+  plugin's `PYTHONPATH` and one pane's `HERDR_PANE_ID` for every terminal after
+  it: an upgraded `herdr-omnisearch` still ran the plugin's older code there,
+  and Claude Code in an app terminal could report to that TUI pane. `hc` now
+  runs without `PYTHONPATH` or any `HERDR_*` variable. A core started this way
+  before keeps its environment until it restarts (`hc server restart`).
+
 ## 0.16.0 - 2026-11-14
 
 - See why a result matched. The Herdr app's OmniSearch now opens as a large
