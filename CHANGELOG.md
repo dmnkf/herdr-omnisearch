@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.16.0 - 2026-11-14
+
+- See why a result matched. The Herdr app's OmniSearch now opens as a large
+  window with the results on the left and a preview on the right. While you
+  search, the preview shows the whole text a row matched, with your words
+  highlighted.
+- Read an agent's conversation, not its screen. For an agent whose session is
+  known, the preview shows its newest messages: yours on a tinted block, the
+  agent's rendered as Markdown. It reads the end of the session's history file
+  each time, so a live agent's newest message is there at once, at full width
+  however narrow its pane is. The new `app-conversation` command answers these
+  previews; live rows from `app-search` now carry `session_id`.
+- Otherwise the preview shows the agent's screen: a herdr TUI pane in its own
+  colors, an app terminal as plain text, centered on your match.
+- Scan faster. Results are grouped by machine in a fixed order, so a slower
+  machine never reshuffles the list, and the selection stays on its row as
+  answers arrive. Rows show the agent's icon, a status mark only when it needs
+  you, and each space's name in a color of its own. Matched words are in the
+  accent color, and snippets start at the first match.
+- Snippets drop terminal art and Markdown markers, and old sessions show a date
+  instead of "123d ago".
+- Upgrade the command on every machine (`uv tool install --force`) and copy the
+  mod's `main.js` and `mod.json` into the app again.
+
 ## 0.15.0 - 2026-11-09
 
 - Search both terminal servers from either side. The Herdr app's OmniSearch
