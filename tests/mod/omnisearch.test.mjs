@@ -172,7 +172,7 @@ test("Enter on a remote terminal selects its tab and focuses its pane by machine
     panes: [{ pane: "p1", terminal: "vps/t3", tab: "vps/tb1" }],
   });
   const { view, c } = await open(state);
-  assert.match(view.render().text(), /vps.*icons\/claude\.svg fix login.*web/);
+  assert.match(view.render().text(), /vps.*icons\/claude\.svg web \/ fix login/);
   await enter(c);
   assert.deepEqual(state.ran, [["tab.select", { id: "vps/tb1" }], ["pane.focus", { terminal: "vps/t3" }]]);
   assert.deepEqual(state.closed, ["o1"]);
@@ -407,7 +407,7 @@ test("a herdr TUI pane is listed with its space and says it lives in the TUI", a
   const { view } = await open(state);
   const text = view.render().text();
   assert.match(text, /icons\/claude\.svg fix login/);
-  assert.match(text, /icons\/claude\.svg billing fix billing TUI/);
+  assert.match(text, /icons\/claude\.svg billing \/ billing fix TUI/);
 });
 
 test("Enter on a TUI pane the app mirrors focuses the mirror terminal", async () => {
@@ -431,7 +431,7 @@ test("Enter on a TUI pane nothing mirrors selects it in that machine's TUI and s
     on: "vps",
   });
   assert.deepEqual(state.ran, []);
-  assert.deepEqual(state.notified, [{ title: "OmniSearch", body: "billing fix runs in the herdr TUI on vps, not in the app. It is selected there now: switch to that TUI to see it." }]);
+  assert.deepEqual(state.notified, [{ title: "OmniSearch", body: "billing fix runs in the herdr TUI on vps, not in the app. It is selected there now: switch to that TUI to see it, or press Shift+Enter on it here to move it into the app." }]);
   assert.deepEqual(state.closed, ["o1"]);
 });
 
@@ -527,4 +527,124 @@ test("a terminal whose session is known previews its conversation from that mach
   await tick(c);
   assert.ok(!state.calls.some((call) => call.command === "hc" || call.command === "herdr"), "the screen is not read");
   assert.match(view.render().text(), /Conversation You fix the login form .*The login form is fixed\./);
+});
+
+function agentsAt(rows) {
+  return { here: ok(rows) };
+}
+
+const AGENT = (address, status, active, extra = {}) => ({ ...TERMINAL, address, title: `agent ${address}`, status, active, snippet: "", ...extra });
+
+test("with nothing typed, a Recent section lists who needs you first, then who spoke last, never the terminal you are in", async () => {
+  const state = app({
+    answers: agentsAt([
+      AGENT("t1", "idle", 100), AGENT("t2", "working", 500), AGENT("t3", "blocked", 50),
+      AGENT("t4", "idle", 900), AGENT("t5", "done", 10), AGENT("t6", "idle", 800),
+    ]),
+  });
+  state.focused = { terminal: "t4" };
+  const { view } = await open(state);
+  assert.deepEqual(view.suggestions().map((i) => i.address), ["t3", "t5", "t6", "t2"]);
+  assert.equal(view.current().address, "t3", "the first Recent row is selected");
+});
+
+test("Enter on the first Recent row goes to that agent, and typing replaces Recent with results", async () => {
+  const state = app({ answers: agentsAt([AGENT("t1", "idle", 1), AGENT("t2", "idle", 2), AGENT("t3", "idle", 3)]), panes: [{ terminal: "t3", pane: "p3", tab: "tb1" }] });
+  const { view, c } = await open(state);
+  await enter(c);
+  assert.deepEqual(state.ran.at(-1), ["pane.focus", { terminal: "t3" }]);
+  await type(view, c, "login");
+  assert.deepEqual(view.suggestions(), []);
+});
+
+test("fewer than three other agents shows no Recent section", async () => {
+  const state = app({ answers: agentsAt([AGENT("t1", "idle", 1), AGENT("t2", "idle", 2)]) });
+  const { view } = await open(state);
+  assert.deepEqual(view.suggestions(), []);
+});
+
+function tuiMachine(status) {
+  const pane = { ...TERMINAL, frontend: "tui", address: "w1:p1", mirror: null, session_id: "s1", space_name: "billing", title: "billing fix" };
+  const session = { kind: "session", id: "c1", agent: "claude", session_id: "s1", title: "billing fix", space_name: "billing", folder: "/srv", argv: ["claude", "--resume", "s1"], running: { frontend: "tui", address: "w1:p1", mirror: null } };
+  return (args) => {
+    if (args[0] === "agent") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: status } } }), stderr: "" };
+    if (args[0] === "pane") return { code: 0, stdout: "", stderr: "" };
+    if (args.includes("--archive")) return ok([session]);
+    if (args.includes("--running")) return ok([]);
+    return ok([pane]);
+  };
+}
+
+async function shiftEnter(view, c) {
+  view.render().handler("on_key_down")({ key: "enter", modifiers: { shift: true } }, c);
+  await settle(c);
+}
+
+test("Shift+Enter moves an idle TUI agent into the app: closes its pane, then resumes it in a space named like its workspace", async () => {
+  const state = app({ machines: [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }], answers: { here: ok([]), vps: tuiMachine("idle") } });
+  const { view, c } = await open(state);
+  assert.match(view.render().text(), /⇧↵ Move to app/);
+  await shiftEnter(view, c);
+  const order = state.calls.filter((call) => call.on === "vps").map((call) => call.args.slice(0, 2).join(" "));
+  assert.ok(order.indexOf("agent get") < order.indexOf("pane close"), "the status is checked before the pane closes");
+  assert.ok(order.indexOf("pane close") < order.lastIndexOf("app-search --refresh"), "the session is checked again after the pane closes");
+  assert.deepEqual(state.ran.at(-1), ["space.new", { folder: "/srv", argv: ["claude", "--resume", "s1"], name: "billing", machine: "vps" }]);
+  assert.match(state.notified.at(-1).body, /Moved billing fix from the TUI into the app/);
+});
+
+test("a blocked TUI agent is never moved: its pane stays open and the person is told to answer it first", async () => {
+  const state = app({ machines: [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }], answers: { here: ok([]), vps: tuiMachine("blocked") } });
+  const { view, c } = await open(state);
+  await shiftEnter(view, c);
+  assert.ok(!state.calls.some((call) => call.args[0] === "pane"), "the pane is not closed");
+  assert.equal(state.ran.length, 0);
+  assert.match(state.notified.at(-1).body, /waiting for an answer in the TUI/);
+});
+
+test("Recent rows come first and the agent's own section still lists them", async () => {
+  const state = app({ answers: agentsAt([AGENT("t1", "idle", 1), AGENT("t2", "blocked", 2), AGENT("t3", "idle", 3)]) });
+  const { view } = await open(state);
+  assert.match(view.render().text(), /Recent 3 .*agent t2.*agent t3.*agent t1/);
+  assert.equal(view.order().length, 6, "each agent once in Recent and once in its machine's section");
+});
+
+test("the footer counts each agent once, though Recent repeats them", async () => {
+  const state = app({ answers: agentsAt([AGENT("t1", "idle", 1), AGENT("t2", "blocked", 2), AGENT("t3", "idle", 3)]) });
+  const { view } = await open(state);
+  assert.match(view.render().text(), /3 agents/);
+  assert.ok(!view.render().text().includes("6 agents"));
+});
+
+test("rows are named workspace / session, without the workspace or folder said twice", async () => {
+  const state = app({ answers: { here: ok([
+    { ...TERMINAL, address: "t1", space_name: "web", title: "fix login | web" },
+    { ...TERMINAL, address: "t2", agent: "codex", space_name: "infra", title: "Configure firewall rules | alex", cwd: "/Users/alex" },
+    { ...TERMINAL, address: "t3", space_name: "AI", title: "Ai" },
+  ]) } });
+  const { view } = await open(state);
+  const text = view.render().text();
+  assert.match(text, /web \/ fix login /);
+  assert.match(text, /infra \/ Configure firewall rules /);
+  assert.ok(!text.includes("| alex") && !text.includes("| web"), "the tails are dropped");
+  assert.match(text, /icons\/claude\.svg AI /);
+  assert.ok(!/AI \/ Ai/.test(text), "a title that is only the workspace is not repeated");
+});
+
+test("the wheel scrolls the list by the pixels it reports, and later renders leave it there", async () => {
+  const many = Array.from({ length: 40 }, (_, i) => AGENT(`t${i + 1}`, "idle", 0));
+  const state = app({ answers: agentsAt(many) });
+  const { view, c } = await open(state);
+  assert.match(view.render().text(), /Recent 4/);
+  view.render().find("os-rows").handler("on_scroll_wheel")({ delta: { x: 0, y: -600 } }, c);
+  assert.ok(!view.render().text().includes("Recent 4"), "the top scrolled out of view");
+  assert.ok(!view.render().text().includes("Recent 4"), "a later render does not jump back to the selection");
+});
+
+test("moving the selection still brings the list to it", async () => {
+  const many = Array.from({ length: 40 }, (_, i) => AGENT(`t${i + 1}`, "idle", 0));
+  const state = app({ answers: agentsAt(many) });
+  const { view, c } = await open(state);
+  view.render().find("os-rows").handler("on_scroll_wheel")({ delta: { x: 0, y: -600 } }, c);
+  key(view, c, "up");
+  assert.match(view.render().text(), /Recent 4/);
 });

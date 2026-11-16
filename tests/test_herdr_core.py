@@ -167,13 +167,13 @@ class HerdrCoreTests(unittest.TestCase):
         self.assertEqual(answer, {"error": None, "rows": [
             {"kind": "space", "space": "sp1", "name": "web"},
             {"kind": "terminal", "frontend": "core", "address": "t1", "space": "sp1", "tab": "tb1", "title": "Fix the login form",
-             "agent": "claude", "status": "working", "snippet": "the login form rejects valid emails", "cwd": "/repo", "session_id": "cl-1"},
+             "agent": "claude", "status": "working", "snippet": "the login form rejects valid emails", "cwd": "/repo", "session_id": "cl-1", "active": 0},
             {"kind": "terminal", "frontend": "core", "address": "t10", "space": "sp1", "tab": "tb5", "title": "rollout-plan",
-             "agent": "claude", "status": "working", "snippet": "planning the rollout", "cwd": "/repo", "session_id": "cl-2"},
+             "agent": "claude", "status": "working", "snippet": "planning the rollout", "cwd": "/repo", "session_id": "cl-2", "active": 0},
             {"kind": "terminal", "frontend": "core", "address": "t2", "space": "sp1", "tab": "tb1", "title": "Review the login form",
-             "agent": "codex", "status": "blocked", "snippet": "waiting for approval", "cwd": "/repo", "session_id": ""},
+             "agent": "codex", "status": "blocked", "snippet": "waiting for approval", "cwd": "/repo", "session_id": "", "active": 0},
             {"kind": "terminal", "frontend": "core", "address": "t11", "space": "sp1", "tab": "tb6", "title": "",
-             "agent": "codex", "status": "unknown", "snippet": "codex ready", "cwd": "/repo", "session_id": ""},
+             "agent": "codex", "status": "unknown", "snippet": "codex ready", "cwd": "/repo", "session_id": "", "active": 0},
         ]})
 
     def test_a_terminal_is_found_by_its_session_transcript_and_its_session_resumes_there(self):

@@ -148,10 +148,10 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual(answer, {"error": None, "rows": [
             {"kind": "space", "space": "sp1", "name": "web"},
             {"kind": "terminal", "frontend": "core", "address": "t1", "space": "sp1", "tab": "tb1", "title": "",
-             "agent": "codex", "status": "unknown", "snippet": "invoice totals in the app", "cwd": "/repo", "session_id": CORE_SESSION},
+             "agent": "codex", "status": "unknown", "snippet": "invoice totals in the app", "cwd": "/repo", "session_id": CORE_SESSION, "active": 1793102401},
             {"kind": "terminal", "frontend": "tui", "address": "w2:p1", "space": "w2", "tab": "w2:t1", "title": "billing fix",
              "agent": "codex", "status": "idle", "snippet": "invoice totals in the TUI", "cwd": "/srv", "session_id": TUI_SESSION, "space_name": "billing",
-             "socket": str(self.root / "herdr.sock"), "mirror": "t30"},
+             "socket": str(self.root / "herdr.sock"), "mirror": "t30", "active": 1793102401},
         ]})
 
     def test_the_app_finds_a_session_running_in_the_tui_and_never_starts_it(self):

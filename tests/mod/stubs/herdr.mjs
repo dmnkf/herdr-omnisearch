@@ -12,3 +12,4 @@ export const notify = (n) => (h().notified.push(n), "n1");
 export const theme = () => new Proxy({}, { get: (_t, name) => (name === "missing" ? undefined : `#${String(name)}`) });
 export const props = () => ({ overlay: "o1" });
 export const closeOverlay = (id) => (h().closed.push(id), null);
+export const focused = () => h().focused ?? null;

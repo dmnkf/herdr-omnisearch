@@ -5,8 +5,8 @@
 // Tab switches between live terminals and old sessions, ↑/↓ and Enter go, Esc leaves.
 
 import { View, div, image, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
-import { exec, knownAgents, machines, panes, agents, spaces, run, notify, theme, props, closeOverlay } from "herdr";
+import { v_flex, h_flex, InputState, Input, TextView, ScrollHandle } from "gpui-base";
+import { exec, knownAgents, machines, panes, agents, spaces, focused, run, notify, theme, props, closeOverlay } from "herdr";
 
 const CLI = "herdr-omnisearch";
 const INSTALL = "uv tool install git+https://github.com/dmnkf/herdr-omnisearch";
@@ -17,6 +17,10 @@ const ROW_H = 36;
 const ROW_SNIPPET_H = 54;
 const HEADER_H = 30;
 const CHROME_H = 92;
+const SUGGESTIONS = 4;
+const RECENT = "recent";
+// A selection names its section and its row: one agent can be in Recent and in its machine's section.
+const SEL = "\u0000";
 const SCREEN_LINE_H = 16;
 const SCREEN_REFRESH_MS = 2000;
 const CONVERSATION_REFRESH_MS = 3000;
@@ -156,6 +160,21 @@ function spaceColor(t, name) {
   return palette[h % palette.length];
 }
 
+// What a row is called: its workspace, then its session. A title that already ends in its workspace
+// or its folder ("fix login | web") doesn't say it twice; a title that is only the workspace adds nothing.
+function naming(item) {
+  const space = item.spaceName || "";
+  let session = item.kind === "space" ? "" : (item.title || "").trim();
+  // Codex ends its title with its folder's name; some titles end with their workspace.
+  const folder = (item.cwd || item.folder || "").replace(/\/+$/, "").split("/").pop();
+  for (const tail of [space, folder]) {
+    if (tail && session.endsWith(` | ${tail}`)) session = session.slice(0, -(tail.length + 3)).trim();
+  }
+  if (session.toLowerCase() === space.toLowerCase()) session = "";
+  if (!space && !session) session = item.address || item.session_id || "";
+  return { space, session };
+}
+
 // The agent's icon from the app's program table: a one-color glyph or a picture.
 function icon(p, size, color) {
   if (!p?.icon) return div().size(size).flex_none();
@@ -214,6 +233,9 @@ export default class OmniSearch extends View {
     // Each selected session's messages, as the catalog has them, for the words searched.
     this.conversations = new Map();
     this.size = { width: 1400, height: 800 };
+    this.conversationScroll = ScrollHandle.new();
+    this.conversationShown = null;
+    this.revealed = null;
     this.screenRows = 30;
     this.previewing = null;
     cx.timer.every(250, (cx) => this.watchPreview(cx));
@@ -333,8 +355,9 @@ export default class OmniSearch extends View {
   // Reads what the selected row shows once it is chosen, and again every few seconds while it stays chosen:
   // its conversation when the session is known, else the terminal's screen.
   watchPreview(cx) {
+    if (this.previewing) return;
     const item = this.current();
-    if (!item || this.previewing) return;
+    if (!item) return;
     const conversation = item.session_id ? this.conversations.get(item.key) : null;
     const query = this.words().join(" ");
     if (item.session_id && (!conversation || conversation.query !== query ||
@@ -375,31 +398,61 @@ export default class OmniSearch extends View {
   }
 
   // One section per machine, in a fixed order, so a machine answering later never moves the others.
-  sections() {
+  machineSections() {
     const browsing = this.mode === "live" && !this.words().length;
     return this.targets()
       .map((machine) => {
         let rows = this.found.get(machine) ?? [];
         if (browsing) rows = [...rows].sort((a, b) => (URGENCY[a.status] ?? 4) - (URGENCY[b.status] ?? 4));
-        return { machine, rows };
+        return { id: machine ?? "", machine, title: machine ?? "This computer", rows };
       })
       .filter((s) => s.rows.length);
   }
 
+  // With nothing typed, a Recent section of the likeliest agents comes first.
+  sections() {
+    const recent = this.suggestions();
+    return [...(recent.length ? [{ id: RECENT, machine: null, title: "Recent", rows: recent }] : []), ...this.machineSections()];
+  }
+
   list() {
-    return this.sections().flatMap((s) => s.rows);
+    return this.machineSections().flatMap((s) => s.rows);
+  }
+
+  // With nothing typed: the agents most worth jumping to, for the Recent section. Agents needing
+  // the person first, then the ones that spoke last; never the terminal the person is in.
+  suggestions() {
+    if (this.mode !== "live" || this.words().length) return [];
+    const here = focused()?.terminal;
+    const urgency = (i) => ({ blocked: 0, done: 1 })[i.status] ?? 2;
+    const others = this.list().filter((i) => i.kind === "terminal" && qualify(i.machine, i.address) !== here && (!i.mirror || qualify(i.machine, i.mirror) !== here));
+    if (others.length < 3) return [];
+    return [...others].sort((a, b) => urgency(a) - urgency(b) || (b.active || 0) - (a.active || 0)).slice(0, SUGGESTIONS);
+  }
+
+  order() {
+    return this.sections().flatMap((s) => s.rows.map((r) => s.id + SEL + r.key));
+  }
+
+  selectedKey() {
+    const order = this.order();
+    return order.includes(this.selected) ? this.selected : order[0];
   }
 
   current() {
-    const list = this.list();
-    return list.find((i) => i.key === this.selected) ?? list[0];
+    const key = this.selectedKey();
+    if (!key) return undefined;
+    const [section, ...rest] = key.split(SEL);
+    return this.sections().find((s) => s.id === section)?.rows.find((r) => r.key === rest.join(SEL));
   }
 
   move(by) {
-    const list = this.list();
-    if (!list.length) return;
-    const at = Math.max(0, list.findIndex((i) => i.key === this.current()?.key));
-    this.selected = list[Math.max(0, Math.min(at + by, list.length - 1))].key;
+    const order = this.order();
+    if (!order.length) return;
+    // A key press brings the list back to the selection, even after the wheel moved it away.
+    this.revealed = null;
+    const at = Math.max(0, order.indexOf(this.selectedKey()));
+    this.selected = order[Math.max(0, Math.min(at + by, order.length - 1))];
   }
 
   setMode(mode, cx) {
@@ -445,7 +498,7 @@ export default class OmniSearch extends View {
       this.close();
       const name = where.title || where.address;
       const tui = machine ? `the herdr TUI on ${machine}` : "the herdr TUI";
-      if (r.code === 0) notify({ title: "OmniSearch", body: `${name} runs in ${tui}, not in the app. It is selected there now: switch to that TUI to see it.` });
+      if (r.code === 0) notify({ title: "OmniSearch", body: `${name} runs in ${tui}, not in the app. It is selected there now: switch to that TUI to see it, or press Shift+Enter on it here to move it into the app.` });
       else notify({ title: "OmniSearch", body: `Couldn't select ${name} in ${tui}: ${(r.stderr || r.stdout || "").trim() || `exit ${r.code}`}`, level: "warning" });
     });
   }
@@ -484,13 +537,85 @@ export default class OmniSearch extends View {
       this.close();
       // Only a check that answered may start it: one that failed can't tell a running session from an ended one.
       if (found.error) return notify({ title: "OmniSearch", body: `Didn't resume ${item.title || item.session_id}: ${found.error}`, level: "warning" });
-      const tabsThere = (s) => new Set(s.tabs.map((t) => t.id));
-      const space = spaces().find(
-        (s) => (s.machine ?? null) === item.machine && (s.folder === item.folder || panes().some((p) => p.cwd === item.folder && tabsThere(s).has(p.tab))),
-      );
-      const argv = this.resumeArgv(item, launchers);
-      if (space) run("tab.new", { space: space.id, folder: item.folder, argv });
-      else run("space.new", { folder: item.folder, argv, ...(item.machine ? { machine: item.machine } : {}) });
+      this.startResume(item, launchers, null);
+    });
+  }
+
+  // A new tab in the space named `name`, else the one on the session's folder, else a new space on its machine.
+  startResume(item, launchers, name) {
+    const tabsThere = (s) => new Set(s.tabs.map((t) => t.id));
+    const here = (s) => (s.machine ?? null) === item.machine;
+    const space = (name && spaces().find((s) => here(s) && s.name === name)) ||
+      spaces().find((s) => here(s) && (s.folder === item.folder || panes().some((p) => p.cwd === item.folder && tabsThere(s).has(p.tab))));
+    const argv = this.resumeArgv(item, launchers);
+    if (space) run("tab.new", { space: space.id, folder: item.folder, argv });
+    else run("space.new", { folder: item.folder, argv, ...(name ? { name } : {}), ...(item.machine ? { machine: item.machine } : {}) });
+  }
+
+  // A TUI pane running a known session that nothing mirrors: what moving it into the app needs.
+  movable(item) {
+    if (!item) return null;
+    if (item.kind === "terminal" && item.frontend === "tui" && !item.mirror && item.session_id) {
+      return { machine: item.machine, pane: item.address, agent: item.agent, session: item.session_id, title: item.title, space: item.spaceName };
+    }
+    const running = item.kind === "session" ? item.running : null;
+    if (running?.frontend === "tui" && !running.mirror) {
+      return { machine: item.machine, pane: running.address, agent: item.agent, session: item.session_id, title: item.title || running.title, space: running.space_name || item.spaceName };
+    }
+    return null;
+  }
+
+  // Shift+Enter: closes the TUI pane and resumes its session in the app, through the machine's own launcher.
+  // Only an idle or done agent moves: closing a blocked or working one would drop its question or its turn.
+  moveToApp(item, cx) {
+    const from = this.movable(item);
+    if (!from || this.resuming) return;
+    this.resuming = true;
+    cx.notify();
+    const name = from.title || from.session;
+    const stop = (body) => {
+      this.resuming = false;
+      cx.notify();
+      notify({ title: "OmniSearch", body, level: "warning" });
+    };
+    cx.spawn(async (cx) => {
+      let status = null;
+      try {
+        const r = await exec("herdr", ["agent", "get", from.pane], { on: from.machine, timeout: 5000 });
+        status = JSON.parse(r.stdout).result.agent.agent_status;
+      } catch {}
+      if (status === "blocked") return stop(`${name} is waiting for an answer in the TUI. Answer it there, then move it.`);
+      if (status === "working") return stop(`${name} is working in the TUI. Move it once it is idle.`);
+      if (status !== "idle" && status !== "done") return stop(`Couldn't tell whether ${name} is busy in the TUI, so it stays there.`);
+      let session = item.kind === "session" ? item : null;
+      if (!session) {
+        try {
+          const found = answer(await exec(CLI, ["app-search", "--archive", "--limit", "10", "--", from.session], { on: from.machine }));
+          session = items(from.machine, found.rows).find((r) => r.session_id === from.session) ?? null;
+        } catch {}
+      }
+      if (!session?.argv) return stop(`No resume command for ${name}, so it stays in the TUI.`);
+      const launchers = await this.launchersOn(from.machine, cx);
+      try {
+        await exec("herdr", ["pane", "close", from.pane], { on: from.machine, timeout: 5000 });
+      } catch {}
+      // Its process takes a moment to end; until then the session still runs and must not start twice.
+      const check = ["app-search", "--refresh", "--limit", "0", "--running", `${from.agent}=${from.session}`, ...launcherArgs(launchers)];
+      for (let i = 0; i < 20; i++) {
+        let found;
+        try {
+          found = answer(await exec(CLI, check, { on: from.machine }));
+        } catch (e) {
+          found = { rows: [], error: `${e?.message ?? e}` };
+        }
+        if (!found.error && !found.rows.some((r) => r.address)) {
+          this.close();
+          this.startResume(session, launchers, from.space);
+          return notify({ title: "OmniSearch", body: `Moved ${name} from the TUI into the app.` });
+        }
+        await new Promise((resolve) => cx.timer.after(500, resolve));
+      }
+      stop(`Closed ${name} in the TUI, but its session still seems to run, so it wasn't started again.`);
     });
   }
 
@@ -518,22 +643,15 @@ export default class OmniSearch extends View {
     return item.kind !== "space" && Boolean(item.clean) && (this.mode === "sessions" || this.words().length > 0);
   }
 
-  row(t, item, selected) {
-    let title;
-    let space = "";
+  row(t, item, selected, recent = false) {
+    const { space, session } = naming(item);
     let suffix = "";
-    if (item.kind === "space") {
-      title = item.spaceName;
-      suffix = "Space";
-    } else if (item.kind === "terminal") {
-      title = item.title || item.address;
-      space = item.spaceName;
-      suffix = item.frontend === "tui" && !item.mirror ? "TUI" : "";
+    if (item.kind === "space") suffix = "Space";
+    else if (item.kind === "terminal") {
+      suffix = [recent ? item.machine : "", item.frontend === "tui" && !item.mirror ? "TUI" : "", recent && item.active ? ago(item.active) : ""].filter(Boolean).join(" · ");
     } else {
-      title = item.title || item.spaceName || item.session_id;
       const running = item.running ?? (item.address ? { frontend: "core" } : null);
       const inTui = running?.frontend === "tui" && !running.mirror;
-      space = item.title ? item.spaceName : "";
       suffix = running ? (inTui ? "running in TUI" : "running") : ago(item.updated);
     }
     const snippet = this.showSnippet(item);
@@ -554,16 +672,9 @@ export default class OmniSearch extends View {
           .gap(10)
           .items_center()
           .child(item.kind === "space" ? svg("mods/workspace-chrome/layers.svg").size(16).flex_none().text_color(t.muted) : icon(this.program(item.agent), 16, t.foreground))
-          .child(div().flex_1().min_w(0).truncate().text_size(13.5).text_color(t.foreground).child(title))
+          .child(this.name(t, space, session, 13.5))
           .when(Boolean(status), (el) => el.child(status))
-          .child(
-            h_flex()
-              .flex_none()
-              .gap(6)
-              .text_size(12)
-              .when(Boolean(space), (el) => el.child(div().max_w(180).truncate().text_color(spaceColor(t, space)).child(space)))
-              .when(Boolean(suffix), (el) => el.child(div().text_color(t.dim).child(suffix))),
-          ),
+          .when(Boolean(suffix), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(suffix))),
       )
       .when(snippet, (el) =>
         el.child(
@@ -617,15 +728,14 @@ export default class OmniSearch extends View {
               .gap(9)
               .items_center()
               .child(item.kind === "space" ? svg("mods/workspace-chrome/layers.svg").size(18).flex_none().text_color(t.muted) : icon(this.program(item.agent), 18, t.foreground))
-              .child(div().flex_1().min_w(0).text_size(14).font_medium().text_color(t.foreground).truncate().child(title)),
+              .child(this.name(t, naming(item).space, naming(item).session, 14)),
           )
           .child(
             h_flex()
               .pl(27)
               .gap(6)
               .text_size(12)
-              .when(item.kind !== "space" && Boolean(item.spaceName), (el) => el.child(div().flex_none().text_color(spaceColor(t, item.spaceName)).child(item.spaceName)))
-              .child(div().min_w(0).truncate().text_color(t.dim).child(meta.filter((m, i) => m && !(i === 0 && m === item.spaceName)).join(" · "))),
+              .child(div().min_w(0).truncate().text_color(t.dim).child(meta.filter((m) => m && m !== item.spaceName).join(" · "))),
           ),
       )
       .when(Boolean(excerpt), (el) =>
@@ -706,6 +816,12 @@ export default class OmniSearch extends View {
   // The session's messages, newest at the bottom: yours on a tinted block, the agent's as rendered Markdown.
   conversationView(t, item, messages) {
     const agentName = this.program(item.agent)?.name || item.agent || "Agent";
+    const shown = `${item.key}|${messages.length}|${this.words().join(" ")}`;
+    if (shown !== this.conversationShown) {
+      this.conversationShown = shown;
+      const match = messages.findIndex((m) => m.match);
+      this.conversationScroll.scroll_to_item(match >= 0 ? match : messages.length - 1);
+    }
     return v_flex()
       .flex_1()
       .min_h(0)
@@ -716,8 +832,8 @@ export default class OmniSearch extends View {
           .id("os-conv")
           .flex_1()
           .min_h(0)
-          .overflow_hidden()
-          .justify_end()
+          .overflow_y_scroll()
+          .track_scroll(this.conversationScroll)
           .gap(12)
           .children(messages.map((m, i) => {
             const you = m.role === "user";
@@ -740,6 +856,20 @@ export default class OmniSearch extends View {
               .child(div().text_size(12.5).text_color(t.foreground).child(TextView.markdown(`os-md-${item.key}-${i}`, m.text)));
           })),
       );
+  }
+
+  // "workspace / session": the workspace in its own color, the session after it in the text color.
+  name(t, space, session, size) {
+    return h_flex()
+      .flex_1()
+      .min_w(0)
+      .gap(6)
+      .text_size(size)
+      .whitespace_nowrap()
+      .overflow_hidden()
+      .when(Boolean(space), (el) => el.child(div().flex_none().max_w(session ? 220 : 600).truncate().font_medium().text_color(spaceColor(t, space)).child(space)))
+      .when(Boolean(space && session), (el) => el.child(div().flex_none().text_color(t.dim).child("/")))
+      .when(Boolean(session), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(session)));
   }
 
   problems() {
@@ -765,8 +895,9 @@ export default class OmniSearch extends View {
     const t = theme();
     const sections = this.sections();
     const list = sections.flatMap((s) => s.rows);
+    const selectedKey = this.selectedKey();
     const current = this.current();
-    const headed = sections.length > 1 || (sections[0] && sections[0].machine);
+    const headed = sections.length > 1 || Boolean(sections[0]?.machine);
 
     // Every row and header gets a fixed top: GPUI rounds each height and a stack drifts.
     const layout = [];
@@ -778,15 +909,17 @@ export default class OmniSearch extends View {
       }
       for (const item of s.rows) {
         const h = this.rowHeight(item);
-        layout.push({ item, top: y, h });
+        layout.push({ item, sid: s.id, top: y, h });
         y += h;
       }
     }
     const listH = this.listH();
     const total = y + 4;
     this.maxScroll = Math.max(0, total - listH);
-    const at = layout.find((l) => l.item && l.item.key === current?.key);
-    if (at) {
+    const at = layout.find((l) => l.item && l.sid + SEL + l.item.key === selectedKey);
+    // Only a new selection moves the list to it; the wheel moves it freely otherwise.
+    if (at && selectedKey !== this.revealed) {
+      this.revealed = selectedKey;
       if (at.top - 4 < this.scroll) this.scroll = at.top - (layout[layout.indexOf(at) - 1]?.header ? HEADER_H + 4 : 4);
       if (at.top + at.h + 4 > this.scroll + listH) this.scroll = at.top + at.h + 4 - listH;
     }
@@ -797,15 +930,15 @@ export default class OmniSearch extends View {
       .map((l, i) => {
         const el = l.header
           ? h_flex()
-              .id(`os-h-${l.header.machine ?? "here"}`)
+              .id(`os-h-${l.header.id || "here"}`)
               .px(16)
               .items_end()
               .pb(6)
               .gap(6)
               .text_size(11.5)
-              .child(div().text_color(t.foreground).font_semibold().child(l.header.machine ?? "This computer"))
+              .child(div().text_color(t.foreground).font_semibold().child(l.header.title))
               .child(div().text_color(t.dim).child(String(l.header.rows.length)))
-          : this.row(t, l.item, l.item.key === current?.key).id(`os-${l.item.key}`);
+          : this.row(t, l.item, l.sid + SEL + l.item.key === selectedKey, l.sid === RECENT).id(`os-${l.sid}-${l.item.key}`);
         return el.absolute().left(0).right(0).top(l.top - this.scroll).h(l.h);
       });
 
@@ -831,7 +964,9 @@ export default class OmniSearch extends View {
         .child(div().text_color(t.dim).child(label));
 
     const busy = this.latest.size > 0 || Boolean(this.resuming);
-    const counted = list.length ? `${list.length} ${this.mode === "live" ? (list.length === 1 ? "agent" : "agents") : list.length === 1 ? "session" : "sessions"}` : "";
+    // Recent repeats rows from the machine sections below it.
+    const listed = list.length - (sections.find((s) => s.id === RECENT)?.rows.length ?? 0);
+    const counted = listed ? `${listed} ${this.mode === "live" ? (listed === 1 ? "agent" : "agents") : listed === 1 ? "session" : "sessions"}` : "";
 
     return v_flex()
       .id("omnisearch")
@@ -850,6 +985,11 @@ export default class OmniSearch extends View {
       .on_key_down((e, cx) => {
         const k = e.key;
         if (k === "escape") return this.close();
+        if (k === "enter" && e.modifiers?.shift) {
+          this.moveToApp(this.current(), cx);
+          cx.stop_propagation();
+          return;
+        }
         if (k === "tab") this.toggleMode(cx);
         else if (k === "down") this.move(1);
         else if (k === "up") this.move(-1);
@@ -882,8 +1022,7 @@ export default class OmniSearch extends View {
               .flex_none()
               .overflow_hidden()
               .on_scroll_wheel((e, cx) => {
-                const d = Math.abs(e.delta.y) < 4 ? e.delta.y * ROW_H : e.delta.y;
-                this.scroll = Math.max(0, Math.min(this.scroll - d, this.maxScroll));
+                this.scroll = Math.max(0, Math.min(this.scroll - e.delta.y, this.maxScroll));
                 cx.notify();
               })
               .children(placed)
@@ -901,6 +1040,7 @@ export default class OmniSearch extends View {
           .items_center()
           .text_size(11)
           .child(key("↵", "Open"))
+          .when(Boolean(this.movable(current)), (el) => el.child(key("⇧↵", "Move to app")))
           .child(key("⇥", this.mode === "live" ? "Sessions" : "Live"))
           .child(key("esc", "Close"))
           .child(div().flex_1())

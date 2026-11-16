@@ -5,6 +5,7 @@ the file itself is read on every call, so a live agent's newest messages show at
 instead of after the next catalog refresh.
 """
 import json
+import sqlite3
 from pathlib import Path
 
 from .archive_sources import archive_catalog_turn, is_opencode_source
@@ -78,3 +79,27 @@ def conversation(agent: str, session_id: str, words, limit: int = 12):
     finally:
         conn.close()
     return {"found": True, "messages": window(rows, words, limit) or window(rows, [], limit), "error": None}
+
+
+def session_activity(pairs):
+    """When each (agent, session id) last said something, as the catalog has it, in epoch seconds."""
+    if not pairs:
+        return {}
+    try:
+        conn = archive_catalog_connect()
+    except (sqlite3.Error, OSError):
+        return {}
+    try:
+        found = {}
+        for agent, session_id in pairs:
+            row = conn.execute(
+                "SELECT MAX(updated_epoch) FROM catalog_sessions WHERE agent = ? AND session_id = ?",
+                (agent, session_id),
+            ).fetchone()
+            if row and row[0]:
+                found[(agent, session_id)] = int(row[0])
+        return found
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()

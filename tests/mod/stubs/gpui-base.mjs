@@ -21,3 +21,4 @@ export const InputState = {
 
 export const Input = { new: () => div() };
 export const TextView = { markdown: (_id, text) => div().child(text), html: (_id, text) => div().child(text) };
+export const ScrollHandle = { new: () => ({ requests: [], scroll_to_item(i) { this.requests.push(i); }, release: () => true }) };

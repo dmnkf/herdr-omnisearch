@@ -4,6 +4,7 @@ from .archive_catalog import (
     maybe_background_archive_catalog_index,
 )
 from .live_index import grouped_search_index, is_workspace_row
+from .conversation import session_activity
 from .navigate import archive_resume_command
 from .running import claim_start, frontend_records, mirror_of, pick_location, refresh_frontends, running_sessions
 from .settings import app_config, core_session_key
@@ -49,6 +50,10 @@ def live_rows(query: str, limit: int):
                 "socket": row.get("socket_path") or "",
                 "mirror": mirror_of(records, "tui", row["pane_id"])[0],
             })
+    activity = session_activity({(r["agent"], r["session_id"]) for r in out if r.get("session_id")})
+    for r in out:
+        if r["kind"] == "terminal":
+            r["active"] = activity.get((r["agent"], r["session_id"]), 0)
     return out
 
 
