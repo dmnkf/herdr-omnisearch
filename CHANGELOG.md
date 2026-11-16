@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.17.1 - 2026-11-16
+
+- The Herdr app's OmniSearch fits its window at any zoom. With the app zoomed
+  in or out, the popup came out too tall and its footer was cut off. It also
+  stopped at 800px tall instead of filling its share of a larger window, and
+  cut its footer off in a window shorter than that.
+- Copy the mod's `main.js` into the app again.
+
 ## 0.17.0 - 2026-11-16
 
 - Jump back to who needs you. With nothing typed, the Herdr app's OmniSearch
