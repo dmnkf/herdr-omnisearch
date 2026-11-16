@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.17.0 - 2026-11-16
+
+- Jump back to who needs you. With nothing typed, the Herdr app's OmniSearch
+  opens on a Recent section: up to four agents, the ones waiting on you first,
+  then the ones that spoke last. The terminal you are in is never one of them.
+  Live rows from `app-search` now carry `active`, when their session last
+  changed.
+- Rows are named workspace / session, like `web / fix login`, without the
+  workspace or folder said twice.
+- Move a TUI agent into the app. Shift+Enter on an idle or done agent in a
+  herdr TUI pane closes the pane and resumes its session in the app, in a space
+  named like its TUI workspace. A blocked or working agent stays where it is,
+  and a toast says why.
+- Scrolling works. The list no longer jumps back to the selection while answers
+  come in, trackpad scrolling moves by the distance you scroll instead of 36
+  times that, and the conversation preview scrolls back through older messages.
+- The footer counts each agent once instead of counting Recent rows twice.
+- The mod now has a preview picture and is listed in the herdr.dev gallery.
+- Upgrade the command on every machine (`uv tool install --force`) and copy the
+  mod's `main.js` into the app again.
+
 ## 0.16.1 - 2026-11-14
 
 - Keep the TUI plugin's environment out of herdr-core. When no herdr-core ran,
