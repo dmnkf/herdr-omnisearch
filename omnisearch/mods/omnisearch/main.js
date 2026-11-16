@@ -63,10 +63,54 @@ function cleanSnippet(text) {
 
 const hits = (text, words) => words.length > 0 && words.some((w) => text.toLowerCase().includes(w.toLowerCase()));
 
-// Starts the text shortly before its first match, so a one-line snippet always shows it.
+// Where a query word first shows up outside a file path: `/home/me/orchard/x.md` says where an
+// agent works, not what it said. -1 when every hit is in a path, or there is none.
+function textHitAt(text, words) {
+  const lower = (text || "").toLowerCase();
+  let best = -1;
+  for (const w of words) {
+    const word = w.toLowerCase();
+    for (let i = lower.indexOf(word); i >= 0; i = lower.indexOf(word, i + 1)) {
+      const end = lower.indexOf(" ", i);
+      const token = lower.slice(lower.lastIndexOf(" ", i) + 1, end < 0 ? undefined : end);
+      if (token.includes("/")) continue;
+      if (best < 0 || i < best) best = i;
+      break;
+    }
+  }
+  return best;
+}
+
+// Why a row matched, in the order rows are listed: its name, what it shows or said, a path it shows
+// or said, something said earlier in its session, and last its folder alone.
+const REASONS = ["name", "text", "path", "earlier", "folder"];
+
+function matchReason(item, words) {
+  if (item.kind === "space") return "name";
+  const { space, session } = naming(item);
+  if (hits(`${space} ${session}`, words)) return "name";
+  if (textHitAt(item.clean, words) >= 0) return "text";
+  if (hits(item.clean, words) && !hits(item.cwd || item.folder || "", words)) return "path";
+  if (hits(item.cwd || item.folder || "", words)) return "folder";
+  return "earlier";
+}
+
+// Whether a row's matching text is worth showing: not when the only hit is the folder it runs in.
+const showsText = (item, words) =>
+  item.why === "text" || item.why === "path" || (item.why === "name" && textHitAt(item.clean, words) >= 0);
+
+const shortPath = (path) => {
+  const parts = (path || "").replace(/\/+$/, "").split("/").filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : path;
+};
+
+const clip = (text, max) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
+
+// Starts the text shortly before its first match outside a path, so a one-line snippet always shows it.
 function aroundFirstHit(text, words, before = 40) {
   const lower = text.toLowerCase();
-  const at = Math.min(...words.map((w) => lower.indexOf(w.toLowerCase())).filter((i) => i >= 0));
+  const inText = textHitAt(text, words);
+  const at = inText >= 0 ? inText : Math.min(...words.map((w) => lower.indexOf(w.toLowerCase())).filter((i) => i >= 0));
   if (!Number.isFinite(at) || at <= before) return text;
   const start = text.lastIndexOf(" ", at - before);
   return "…" + text.slice(start < 0 ? at - before : start + 1);
@@ -173,8 +217,11 @@ function naming(item) {
   let session = item.kind === "space" ? "" : (item.title || "").trim();
   // Codex ends its title with its folder's name; some titles end with their workspace.
   const folder = (item.cwd || item.folder || "").replace(/\/+$/, "").split("/").pop();
-  for (const tail of [space, folder]) {
-    if (tail && session.endsWith(` | ${tail}`)) session = session.slice(0, -(tail.length + 3)).trim();
+  // Codex cuts a long folder name short: `… | 20261116-dfi-booking-...`.
+  const cut = session.lastIndexOf(" | ");
+  if (cut >= 0) {
+    const tail = session.slice(cut + 3).replace(/(\.\.\.|…)$/, "").trim();
+    if (tail.length >= 3 && [space, folder].some((name) => name && name.toLowerCase().startsWith(tail.toLowerCase()))) session = session.slice(0, cut).trim();
   }
   if (session.toLowerCase() === space.toLowerCase()) session = "";
   if (!space && !session) session = item.address || item.session_id || "";
@@ -199,15 +246,16 @@ function answer(r) {
   }
 }
 
-// A space gets its own row only when it matched without any of its terminals.
-function items(machine, rows) {
+// A space gets its own row only when it matched without any of its terminals. While searching, rows
+// are ordered by why they matched, keeping OmniSearch's order within each reason.
+function items(machine, rows, words = []) {
   const names = {};
   const withTerminals = new Set();
   for (const r of rows) {
     if (r.kind === "space") names[r.space] = r.name;
     if (r.kind === "terminal") withTerminals.add(r.space);
   }
-  return rows
+  const listed = rows
     .filter((r) => r.kind !== "space" || !withTerminals.has(r.space))
     .map((r) => ({
       ...r,
@@ -215,7 +263,9 @@ function items(machine, rows) {
       key: `${machine ?? ""}|${r.kind}|${r.address ?? r.id ?? r.space}`,
       spaceName: r.space_name ?? names[r.space] ?? r.name ?? "",
       clean: cleanSnippet(r.snippet),
-    }));
+    }))
+    .map((item) => ({ ...item, why: words.length ? matchReason(item, words) : null }));
+  return words.length ? listed.sort((a, b) => REASONS.indexOf(a.why) - REASONS.indexOf(b.why)) : listed;
 }
 
 export default class OmniSearch extends View {
@@ -354,7 +404,7 @@ export default class OmniSearch extends View {
       // Not installed there, or out of reach: left out until the next open.
       if (!reached) this.missing.add(machine);
       this.errors.set(machine, found.error);
-      this.found.set(machine, items(machine, found.rows));
+      this.found.set(machine, items(machine, found.rows, this.words()));
       cx.notify();
     });
     cx.notify();
@@ -647,8 +697,20 @@ export default class OmniSearch extends View {
     return this.showSnippet(item) ? ROW_SNIPPET_H : ROW_H;
   }
 
+  // The row's second line says why it is listed: the text that matched, the folder it runs in, or
+  // that it was said earlier. A row that matched only by its name, which is highlighted, needs none.
+  snippetLine(item) {
+    const words = this.words();
+    if (item.kind === "space") return null;
+    if (!words.length) return this.mode === "sessions" && item.clean ? { text: item.clean } : null;
+    if (showsText(item, words)) return { text: aroundFirstHit(item.clean, words).slice(0, 220) };
+    if (item.why === "folder") return { text: `in ${shortPath(item.cwd || item.folder)}`, quiet: true };
+    if (item.why === "earlier" && item.session_id) return { text: "Said earlier in this session", quiet: true };
+    return this.mode === "sessions" && item.clean ? { text: item.clean } : null;
+  }
+
   showSnippet(item) {
-    return item.kind !== "space" && Boolean(item.clean) && (this.mode === "sessions" || this.words().length > 0);
+    return Boolean(this.snippetLine(item));
   }
 
   row(t, item, selected, recent = false) {
@@ -662,7 +724,7 @@ export default class OmniSearch extends View {
       const inTui = running?.frontend === "tui" && !running.mirror;
       suffix = running ? (inTui ? "running in TUI" : "running") : ago(item.updated);
     }
-    const snippet = this.showSnippet(item);
+    const snippet = this.snippetLine(item);
     const status = this.status(t, item);
     return v_flex()
       .mx(6)
@@ -680,7 +742,7 @@ export default class OmniSearch extends View {
           .gap(10)
           .items_center()
           .child(item.kind === "space" ? svg("mods/workspace-chrome/layers.svg").size(16).flex_none().text_color(t.muted) : icon(this.program(item.agent), 16, t.foreground))
-          .child(this.name(t, space, session, 13.5))
+          .child(this.name(t, space, session, 13.5, this.words()))
           .when(Boolean(status), (el) => el.child(status))
           .when(Boolean(suffix), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(suffix))),
       )
@@ -691,7 +753,8 @@ export default class OmniSearch extends View {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_size(12)
-            .children(runs(aroundFirstHit(item.clean, this.words()).slice(0, 220), this.words()).map(([text, hit]) =>
+            .when(Boolean(snippet?.quiet), (el) => el.italic())
+            .children(runs(snippet?.text ?? "", this.words()).map(([text, hit]) =>
               div().flex_none().text_color(hit ? t.accent : t.dim).when(hit, (d) => d.font_medium()).child(text))),
         ),
       );
@@ -719,7 +782,9 @@ export default class OmniSearch extends View {
     const talk = conversation?.found && conversation.messages.length ? conversation.messages : null;
     const screen = item.kind === "terminal" && !talk ? this.screens.get(item.key) : null;
     const lines = screen?.text ? screenLines(screen.text, words, this.screenRows) : [];
-    const excerpt = item.clean && (words.length || item.kind === "session") ? item.clean : "";
+    // The Match block shows what matched: the text, else the folder for a row listed for its folder alone.
+    const excerpt = item.kind === "session" || showsText(item, words) ? item.clean
+      : item.why === "folder" ? item.cwd || item.folder || "" : "";
     return v_flex()
       .flex_1()
       .min_w(0)
@@ -736,7 +801,7 @@ export default class OmniSearch extends View {
               .gap(9)
               .items_center()
               .child(item.kind === "space" ? svg("mods/workspace-chrome/layers.svg").size(18).flex_none().text_color(t.muted) : icon(this.program(item.agent), 18, t.foreground))
-              .child(this.name(t, naming(item).space, naming(item).session, 14)),
+              .child(this.name(t, naming(item).space, naming(item).session, 14, words)),
           )
           .child(
             h_flex()
@@ -750,7 +815,7 @@ export default class OmniSearch extends View {
         el.child(
           v_flex()
             .gap(6)
-            .child(label(item.kind === "session" ? "Conversation" : "Match"))
+            .child(label(item.kind === "session" ? "Conversation" : showsText(item, words) ? "Match" : "Folder"))
             .child(
               h_flex()
                 .flex_wrap()
@@ -867,7 +932,15 @@ export default class OmniSearch extends View {
   }
 
   // "workspace / session": the workspace in its own color, the session after it in the text color.
-  name(t, space, session, size) {
+  // Workspace › session. A long workspace name is clipped here rather than by layout, so no gap opens
+  // before the separator; `›` because workspace names often hold a `/` of their own. Query words are
+  // in the accent color.
+  name(t, space, session, size, words = []) {
+    const part = (text, color) =>
+      hits(text, words)
+        ? h_flex().children(runs(text, words).map(([run, hit]) => div().flex_none().text_color(hit ? t.accent : color).child(run)))
+        : text;
+    const shown = session ? clip(space, 34) : space;
     return h_flex()
       .flex_1()
       .min_w(0)
@@ -875,9 +948,9 @@ export default class OmniSearch extends View {
       .text_size(size)
       .whitespace_nowrap()
       .overflow_hidden()
-      .when(Boolean(space), (el) => el.child(div().flex_none().max_w(session ? 220 : 600).truncate().font_medium().text_color(spaceColor(t, space)).child(space)))
-      .when(Boolean(space && session), (el) => el.child(div().flex_none().text_color(t.dim).child("/")))
-      .when(Boolean(session), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(session)));
+      .when(Boolean(space), (el) => el.child(div().flex_none().font_medium().text_color(spaceColor(t, space)).child(part(shown, spaceColor(t, space)))))
+      .when(Boolean(space && session), (el) => el.child(div().flex_none().text_color(t.dim).child("›")))
+      .when(Boolean(session), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(part(session, t.foreground))));
   }
 
   problems() {

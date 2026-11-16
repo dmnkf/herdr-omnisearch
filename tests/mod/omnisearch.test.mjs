@@ -172,7 +172,7 @@ test("Enter on a remote terminal selects its tab and focuses its pane by machine
     panes: [{ pane: "p1", terminal: "vps/t3", tab: "vps/tb1" }],
   });
   const { view, c } = await open(state);
-  assert.match(view.render().text(), /vps.*icons\/claude\.svg web \/ fix login/);
+  assert.match(view.render().text(), /vps.*icons\/claude\.svg web › fix login/);
   await enter(c);
   assert.deepEqual(state.ran, [["tab.select", { id: "vps/tb1" }], ["pane.focus", { terminal: "vps/t3" }]]);
   assert.deepEqual(state.closed, ["o1"]);
@@ -245,18 +245,18 @@ test("a remote session with no open space starts a space on its machine, and a r
 test("results of a superseded search never replace newer ones", async () => {
   let release;
   const slow = new Promise((resolve) => (release = resolve));
-  const state = app({ answers: { here: (args) => (args.includes("old") ? slow : ok([{ ...TERMINAL, title: "newer" }])) } });
+  const state = app({ answers: { here: (args) => (args.includes("old") ? slow : ok([{ ...TERMINAL, title: "fresh result" }])) } });
   const { view, c } = await open(state);
   globalThis.__input.text = "old";
   globalThis.__input.fire("change", c);
   c.timers.pop()(c);
   const stale = c.tasks.shift();
   await type(view, c, "new");
-  release(ok([{ ...TERMINAL, title: "older" }]));
+  release(ok([{ ...TERMINAL, title: "stale result" }]));
   await stale;
   const text = view.render().text();
-  assert.match(text, /newer/);
-  assert.doesNotMatch(text, /older/);
+  assert.match(text, /fresh result/);
+  assert.doesNotMatch(text, /stale result/);
 });
 
 test("a session resumes through the agent's launcher on its machine, unless OmniSearch names another program", async () => {
@@ -407,7 +407,7 @@ test("a herdr TUI pane is listed with its space and says it lives in the TUI", a
   const { view } = await open(state);
   const text = view.render().text();
   assert.match(text, /icons\/claude\.svg fix login/);
-  assert.match(text, /icons\/claude\.svg billing \/ billing fix TUI/);
+  assert.match(text, /icons\/claude\.svg billing › billing fix TUI/);
 });
 
 test("Enter on a TUI pane the app mirrors focuses the mirror terminal", async () => {
@@ -615,7 +615,7 @@ test("the footer counts each agent once, though Recent repeats them", async () =
   assert.ok(!view.render().text().includes("6 agents"));
 });
 
-test("rows are named workspace / session, without the workspace or folder said twice", async () => {
+test("rows are named workspace › session, without the workspace or folder said twice", async () => {
   const state = app({ answers: { here: ok([
     { ...TERMINAL, address: "t1", space_name: "web", title: "fix login | web" },
     { ...TERMINAL, address: "t2", agent: "codex", space_name: "infra", title: "Configure firewall rules | alex", cwd: "/Users/alex" },
@@ -623,11 +623,11 @@ test("rows are named workspace / session, without the workspace or folder said t
   ]) } });
   const { view } = await open(state);
   const text = view.render().text();
-  assert.match(text, /web \/ fix login /);
-  assert.match(text, /infra \/ Configure firewall rules /);
+  assert.match(text, /web › fix login /);
+  assert.match(text, /infra › Configure firewall rules /);
   assert.ok(!text.includes("| alex") && !text.includes("| web"), "the tails are dropped");
   assert.match(text, /icons\/claude\.svg AI /);
-  assert.ok(!/AI \/ Ai/.test(text), "a title that is only the workspace is not repeated");
+  assert.ok(!/AI › Ai/.test(text), "a title that is only the workspace is not repeated");
 });
 
 test("the wheel scrolls the list by the pixels it reports, and later renders leave it there", async () => {
@@ -664,4 +664,30 @@ test("at any app zoom the popup fills its share of the window and its footer sta
     view.render().find("omnisearch").handler("on_size_change")({ width: 1588, height: 951 }, c);
     assert.ok(Math.abs(heights(view.render()) * zoom - 951) < 1, `at zoom ${zoom} its parts add up to the 951px it got`);
   }
+});
+
+test("while searching, rows are listed by why they matched, and each row says why", async () => {
+  const state = app({ answers: { here: ok([
+    { ...TERMINAL, address: "t1", title: "audit", cwd: "/home/me/orchard", snippet: "Read /home/me/orchard/brief.md and run it" },
+    { ...TERMINAL, address: "t2", title: "export", snippet: "wrote /home/me/orchard/out.html" },
+    { ...TERMINAL, address: "t3", title: "old chat", snippet: "nothing to see", session_id: "s3" },
+    { ...TERMINAL, address: "t4", title: "review", snippet: "the orchard approved it" },
+    { ...TERMINAL, address: "t5", space_name: "orchard", title: "panel", snippet: "nothing to see" },
+  ]) } });
+  const { view, c } = await open(state);
+  await type(view, c, "orchard");
+  const text = view.render().text().replace(/\s+/g, " ");
+  assert.match(text, /orchard › panel .*review .*the orchard approved it.*export .*orchard ?\/out\.html.*old chat .*Said earlier in this session.*audit .*in …\/me\/ ?orchard/,
+    "its name, then its text, then a path it shows, then its session, then its folder alone");
+  assert.equal(view.current().address, "t5");
+});
+
+test("a title Codex cut short loses its folder tail too", async () => {
+  const state = app({ answers: { here: ok([
+    { ...TERMINAL, agent: "codex", space_name: "booking", title: "Re-review the fix | 20261116-booking-...", cwd: "/w/20261116-booking-map-b" },
+  ]) } });
+  const { view } = await open(state);
+  const text = view.render().text();
+  assert.match(text, /booking › Re-review the fix /);
+  assert.ok(!text.includes("| 2026"));
 });
