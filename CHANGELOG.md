@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.17.2 - 2026-11-16
+
+- Every result says why it is listed. While you search, the Herdr app's
+  OmniSearch lists rows by why they matched: their workspace or session name
+  first, then what they show or said, then a file path they mention, then
+  something said earlier in their session, and last the ones that only run in
+  a folder with that name. Each row's second line shows that reason: the
+  matching text, `in …/folder`, or "Said earlier in this session", and the
+  preview shows the folder instead of unrelated screen text.
+- Query words are highlighted in workspace and session names too.
+- Rows are named workspace › session, since workspace names often hold a `/`
+  of their own. Long workspace names are cut without leaving a gap, and Codex
+  titles that end in a shortened folder name lose that tail.
+- Copy the mod's `main.js` into the app again.
+
 ## 0.17.1 - 2026-11-16
 
 - The Herdr app's OmniSearch fits its window at any zoom. With the app zoomed
