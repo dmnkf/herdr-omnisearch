@@ -634,6 +634,7 @@ test("the wheel scrolls the list by the pixels it reports, and later renders lea
   const many = Array.from({ length: 40 }, (_, i) => AGENT(`t${i + 1}`, "idle", 0));
   const state = app({ answers: agentsAt(many) });
   const { view, c } = await open(state);
+  view.render().find("omnisearch").handler("on_size_change")({ width: 1400, height: 800 }, c);
   assert.match(view.render().text(), /Recent 4/);
   view.render().find("os-rows").handler("on_scroll_wheel")({ delta: { x: 0, y: -600 } }, c);
   assert.ok(!view.render().text().includes("Recent 4"), "the top scrolled out of view");
@@ -644,7 +645,23 @@ test("moving the selection still brings the list to it", async () => {
   const many = Array.from({ length: 40 }, (_, i) => AGENT(`t${i + 1}`, "idle", 0));
   const state = app({ answers: agentsAt(many) });
   const { view, c } = await open(state);
+  view.render().find("omnisearch").handler("on_size_change")({ width: 1400, height: 800 }, c);
   view.render().find("os-rows").handler("on_scroll_wheel")({ delta: { x: 0, y: -600 } }, c);
   key(view, c, "up");
   assert.match(view.render().text(), /Recent 4/);
+});
+
+function heights(root) {
+  return root.kids.filter((k) => typeof k !== "string").reduce((sum, k) => sum + (k.calls.find(([n]) => n === "h")?.[1][0] ?? 0), 0);
+}
+
+test("at any app zoom the popup fills its share of the window and its footer stays in view", async () => {
+  for (const zoom of [1, 1.25, 0.9]) {
+    const state = app({ answers: agentsAt([AGENT("t1", "idle", 1)]) });
+    state.settings = { zoom };
+    const { view, c } = await open(state);
+    assert.ok(heights(view.render()) * zoom > 2000, "it first asks for more than the window has");
+    view.render().find("omnisearch").handler("on_size_change")({ width: 1588, height: 951 }, c);
+    assert.ok(Math.abs(heights(view.render()) * zoom - 951) < 1, `at zoom ${zoom} its parts add up to the 951px it got`);
+  }
 });

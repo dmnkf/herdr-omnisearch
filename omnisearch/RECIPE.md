@@ -66,11 +66,11 @@ This file is the brief: enough to build OmniSearch from an empty folder. The fil
   - Sessions rows are `{ kind: "session", id, agent, session_id, title, space_name, updated, snippet, folder, argv, address, running }`. `argv` is the resume command. `running` is where it runs now, shaped like a terminal row (`frontend`, `address`, `space`, `tab`, `title`, `agent`, `space_name`, `socket`, `mirror`), or null. `address` is the app terminal to focus for it (its own, or the mirror of its TUI pane), or null; an older OmniSearch sends only `address`.
   - The `--running` check answers with one such row, or none.
 - **Addresses** from another machine are used as `<machine>/<id>` for terminals, tabs and spaces. A session's space is found among `spaces()` with the same `machine` whose `folder` is the session's, or whose tab has a pane (`panes()`) there.
-- **Herdr functions:** `exec`, `knownAgents`, `machines`, `spaces`, `panes`, `agents`, `focused`, `run`, `notify`, `theme`, `props` and `closeOverlay`.
+- **Herdr functions:** `exec`, `knownAgents`, `machines`, `spaces`, `panes`, `agents`, `focused`, `run`, `notify`, `theme`, `props`, `settings` and `closeOverlay`.
 - **Tab:** the app binds Tab to moving focus, and its binding runs before a mod's key handler. So `init` calls `cx.bind_keys([{ keystroke: "tab", action: "omnisearch_mode", context: "OmniSearch" }])`, and the root has `.key_context("OmniSearch").on_action("omnisearch_mode", …)`. Being deeper in, that binding wins. The `win98` menu mod does the same for Escape.
 - **UI:**
   - `InputState` and `Input` from `gpui-base` for the field, `TextView.markdown` for an agent's messages, and a `ScrollHandle` on the conversation's `overflow_y_scroll` area, whose `scroll_to_item` opens it at the right message.
-  - A focus-tracked root `v_flex` that takes Escape, arrows and page keys before the field does, and Tab too when the key binding is gone. Its `on_size_change` gives the popup's size; the list's width and height and the preview's height come from it.
+  - A focus-tracked root `v_flex` that takes Escape, arrows and page keys before the field does, and Tab too when the key binding is gone. Its `on_size_change` gives the popup's size, divided by the app's zoom; the list's width and height and the preview's height come from it.
   - The shipped `mods/workspace-chrome/search.svg`, `spinner.svg` and `layers.svg`, and each agent's icon from `knownAgents()` (`icons/<agent>.svg` when it isn't listed).
   - Every section header and row is placed absolutely at its running top minus the scroll, so no stack drifts. The list remembers which selection it last scrolled to, so a render that keeps the selection leaves the scroll alone. A wheel event's `delta` is already in pixels. The screen box's `on_size_change` decides how many 16px lines it shows.
   - Highlighted words in the Match block are one element per word in a wrapping row, so a match gets a real tinted background; `line_height` takes `"18px"` and `"16px"` strings, because a bare number is a multiple of the font size.
@@ -97,7 +97,8 @@ This file is the brief: enough to build OmniSearch from an empty folder. The fil
 - `exec` gives up after 30 s, and herdr-core runs at most 16 at once per machine. A search takes about 40 ms and a refresh about 55 ms, plus the trip to the machine.
 - A background catalog refresh started through `hc exec` must drop `HC_SCOPE`, or herdr-core ends it with the command that started it.
 - Ctrl+Shift+F is taken away from terminal programs. Pick another key in `keys.json` if one needs it.
-- With the app's zoom other than 100%, the popup's footer can be cut off: `on_size_change` measures in different units than the sizes the mod sets. Dividing the measured size by the zoom isn't a fix: the popup then follows its content's height and can shrink. A fresh build should size the body with flex and use the measured size only for the list's scroll math.
+- `on_size_change` measures in window pixels, while every size a mod sets is scaled by the app's zoom (`settings().zoom`). Divide what it measures by the zoom before using it, or at any zoom but 100% the body comes out too tall and the footer is cut off.
+- A popup is as tall as what it holds, up to its share of the window, so a height taken from its own measurement never grows. The view starts out asking for 4000px, which makes the popup take its whole share, and the first measurement then fits the body to it. It doesn't grow while open when the window does; it fits again on the next open.
 - Shift+Enter closes the TUI pane before starting the session in the app. A session whose process outlives its pane for more than 10 s stays closed, and the toast says so.
 
 ## Done when

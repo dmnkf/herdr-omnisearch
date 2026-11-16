@@ -13,3 +13,4 @@ export const theme = () => new Proxy({}, { get: (_t, name) => (name === "missing
 export const props = () => ({ overlay: "o1" });
 export const closeOverlay = (id) => (h().closed.push(id), null);
 export const focused = () => h().focused ?? null;
+export const settings = () => h().settings ?? {};

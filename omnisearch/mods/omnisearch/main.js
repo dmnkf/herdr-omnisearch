@@ -6,7 +6,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView, ScrollHandle } from "gpui-base";
-import { exec, knownAgents, machines, panes, agents, spaces, focused, run, notify, theme, props, closeOverlay } from "herdr";
+import { exec, knownAgents, machines, panes, agents, spaces, focused, run, notify, theme, props, closeOverlay, settings } from "herdr";
 
 const CLI = "herdr-omnisearch";
 const INSTALL = "uv tool install git+https://github.com/dmnkf/herdr-omnisearch";
@@ -31,6 +31,12 @@ const URGENCY = { blocked: 0, working: 1, done: 2, idle: 3 };
 const NOISE = /[─-▟⠀-⣿-⎿⏺○-◓●•›❯✳-✽✢-✧⚙]/g;
 
 // Remote ids carry their machine: `vps/t7`.
+// Sizes are measured in window pixels, while the sizes a mod sets are scaled by the app's zoom.
+function unzoomed(size) {
+  const zoom = Number(settings()?.zoom) || 1;
+  return { width: size.width / zoom, height: size.height / zoom };
+}
+
 const qualify = (machine, id) => (machine && id ? `${machine}/${id}` : id);
 
 function ago(seconds) {
@@ -232,7 +238,9 @@ export default class OmniSearch extends View {
     this.screens = new Map();
     // Each selected session's messages, as the catalog has them, for the words searched.
     this.conversations = new Map();
-    this.size = { width: 1400, height: 800 };
+    // The popup is as tall as what it holds, up to its share of the window. Asking for more than any
+    // window has makes it take that whole share; the first measurement then fits the body to it.
+    this.size = { width: 1400, height: 4000 };
     this.conversationScroll = ScrollHandle.new();
     this.conversationShown = null;
     this.revealed = null;
@@ -780,7 +788,7 @@ export default class OmniSearch extends View {
                 .px(6)
                 .py(8)
                 .on_size_change((size, cx) => {
-                  const rows = Math.max(4, Math.floor((size.height - 16) / SCREEN_LINE_H));
+                  const rows = Math.max(4, Math.floor((unzoomed(size).height - 16) / SCREEN_LINE_H));
                   if (rows !== this.screenRows) {
                     this.screenRows = rows;
                     cx.notify();
@@ -975,8 +983,9 @@ export default class OmniSearch extends View {
       .track_focus(this.handle)
       .size_full()
       .on_size_change((size, cx) => {
-        if (size.width !== this.size.width || size.height !== this.size.height) {
-          this.size = size;
+        const { width, height } = unzoomed(size);
+        if (Math.abs(width - this.size.width) > 0.5 || Math.abs(height - this.size.height) > 0.5) {
+          this.size = { width, height };
           cx.notify();
         }
       })
