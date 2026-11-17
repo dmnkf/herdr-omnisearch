@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.17.4 - 2026-11-17
+
+- Search words match whole words. "ai" used to match inside "said", "main" and
+  "training", so unrelated agents ranked as name matches and every snippet lit
+  up in the middle of words. A word now counts only where a word starts, so
+  "ai" finds `AI`, `AI_Config` and "Ryzen AI". Rows that match only inside
+  other words come last, with nothing highlighted.
+- When results come from more than one machine, a Best match section comes
+  first with the agents named like your search, the exact name first. Typing a
+  workspace's name and pressing Enter goes there, whichever machine it is on.
+- "Said earlier in this session" is no longer highlighted as if it matched.
+- Copy the mod's `main.js` into the app again.
+
 ## 0.17.3 - 2026-11-17
 
 - Recent follows the app. It used OmniSearch's own status, where an agent
