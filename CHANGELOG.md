@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.3 - 2026-11-17
+
+- Recent follows the app. It used OmniSearch's own status, where an agent
+  that finished stays "done" until it runs again, and the session catalog's
+  times, which lag by hours. So the same agents that finished days ago stayed
+  on top. Recent, the status marks and the order of the list now use the
+  app's live view of each agent: "done" turns "idle" once you have looked at
+  it, and agents are ordered by when they last changed. Recent rows no longer
+  show the catalog's age.
+- Copy the mod's `main.js` into the app again.
+
 ## 0.17.2 - 2026-11-16
 
 - Every result says why it is listed. While you search, the Herdr app's
