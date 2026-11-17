@@ -461,7 +461,7 @@ export default class OmniSearch extends View {
     return this.targets()
       .map((machine) => {
         let rows = this.found.get(machine) ?? [];
-        if (browsing) rows = [...rows].sort((a, b) => (URGENCY[a.status] ?? 4) - (URGENCY[b.status] ?? 4));
+        if (browsing) rows = [...rows].sort((a, b) => (URGENCY[this.statusOf(a)] ?? 4) - (URGENCY[this.statusOf(b)] ?? 4));
         return { id: machine ?? "", machine, title: machine ?? "This computer", rows };
       })
       .filter((s) => s.rows.length);
@@ -482,10 +482,28 @@ export default class OmniSearch extends View {
   suggestions() {
     if (this.mode !== "live" || this.words().length) return [];
     const here = focused()?.terminal;
-    const urgency = (i) => ({ blocked: 0, done: 1 })[i.status] ?? 2;
+    const urgency = (i) => ({ blocked: 0, done: 1 })[this.statusOf(i)] ?? 2;
+    // The app's change order is exact; a TUI pane, which it doesn't know, falls back to the catalog's time.
+    const recency = (i) => this.live(i)?.seq ?? -1;
     const others = this.list().filter((i) => i.kind === "terminal" && qualify(i.machine, i.address) !== here && (!i.mirror || qualify(i.machine, i.mirror) !== here));
     if (others.length < 3) return [];
-    return [...others].sort((a, b) => urgency(a) - urgency(b) || (b.active || 0) - (a.active || 0)).slice(0, SUGGESTIONS);
+    return [...others].sort((a, b) => urgency(a) - urgency(b) || recency(b) - recency(a) || (b.active || 0) - (a.active || 0)).slice(0, SUGGESTIONS);
+  }
+
+  // The app's own view of an agent terminal, live: its status, where "done" turns "idle" once the
+  // person has looked, and its change order. OmniSearch reports herdr-core's status, where done stays done.
+  live(item) {
+    if (item.kind !== "terminal") return null;
+    // One read of the app's agents per moment: sorting asks for them hundreds of times.
+    if (!this.agentsRead || Date.now() - this.agentsRead.at > 250) {
+      this.agentsRead = { at: Date.now(), byAddress: new Map(agents().map((a) => [a.address, a])) };
+    }
+    const { byAddress } = this.agentsRead;
+    return byAddress.get(qualify(item.machine, item.address)) ?? (item.mirror ? byAddress.get(qualify(item.machine, item.mirror)) : null) ?? null;
+  }
+
+  statusOf(item) {
+    return this.live(item)?.status ?? item.status;
   }
 
   order() {
@@ -687,9 +705,10 @@ export default class OmniSearch extends View {
       const running = item.running ?? item.address;
       return running ? div().size(6).mx(3).flex_none().rounded(3).bg(t.working) : null;
     }
-    if (item.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
-    if (item.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
-    if (item.status === "done") return div().size(6).mx(3).flex_none().rounded(3).bg(t.done);
+    const status = this.statusOf(item);
+    if (status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
+    if (status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
+    if (status === "done") return div().size(6).mx(3).flex_none().rounded(3).bg(t.done);
     return null;
   }
 
@@ -718,7 +737,7 @@ export default class OmniSearch extends View {
     let suffix = "";
     if (item.kind === "space") suffix = "Space";
     else if (item.kind === "terminal") {
-      suffix = [recent ? item.machine : "", item.frontend === "tui" && !item.mirror ? "TUI" : "", recent && item.active ? ago(item.active) : ""].filter(Boolean).join(" · ");
+      suffix = [recent ? item.machine : "", item.frontend === "tui" && !item.mirror ? "TUI" : ""].filter(Boolean).join(" · ");
     } else {
       const running = item.running ?? (item.address ? { frontend: "core" } : null);
       const inTui = running?.frontend === "tui" && !running.mirror;
@@ -771,7 +790,7 @@ export default class OmniSearch extends View {
       meta.push("Space");
     } else if (item.kind === "terminal") {
       title = item.title || item.address;
-      meta.push(item.spaceName, item.frontend === "tui" ? (item.mirror ? "TUI, shown here" : "in the TUI") : "in the app", item.status);
+      meta.push(item.spaceName, item.frontend === "tui" ? (item.mirror ? "TUI, shown here" : "in the TUI") : "in the app", this.statusOf(item));
     } else {
       title = item.title || item.spaceName || item.session_id;
       const running = item.running ?? item.address;

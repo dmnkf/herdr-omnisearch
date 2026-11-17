@@ -691,3 +691,19 @@ test("a title Codex cut short loses its folder tail too", async () => {
   assert.match(text, /booking › Re-review the fix /);
   assert.ok(!text.includes("| 2026"));
 });
+
+test("Recent follows the app: an agent you looked at is no longer done, and the one that changed last comes first", async () => {
+  const state = app({
+    answers: agentsAt([AGENT("t1", "done", 300), AGENT("t2", "done", 200), AGENT("t3", "working", 100), AGENT("t4", "idle", 400)]),
+    agents: [
+      { address: "t1", status: "idle", seq: 1 },
+      { address: "t2", status: "done", seq: 2 },
+      { address: "t3", status: "working", seq: 9 },
+      { address: "t4", status: "idle", seq: 5 },
+    ],
+  });
+  const { view } = await open(state);
+  assert.deepEqual(view.sections()[0].rows.map((r) => r.address), ["t2", "t3", "t4", "t1"],
+    "unseen first, then by the app's change order, not by a done that never clears or by catalog times");
+  assert.ok(!view.render().text().includes(" ago"), "no catalog age that lags behind");
+});
