@@ -19,6 +19,7 @@ const HEADER_H = 30;
 const CHROME_H = 92;
 const SUGGESTIONS = 4;
 const RECENT = "recent";
+const BEST = "best";
 // A selection names its section and its row: one agent can be in Recent and in its machine's section.
 const SEL = "\u0000";
 const SCREEN_LINE_H = 16;
@@ -61,29 +62,30 @@ function cleanSnippet(text) {
     .trim();
 }
 
-const hits = (text, words) => words.length > 0 && words.some((w) => text.toLowerCase().includes(w.toLowerCase()));
+// A query word counts where a word starts: "ai" finds `AI` and `AI_Config`, never "said" or "main".
+const escape = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const wordStart = (words) => new RegExp(`(?<![\\p{L}\\p{N}])(?:${words.map(escape).join("|")})`, "giu");
+const hits = (text, words) => words.length > 0 && wordStart(words).test(text || "");
+// Only inside words: what OmniSearch's fuzzier search matched, worth listing last and never highlighting.
+const looseHits = (text, words) => words.length > 0 && words.some((w) => (text || "").toLowerCase().includes(w.toLowerCase()));
 
 // Where a query word first shows up outside a file path: `/home/me/orchard/x.md` says where an
 // agent works, not what it said. -1 when every hit is in a path, or there is none.
 function textHitAt(text, words) {
+  if (!words.length) return -1;
   const lower = (text || "").toLowerCase();
-  let best = -1;
-  for (const w of words) {
-    const word = w.toLowerCase();
-    for (let i = lower.indexOf(word); i >= 0; i = lower.indexOf(word, i + 1)) {
-      const end = lower.indexOf(" ", i);
-      const token = lower.slice(lower.lastIndexOf(" ", i) + 1, end < 0 ? undefined : end);
-      if (token.includes("/")) continue;
-      if (best < 0 || i < best) best = i;
-      break;
-    }
+  for (const m of lower.matchAll(wordStart(words))) {
+    const end = lower.indexOf(" ", m.index);
+    const token = lower.slice(lower.lastIndexOf(" ", m.index) + 1, end < 0 ? undefined : end);
+    if (!token.includes("/")) return m.index;
   }
-  return best;
+  return -1;
 }
 
 // Why a row matched, in the order rows are listed: its name, what it shows or said, a path it shows
-// or said, something said earlier in its session, and last its folder alone.
-const REASONS = ["name", "text", "path", "earlier", "folder"];
+// or said, something said earlier in its session, its folder alone, and last a query word only
+// inside other words.
+const REASONS = ["name", "text", "path", "earlier", "folder", "loose"];
 
 function matchReason(item, words) {
   if (item.kind === "space") return "name";
@@ -92,6 +94,7 @@ function matchReason(item, words) {
   if (textHitAt(item.clean, words) >= 0) return "text";
   if (hits(item.clean, words) && !hits(item.cwd || item.folder || "", words)) return "path";
   if (hits(item.cwd || item.folder || "", words)) return "folder";
+  if (looseHits(`${space} ${session} ${item.clean} ${item.cwd || item.folder || ""}`, words)) return "loose";
   return "earlier";
 }
 
@@ -108,10 +111,9 @@ const clip = (text, max) => (text.length > max ? `${text.slice(0, max - 1).trimE
 
 // Starts the text shortly before its first match outside a path, so a one-line snippet always shows it.
 function aroundFirstHit(text, words, before = 40) {
-  const lower = text.toLowerCase();
   const inText = textHitAt(text, words);
-  const at = inText >= 0 ? inText : Math.min(...words.map((w) => lower.indexOf(w.toLowerCase())).filter((i) => i >= 0));
-  if (!Number.isFinite(at) || at <= before) return text;
+  const at = inText >= 0 ? inText : words.length ? (text.match(wordStart(words))?.index ?? -1) : -1;
+  if (at < 0 || at <= before) return text;
   const start = text.lastIndexOf(" ", at - before);
   return "…" + text.slice(start < 0 ? at - before : start + 1);
 }
@@ -196,8 +198,15 @@ function ansiRuns(t, line) {
 // The snippet split into plain and matched runs, for the query's words.
 function runs(text, words) {
   if (!words.length) return [[text, false]];
-  const pattern = new RegExp(`(${words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "gi");
-  return text.split(pattern).filter(Boolean).map((part) => [part, words.some((w) => w.toLowerCase() === part.toLowerCase())]);
+  const out = [];
+  let last = 0;
+  for (const m of text.matchAll(wordStart(words))) {
+    if (m.index > last) out.push([text.slice(last, m.index), false]);
+    out.push([m[0], true]);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push([text.slice(last), false]);
+  return out.length ? out : [[text, false]];
 }
 
 // A stable color per space name, from the theme's terminal palette, so one workspace's rows group at a glance.
@@ -468,9 +477,30 @@ export default class OmniSearch extends View {
   }
 
   // With nothing typed, a Recent section of the likeliest agents comes first.
+  // Recent and Best match repeat rows from the machine sections below them, so they are `repeat`.
   sections() {
+    const machines = this.machineSections();
     const recent = this.suggestions();
-    return [...(recent.length ? [{ id: RECENT, machine: null, title: "Recent", rows: recent }] : []), ...this.machineSections()];
+    const best = this.bestMatches(machines);
+    return [
+      ...(recent.length ? [{ id: RECENT, machine: null, title: "Recent", rows: recent, repeat: true }] : []),
+      ...(best.length ? [{ id: BEST, machine: null, title: "Best match", rows: best, repeat: true }] : []),
+      ...machines,
+    ];
+  }
+
+  // While searching across machines, the rows whose own name holds the words come first, exact names
+  // before the rest, so the space you named is never buried under another machine's section.
+  bestMatches(machines) {
+    const words = this.words();
+    if (!words.length || machines.length < 2) return [];
+    const query = words.join(" ").toLowerCase();
+    const exact = (i) => {
+      const { space, session } = naming(i);
+      return space.toLowerCase() === query || session.toLowerCase() === query ? 0 : 1;
+    };
+    const named = machines.flatMap((m) => m.rows.filter((r) => r.why === "name"));
+    return named.map((r, i) => [r, i]).sort((a, b) => exact(a[0]) - exact(b[0]) || a[1] - b[1]).map(([r]) => r).slice(0, SUGGESTIONS);
   }
 
   list() {
@@ -724,7 +754,7 @@ export default class OmniSearch extends View {
     if (!words.length) return this.mode === "sessions" && item.clean ? { text: item.clean } : null;
     if (showsText(item, words)) return { text: aroundFirstHit(item.clean, words).slice(0, 220) };
     if (item.why === "folder") return { text: `in ${shortPath(item.cwd || item.folder)}`, quiet: true };
-    if (item.why === "earlier" && item.session_id) return { text: "Said earlier in this session", quiet: true };
+    if (item.why === "earlier" && item.session_id) return { text: "Said earlier in this session", quiet: true, label: true };
     return this.mode === "sessions" && item.clean ? { text: item.clean } : null;
   }
 
@@ -773,7 +803,7 @@ export default class OmniSearch extends View {
             .whitespace_nowrap()
             .text_size(12)
             .when(Boolean(snippet?.quiet), (el) => el.italic())
-            .children(runs(snippet?.text ?? "", this.words()).map(([text, hit]) =>
+            .children(runs(snippet?.text ?? "", snippet?.label ? [] : this.words()).map(([text, hit]) =>
               div().flex_none().text_color(hit ? t.accent : t.dim).when(hit, (d) => d.font_medium()).child(text))),
         ),
       );
@@ -1038,7 +1068,7 @@ export default class OmniSearch extends View {
               .text_size(11.5)
               .child(div().text_color(t.foreground).font_semibold().child(l.header.title))
               .child(div().text_color(t.dim).child(String(l.header.rows.length)))
-          : this.row(t, l.item, l.sid + SEL + l.item.key === selectedKey, l.sid === RECENT).id(`os-${l.sid}-${l.item.key}`);
+          : this.row(t, l.item, l.sid + SEL + l.item.key === selectedKey, l.sid === RECENT || l.sid === BEST).id(`os-${l.sid}-${l.item.key}`);
         return el.absolute().left(0).right(0).top(l.top - this.scroll).h(l.h);
       });
 
@@ -1064,8 +1094,7 @@ export default class OmniSearch extends View {
         .child(div().text_color(t.dim).child(label));
 
     const busy = this.latest.size > 0 || Boolean(this.resuming);
-    // Recent repeats rows from the machine sections below it.
-    const listed = list.length - (sections.find((s) => s.id === RECENT)?.rows.length ?? 0);
+    const listed = list.length - sections.filter((s) => s.repeat).reduce((n, s) => n + s.rows.length, 0);
     const counted = listed ? `${listed} ${this.mode === "live" ? (listed === 1 ? "agent" : "agents") : listed === 1 ? "session" : "sessions"}` : "";
 
     return v_flex()

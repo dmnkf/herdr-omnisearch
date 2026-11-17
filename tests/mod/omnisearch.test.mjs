@@ -707,3 +707,40 @@ test("Recent follows the app: an agent you looked at is no longer done, and the 
     "unseen first, then by the app's change order, not by a done that never clears or by catalog times");
   assert.ok(!view.render().text().includes(" ago"), "no catalog age that lags behind");
 });
+
+test("a query word counts where a word starts, and a row matching only inside words comes last, unhighlighted", async () => {
+  const state = app({ answers: { here: ok([
+    { ...TERMINAL, address: "t1", space_name: "paint shop", title: "main", snippet: "we said to wait" },
+    { ...TERMINAL, address: "t2", title: "review", snippet: "the AI_Config flag and the AI reply" },
+  ]) } });
+  const { view, c } = await open(state);
+  await type(view, c, "ai");
+  assert.deepEqual(view.sections()[0].rows.map((r) => [r.address, r.why]), [["t2", "text"], ["t1", "loose"]]);
+  const row = view.render().find("os--|terminal|t1");
+  assert.ok(row, "the loose row is listed");
+  assert.ok(!/p\s+ai\s+n/.test(row.text()) && !/m\s+ai\s+n/.test(row.text()), "no hit is drawn inside a word");
+});
+
+test("searching across machines puts the rows named like the query first, the exact name before the rest", async () => {
+  const state = app({
+    machines: [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }],
+    answers: {
+      here: ok([{ ...TERMINAL, address: "t1", title: "review", snippet: "the AI reply" }, { ...TERMINAL, address: "t2", space_name: "AI tools", title: "lint" }]),
+      vps: ok([{ ...TERMINAL, address: "t3", space_name: "AI", title: "Ai" }]),
+    },
+  });
+  const { view, c } = await open(state);
+  await type(view, c, "ai");
+  const [best] = view.sections();
+  assert.equal(best.title, "Best match");
+  assert.deepEqual(best.rows.map((r) => r.address), ["t3", "t2"]);
+  assert.equal(view.current().address, "t3", "Enter goes to the workspace called AI");
+  assert.match(view.render().text(), /3 agents/, "the footer counts each agent once");
+});
+
+test("the said-earlier line is a label, never highlighted", async () => {
+  const state = app({ answers: { here: ok([{ ...TERMINAL, address: "t1", title: "chat", snippet: "nothing here", session_id: "s1" }]) } });
+  const { view, c } = await open(state);
+  await type(view, c, "said");
+  assert.match(view.render().text(), /Said earlier in this session/, "searching for said leaves the label whole");
+});
