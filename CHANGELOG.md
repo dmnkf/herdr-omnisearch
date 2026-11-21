@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.17.5 - 2026-11-21
+
+- Fix OmniSearch crashing on open. Each open asked every machine for its
+  agent launchers, and that call never gives up when a machine's connection
+  went stale after the Mac slept. The waits piled up until the app refused
+  OmniSearch anything new, and the popup crashed until the app restarted.
+  Each machine is now asked once, and every popup shares that answer.
+- Rows are named workspace › tab, as the app's tab bar names them: the tab's
+  name when you named it, else the agent's title, else "Tab 2". A row never
+  shows its workspace alone.
+- Searching a tab's or workspace's name finds the agent in it, even though
+  `herdr-omnisearch` never sees tab names.
+- Copy the mod's `main.js` into the app again.
+
 ## 0.17.4 - 2026-11-17
 
 - Search words match whole words. "ai" used to match inside "said", "main" and
