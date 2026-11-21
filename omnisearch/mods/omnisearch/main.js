@@ -89,12 +89,11 @@ const REASONS = ["name", "text", "path", "earlier", "folder", "loose"];
 
 function matchReason(item, words) {
   if (item.kind === "space") return "name";
-  const { space, session } = naming(item);
-  if (hits(`${space} ${session}`, words)) return "name";
+  if (hits(nameText(naming(item)), words)) return "name";
   if (textHitAt(item.clean, words) >= 0) return "text";
   if (hits(item.clean, words) && !hits(item.cwd || item.folder || "", words)) return "path";
   if (hits(item.cwd || item.folder || "", words)) return "folder";
-  if (looseHits(`${space} ${session} ${item.clean} ${item.cwd || item.folder || ""}`, words)) return "loose";
+  if (looseHits(`${nameText(naming(item))} ${item.clean} ${item.cwd || item.folder || ""}`, words)) return "loose";
   return "earlier";
 }
 
@@ -219,11 +218,13 @@ function spaceColor(t, name) {
   return palette[h % palette.length];
 }
 
-// What a row is called: its workspace, then its session. A title that already ends in its workspace
-// or its folder ("fix login | web") doesn't say it twice; a title that is only the workspace adds nothing.
+// What a row is called, as the app's tab bar calls it: its workspace, then its tab (the tab's name when
+// someone named it, else what the agent calls itself, else "Tab 2"), then the agent's title when a
+// named tab hides it.
 function naming(item) {
   const space = item.spaceName || "";
-  let session = item.kind === "space" ? "" : (item.title || "").trim();
+  if (item.kind === "space") return { space, tab: "", session: "" };
+  let session = (item.title || "").trim();
   // Codex ends its title with its folder's name; some titles end with their workspace.
   const folder = (item.cwd || item.folder || "").replace(/\/+$/, "").split("/").pop();
   // Codex cuts a long folder name short: `… | 20261116-dfi-booking-...`.
@@ -232,10 +233,14 @@ function naming(item) {
     const tail = session.slice(cut + 3).replace(/(\.\.\.|…)$/, "").trim();
     if (tail.length >= 3 && [space, folder].some((name) => name && name.toLowerCase().startsWith(tail.toLowerCase()))) session = session.slice(0, cut).trim();
   }
-  if (session.toLowerCase() === space.toLowerCase()) session = "";
-  if (!space && !session) session = item.address || item.session_id || "";
-  return { space, session };
+  const fallback = item.tabIndex ? `Tab ${item.tabIndex}` : item.address || item.session_id || "";
+  if (item.tabNamed && item.tabName) {
+    return { space, tab: item.tabName, session: session.toLowerCase() === item.tabName.toLowerCase() ? "" : session };
+  }
+  return { space, tab: session || fallback, session: "" };
 }
+
+const nameText = ({ space, tab, session }) => [space, tab, session].filter(Boolean).join(" ");
 
 // The agent's icon from the app's program table: a one-color glyph or a picture.
 function icon(p, size, color) {
@@ -255,6 +260,15 @@ function answer(r) {
   }
 }
 
+// The app's tab a row lives in: its name, whether someone named it, and its position. A herdr TUI pane's
+// tab isn't the app's, so it has none.
+function tabInfo(machine, r) {
+  if (r.kind !== "terminal" || r.frontend === "tui" || !r.tab) return {};
+  const space = spaces().find((s) => s.id === qualify(machine, r.space));
+  const tab = space?.tabs.find((t) => t.id === qualify(machine, r.tab));
+  return tab ? { tabName: tab.name, tabNamed: tab.named, tabIndex: tab.index } : {};
+}
+
 // A space gets its own row only when it matched without any of its terminals. While searching, rows
 // are ordered by why they matched, keeping OmniSearch's order within each reason.
 function items(machine, rows, words = []) {
@@ -271,10 +285,53 @@ function items(machine, rows, words = []) {
       machine,
       key: `${machine ?? ""}|${r.kind}|${r.address ?? r.id ?? r.space}`,
       spaceName: r.space_name ?? names[r.space] ?? r.name ?? "",
+      ...tabInfo(machine, r),
       clean: cleanSnippet(r.snippet),
     }))
     .map((item) => ({ ...item, why: words.length ? matchReason(item, words) : null }));
   return words.length ? listed.sort((a, b) => REASONS.indexOf(a.why) - REASONS.indexOf(b.why)) : listed;
+}
+
+// Each machine's agent launchers, shared by every popup this runtime opens. `knownAgents` has no
+// timeout: after the Mac sleeps, a machine's half-dead connection can leave it waiting forever. Asking
+// again on every open piled those waits up until the app refused the popup any new task (1024).
+// So a machine is asked at most once a minute, and never again while an ask is still out.
+const KNOWN = new Map();
+const KNOWN_FRESH_MS = 60_000;
+
+// Tests start each case from a runtime that has asked nothing yet.
+export function forgetMachines() {
+  KNOWN.clear();
+  PROGRAMS = null;
+}
+
+function askLaunchers(machine) {
+  const known = KNOWN.get(machine);
+  if (known?.pending) return known.pending;
+  if (known && Date.now() - known.at < KNOWN_FRESH_MS) return Promise.resolve(known.launchers);
+  const pending = knownAgents({ on: machine })
+    .then((list) => Object.fromEntries(list.filter((a) => a.installed).map((a) => [a.key, a.run])))
+    .catch(() => known?.launchers ?? {})
+    .then((launchers) => {
+      KNOWN.set(machine, { launchers, at: Date.now(), pending: null });
+      return launchers;
+    });
+  KNOWN.set(machine, { launchers: known?.launchers ?? {}, at: known?.at ?? 0, pending });
+  return pending;
+}
+
+// This computer's program table, for icons: the same one-at-a-time rule.
+let PROGRAMS = null;
+function askPrograms() {
+  if (PROGRAMS?.pending) return PROGRAMS.pending;
+  if (PROGRAMS && Date.now() - PROGRAMS.at < KNOWN_FRESH_MS) return Promise.resolve(PROGRAMS.list);
+  const previous = PROGRAMS?.list ?? [];
+  const pending = knownAgents().catch(() => previous).then((list) => {
+    PROGRAMS = { list, at: Date.now(), pending: null };
+    return list;
+  });
+  PROGRAMS = { list: previous, at: PROGRAMS?.at ?? 0, pending };
+  return pending;
 }
 
 export default class OmniSearch extends View {
@@ -289,6 +346,9 @@ export default class OmniSearch extends View {
     this.latest = new Map();
     this.missing = new Set();
     this.found = new Map();
+    // Every live agent on each machine, unsearched: the app knows tab names OmniSearch never sees, so a
+    // search also lists the agents whose workspace or tab is named like it.
+    this.everyone = new Map();
     this.errors = new Map();
     this.refreshErrors = new Map();
     this.launchers = new Map();
@@ -323,7 +383,7 @@ export default class OmniSearch extends View {
     } catch {}
     cx.spawn(async (cx) => {
       try {
-        for (const p of await knownAgents()) this.programs.set(p.key, p);
+        for (const p of await askPrograms()) this.programs.set(p.key, p);
       } catch {}
       cx.notify();
     });
@@ -337,13 +397,8 @@ export default class OmniSearch extends View {
     if (!this.launchers.has(machine)) {
       let settle;
       this.launchers.set(machine, new Promise((resolve) => (settle = resolve)));
-      cx.timer.after(LAUNCHERS_WAIT_MS, () => settle({}));
-      cx.spawn(async () => {
-        let known = [];
-        try {
-          known = await knownAgents({ on: machine });
-        } catch {}
-        const launchers = Object.fromEntries(known.filter((a) => a.installed).map((a) => [a.key, a.run]));
+      cx.timer.after(LAUNCHERS_WAIT_MS, () => settle(KNOWN.get(machine)?.launchers ?? {}));
+      askLaunchers(machine).then((launchers) => {
         settle(launchers);
         // Also an answer that came after the wait gave up, for the next resume.
         this.launchers.set(machine, Promise.resolve(launchers));
@@ -358,7 +413,9 @@ export default class OmniSearch extends View {
     return launcher && item.argv[0] === item.agent ? [...launcher, ...item.argv.slice(1)] : item.argv;
   }
 
+  // The app calls this when the popup closes, and so does Esc.
   close() {
+    this.closed = true;
     closeOverlay(props().overlay);
   }
 
@@ -379,8 +436,32 @@ export default class OmniSearch extends View {
           this.refreshErrors.set(machine, `refresh failed: ${e?.message ?? e}`);
         }
         this.search(cx, machine);
+        this.loadEveryone(cx, machine);
       });
+      this.loadEveryone(cx, machine);
     }
+  }
+
+  loadEveryone(cx, machine) {
+    if (this.closed) return;
+    cx.spawn(async (cx) => {
+      try {
+        const found = answer(await exec(CLI, ["app-search", "--limit", "500", "--"], { on: machine }));
+        if (!found.error) this.everyone.set(machine, items(machine, found.rows).filter((r) => r.kind === "terminal"));
+      } catch {}
+      cx.notify();
+    });
+  }
+
+  // A live search's rows, plus the agents it missed whose workspace or tab is named like the words.
+  withNamed(machine, rows) {
+    const words = this.words();
+    if (this.mode !== "live" || !words.length) return rows;
+    const listed = new Set(rows.map((r) => r.key));
+    const named = (this.everyone.get(machine) ?? [])
+      .filter((r) => !listed.has(r.key) && hits(nameText(naming(r)), words))
+      .map((r) => ({ ...r, why: "name" }));
+    return named.length ? [...named, ...rows].sort((a, b) => REASONS.indexOf(a.why) - REASONS.indexOf(b.why)) : rows;
   }
 
   schedule(cx) {
@@ -422,7 +503,7 @@ export default class OmniSearch extends View {
   // Reads what the selected row shows once it is chosen, and again every few seconds while it stays chosen:
   // its conversation when the session is known, else the terminal's screen.
   watchPreview(cx) {
-    if (this.previewing) return;
+    if (this.previewing || this.closed) return;
     const item = this.current();
     if (!item) return;
     const conversation = item.session_id ? this.conversations.get(item.key) : null;
@@ -469,7 +550,7 @@ export default class OmniSearch extends View {
     const browsing = this.mode === "live" && !this.words().length;
     return this.targets()
       .map((machine) => {
-        let rows = this.found.get(machine) ?? [];
+        let rows = this.withNamed(machine, this.found.get(machine) ?? []);
         if (browsing) rows = [...rows].sort((a, b) => (URGENCY[this.statusOf(a)] ?? 4) - (URGENCY[this.statusOf(b)] ?? 4));
         return { id: machine ?? "", machine, title: machine ?? "This computer", rows };
       })
@@ -496,8 +577,7 @@ export default class OmniSearch extends View {
     if (!words.length || machines.length < 2) return [];
     const query = words.join(" ").toLowerCase();
     const exact = (i) => {
-      const { space, session } = naming(i);
-      return space.toLowerCase() === query || session.toLowerCase() === query ? 0 : 1;
+      return Object.values(naming(i)).some((part) => part.toLowerCase() === query) ? 0 : 1;
     };
     const named = machines.flatMap((m) => m.rows.filter((r) => r.why === "name"));
     return named.map((r, i) => [r, i]).sort((a, b) => exact(a[0]) - exact(b[0]) || a[1] - b[1]).map(([r]) => r).slice(0, SUGGESTIONS);
@@ -763,7 +843,6 @@ export default class OmniSearch extends View {
   }
 
   row(t, item, selected, recent = false) {
-    const { space, session } = naming(item);
     let suffix = "";
     if (item.kind === "space") suffix = "Space";
     else if (item.kind === "terminal") {
@@ -791,7 +870,7 @@ export default class OmniSearch extends View {
           .gap(10)
           .items_center()
           .child(item.kind === "space" ? svg("mods/workspace-chrome/layers.svg").size(16).flex_none().text_color(t.muted) : icon(this.program(item.agent), 16, t.foreground))
-          .child(this.name(t, space, session, 13.5, this.words()))
+          .child(this.name(t, naming(item), 13.5, this.words()))
           .when(Boolean(status), (el) => el.child(status))
           .when(Boolean(suffix), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(suffix))),
       )
@@ -850,7 +929,7 @@ export default class OmniSearch extends View {
               .gap(9)
               .items_center()
               .child(item.kind === "space" ? svg("mods/workspace-chrome/layers.svg").size(18).flex_none().text_color(t.muted) : icon(this.program(item.agent), 18, t.foreground))
-              .child(this.name(t, naming(item).space, naming(item).session, 14, words)),
+              .child(this.name(t, naming(item), 14, words)),
           )
           .child(
             h_flex()
@@ -984,12 +1063,12 @@ export default class OmniSearch extends View {
   // Workspace › session. A long workspace name is clipped here rather than by layout, so no gap opens
   // before the separator; `›` because workspace names often hold a `/` of their own. Query words are
   // in the accent color.
-  name(t, space, session, size, words = []) {
+  name(t, { space, tab, session }, size, words = []) {
     const part = (text, color) =>
       hits(text, words)
         ? h_flex().children(runs(text, words).map(([run, hit]) => div().flex_none().text_color(hit ? t.accent : color).child(run)))
         : text;
-    const shown = session ? clip(space, 34) : space;
+    const sep = () => div().flex_none().text_color(t.dim).child("›");
     return h_flex()
       .flex_1()
       .min_w(0)
@@ -997,9 +1076,10 @@ export default class OmniSearch extends View {
       .text_size(size)
       .whitespace_nowrap()
       .overflow_hidden()
-      .when(Boolean(space), (el) => el.child(div().flex_none().font_medium().text_color(spaceColor(t, space)).child(part(shown, spaceColor(t, space)))))
-      .when(Boolean(space && session), (el) => el.child(div().flex_none().text_color(t.dim).child("›")))
-      .when(Boolean(session), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(part(session, t.foreground))));
+      .when(Boolean(space), (el) => el.child(div().flex_none().font_medium().text_color(spaceColor(t, space)).child(part(tab ? clip(space, 34) : space, spaceColor(t, space)))))
+      .when(Boolean(space && tab), (el) => el.child(sep()))
+      .when(Boolean(tab), (el) => el.child(div().when(!session, (d) => d.flex_1().min_w(0).truncate()).when(Boolean(session), (d) => d.flex_none()).text_color(t.foreground).child(part(session ? clip(tab, 40) : tab, t.foreground))))
+      .when(Boolean(session), (el) => el.child(sep()).child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(part(session, t.muted))));
   }
 
   problems() {

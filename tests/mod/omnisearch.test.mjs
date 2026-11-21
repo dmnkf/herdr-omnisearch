@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { default: OmniSearch } = await import("../../omnisearch/mods/omnisearch/main.js");
+const { default: OmniSearch, forgetMachines } = await import("../../omnisearch/mods/omnisearch/main.js");
 
 function app({ machines = [{ name: null, layout: "ready" }], answers = {}, panes = [], agents = [], spaces = [], launchers = {} } = {}) {
   const state = {
@@ -26,6 +26,7 @@ function app({ machines = [{ name: null, layout: "ready" }], answers = {}, panes
     },
   };
   globalThis.__herdr = state;
+  forgetMachines();
   return state;
 }
 
@@ -93,7 +94,8 @@ test("opening searches every reachable machine, refreshes each, and searches aga
   });
   await open(state);
   const search = ["app-search", "--limit", "40", "--"];
-  assert.deepEqual(state.calls.map((call) => [call.on, call.args]), [
+  const everyone = ["app-search", "--limit", "500", "--"];
+  assert.deepEqual(state.calls.filter((call) => call.args[2] !== "500").map((call) => [call.on, call.args]), [
     [null, search],
     ["vps", search],
     [null, ["app-search", "--refresh", "--limit", "0"]],
@@ -101,6 +103,9 @@ test("opening searches every reachable machine, refreshes each, and searches aga
     [null, search],
     ["vps", search],
   ]);
+  const lists = state.calls.filter((call) => call.args[2] === "500").map((call) => [call.on, call.args]);
+  assert.deepEqual(lists, [[null, everyone], ["vps", everyone], [null, everyone], ["vps", everyone]],
+    "every agent is listed once on opening and again after each refresh, for tab-name matches");
 });
 
 test("a refresh that failed says why, even when the search after it answers", async () => {
@@ -120,7 +125,7 @@ test("a refresh that timed out says so, and the list still searches again", asyn
   });
   const { view } = await open(state);
   assert.match(view.render().text(), /fix login.*refresh failed: exec timed out after 30 s/);
-  assert.equal(state.calls.filter((call) => !call.args.includes("--refresh")).length, 2);
+  assert.equal(state.calls.filter((call) => !call.args.includes("--refresh") && call.args[2] !== "500").length, 2);
 });
 
 test("Tab is bound in the mod's own key context and switches to old sessions", async () => {
@@ -615,7 +620,7 @@ test("the footer counts each agent once, though Recent repeats them", async () =
   assert.ok(!view.render().text().includes("6 agents"));
 });
 
-test("rows are named workspace › session, without the workspace or folder said twice", async () => {
+test("rows are named workspace › tab, without the workspace or folder said twice in a title", async () => {
   const state = app({ answers: { here: ok([
     { ...TERMINAL, address: "t1", space_name: "web", title: "fix login | web" },
     { ...TERMINAL, address: "t2", agent: "codex", space_name: "infra", title: "Configure firewall rules | alex", cwd: "/Users/alex" },
@@ -626,8 +631,7 @@ test("rows are named workspace › session, without the workspace or folder said
   assert.match(text, /web › fix login /);
   assert.match(text, /infra › Configure firewall rules /);
   assert.ok(!text.includes("| alex") && !text.includes("| web"), "the tails are dropped");
-  assert.match(text, /icons\/claude\.svg AI /);
-  assert.ok(!/AI › Ai/.test(text), "a title that is only the workspace is not repeated");
+  assert.match(text, /icons\/claude\.svg AI › Ai /, "a row never shows its workspace alone");
 });
 
 test("the wheel scrolls the list by the pixels it reports, and later renders leave it there", async () => {
@@ -743,4 +747,51 @@ test("the said-earlier line is a label, never highlighted", async () => {
   const { view, c } = await open(state);
   await type(view, c, "said");
   assert.match(view.render().text(), /Said earlier in this session/, "searching for said leaves the label whole");
+});
+
+test("a named tab is shown between the workspace and the agent's title, and an untitled agent shows its tab", async () => {
+  const state = app({
+    machines: [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }],
+    answers: {
+      here: ok([{ ...TERMINAL, address: "t1", space: "sp1", tab: "tb1", space_name: "web", title: "fix login" }]),
+      vps: ok([{ ...TERMINAL, address: "t2", space: "sp2", tab: "tb2", space_name: "infra", title: "" }]),
+    },
+    spaces: [
+      { id: "sp1", machine: null, tabs: [{ id: "tb1", index: 1, name: "auth", named: true }] },
+      { id: "vps/sp2", machine: "vps", tabs: [{ id: "vps/tb2", index: 2, name: "2", named: false }] },
+    ],
+  });
+  const { view } = await open(state);
+  const text = view.render().text();
+  assert.match(text, /web › auth › fix login /);
+  assert.match(text, /infra › Tab 2 /, "a remote tab is found by its machine address");
+});
+
+test("an agent whose tab is named like the search is listed, though OmniSearch never sees tab names", async () => {
+  const dnd = { ...TERMINAL, address: "t9", space: "sp9", tab: "tb9", space_name: "~", title: "", snippet: "the dragon fight" };
+  const state = app({
+    answers: { here: (args) => ok(args.at(-1) === "--" ? [dnd] : []) },
+    spaces: [{ id: "sp9", machine: null, tabs: [{ id: "tb9", index: 1, name: "dnd", named: true }] }],
+  });
+  const { view, c } = await open(state);
+  await settle(c);
+  await type(view, c, "dnd");
+  assert.equal(view.current()?.address, "t9");
+  assert.equal(view.current().why, "name");
+  assert.match(view.render().text(), /~ › dnd/);
+});
+
+test("a machine whose agent list never answers is asked once, however often the popup opens", async () => {
+  const state = app({ machines: [{ name: null, layout: "ready" }, { name: "vps", layout: "ready" }], answers: { here: ok([]), vps: ok([]) } });
+  let asked = 0;
+  state.knownAgents = (options) => (options.on === "vps" ? (asked++, new Promise(() => {})) : Promise.resolve([]));
+  for (let i = 0; i < 5; i++) {
+    const view = new OmniSearch();
+    const c = cx();
+    view.init({}, c);
+    for (const fn of c.timers.splice(0)) fn(c);
+    await settle(c);
+    view.close();
+  }
+  assert.equal(asked, 1, "a wait that never ends is shared, not started again on each open");
 });
